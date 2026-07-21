@@ -3,6 +3,8 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod domain;
+pub mod input;
 
 pub use config::{
     AuthConfig, Config, ConfigDiagnostic, ConfigDiagnosticKind, ConfigLoadError, ConfigOverrides,

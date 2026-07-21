@@ -4,6 +4,7 @@ use x11rb::connection::RequestConnection;
 use x11rb::protocol::xproto::{ConnectionExt as _, MOTION_NOTIFY_EVENT, QueryPointerReply, Window};
 use x11rb::protocol::xtest::ConnectionExt as _;
 
+use crate::error::classify_reply_error;
 use crate::{Result, X11Error};
 
 fn validate_motion_request(x: i32, y: i32, delay_ms: u32) -> Result<(i16, i16)> {
@@ -41,7 +42,7 @@ where
         .query_pointer(root)
         .map_err(|error| X11Error::Connection(error.to_string()))?
         .reply()
-        .map_err(|error| X11Error::Reply(error.to_string()))
+        .map_err(classify_reply_error)
 }
 
 /// Send one absolute XTEST motion event and observe it with a same-connection
@@ -61,7 +62,7 @@ where
             .xtest_fake_input(MOTION_NOTIFY_EVENT, 0, delay_ms, root, root_x, root_y, 0)
             .map_err(|error| X11Error::Connection(error.to_string()))?
             .check()
-            .map_err(|error| X11Error::Reply(error.to_string()))?;
+            .map_err(classify_reply_error)?;
         query_pointer_barrier(connection, root)
     })
 }

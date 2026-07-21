@@ -9,6 +9,7 @@ mod barrier;
 pub mod capture;
 mod connect;
 mod error;
+pub mod input;
 pub mod keyboard;
 mod observe;
 

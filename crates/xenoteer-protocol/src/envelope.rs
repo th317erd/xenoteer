@@ -59,6 +59,11 @@ impl PointerMoveCommand {
         {
             return Err(EnvelopeValidationError::PointerDurationTooLong);
         }
+        if self.curve == PointerCurve::Instant
+            && self.duration_ms.is_some_and(|duration| duration != 0)
+        {
+            return Err(EnvelopeValidationError::InstantPointerDuration);
+        }
         Ok(())
     }
 }
@@ -187,6 +192,9 @@ pub enum EnvelopeValidationError {
     /// A pointer duration exceeds the protocol ceiling.
     #[error("pointer move duration exceeds protocol maximum")]
     PointerDurationTooLong,
+    /// Instant motion accepts only an omitted or zero duration.
+    #[error("instant pointer motion requires an omitted or zero duration")]
+    InstantPointerDuration,
     /// Public envelope identifiers must never use UUID nil.
     #[error("command envelope contains a nil identifier")]
     NilIdentifier,
@@ -222,6 +230,25 @@ mod tests {
         assert_eq!(
             rejected.validate(),
             Err(EnvelopeValidationError::PointerDurationTooLong)
+        );
+
+        for duration_ms in [None, Some(0)] {
+            let instant = PointerMoveCommand {
+                target: Point::new(1, 2),
+                duration_ms,
+                curve: PointerCurve::Instant,
+            };
+            assert_eq!(instant.validate(), Ok(()));
+        }
+
+        let rejected_instant = PointerMoveCommand {
+            target: Point::new(1, 2),
+            duration_ms: Some(1),
+            curve: PointerCurve::Instant,
+        };
+        assert_eq!(
+            rejected_instant.validate(),
+            Err(EnvelopeValidationError::InstantPointerDuration)
         );
     }
 

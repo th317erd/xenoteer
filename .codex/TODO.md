@@ -14,10 +14,10 @@ Plan: `plans/15-phased-implementation.md`
 
 ## Phase 1 — native physical input kernel
 
-- [ ] Core geometry/interpolation/state/effect algorithms and property tests
-- [ ] Dedicated XTEST input actor and cleanup/poison behavior
-- [ ] Keyboard mapping, physical text, chord/sequence behavior
-- [ ] Fixture/diagnostic conformance and phase verification
+- [x] Core geometry/interpolation/state/effect algorithms and property tests
+- [x] Dedicated XTEST input actor and cleanup/poison behavior
+- [x] Keyboard mapping, physical text, chord/sequence behavior
+- [x] Fixture/diagnostic conformance and phase verification
 
 ## Phase 2 — deterministic desktop container
 
@@ -31,7 +31,9 @@ Plan: `plans/15-phased-implementation.md`
 - [ ] Coordinator, lease, ledger, deadlines, generation, event hub
 - [ ] Authenticated HTTP/WebSocket protocol and limits
 - [ ] Managed application lifecycle
-- [ ] Raw input integration and black-box verification
+- [ ] Raw input integration, black-box verification, and enforcement that
+      temporary keyboard mappings require an exclusive controller lease plus
+      server-side view-only viewer authority
 
 ## Phase 4 — observation, windows, clipboard, capture, viewer
 

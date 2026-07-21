@@ -18,6 +18,9 @@ fast_image_resize = { version = "=6.0.0", default-features = false, features = [
 mio = { version = "=1.2.2", features = ["os-ext", "os-poll"] }
 png = { version = "=0.18.1", default-features = false }
 thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+xenoteer-core = { version = "=0.1.0", path = "../xenoteer-core" }
 xenoteer-protocol = { version = "=0.1.0", path = "../xenoteer-protocol" }
 x11rb = { version = "=0.14.0", default-features = false, features = [
   "composite",
@@ -33,7 +36,7 @@ x11rb = { version = "=0.14.0", default-features = false, features = [
 xkbcommon = { version = "=0.9.0", default-features = false, features = ["x11"], optional = true }
 
 [dev-dependencies]
-proptest = "=1.11.0"
+proptest.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 

@@ -1,5 +1,7 @@
 //! Typed errors produced by the X11 adapter.
 
+use x11rb::errors::ReplyError;
+
 /// Result alias for X11 adapter operations.
 pub type Result<T> = std::result::Result<T, X11Error>;
 
@@ -56,4 +58,32 @@ pub enum X11Error {
     /// A platform worker thread panicked.
     #[error("X11 platform worker panicked")]
     WorkerPanicked,
+}
+
+pub(crate) fn classify_reply_error(error: ReplyError) -> X11Error {
+    match error {
+        ReplyError::ConnectionError(error) => X11Error::Connection(error.to_string()),
+        ReplyError::X11Error(error) => X11Error::Reply(format!("{error:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use x11rb::errors::{ConnectionError, ReplyError};
+
+    use super::{X11Error, classify_reply_error};
+
+    #[test]
+    fn reply_connection_errors_remain_connection_failures() {
+        let error = ReplyError::ConnectionError(ConnectionError::IoError(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "test disconnect",
+        )));
+        assert!(matches!(
+            classify_reply_error(error),
+            X11Error::Connection(_)
+        ));
+    }
 }
