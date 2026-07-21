@@ -1,0 +1,97 @@
+# absolute pattern	class	component	license expression	license evidence	source evidence
+/etc/hostname	volatile-runtime	container-runtime	NOASSERTION	-	Docker runtime-generated mount
+/etc/hosts	volatile-runtime	container-runtime	NOASSERTION	-	Docker runtime-generated mount
+/etc/resolv.conf	volatile-runtime	container-runtime	NOASSERTION	-	Docker runtime-generated mount
+/.dockerenv	volatile-runtime	container-runtime	NOASSERTION	-	Docker runtime marker
+/etc/machine-id	generated-config	xenoteer-runtime	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE	Dockerfile
+/etc/apt/sources.list.d/xenoteer.sources	generated-config	xenoteer-runtime	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE	Dockerfile
+/etc/group	generated-config	passwd	package-specific	/usr/share/doc/passwd/copyright	Dockerfile groupadd
+/etc/group-	generated-config	passwd	package-specific	/usr/share/doc/passwd/copyright	Dockerfile groupadd
+/etc/gshadow	generated-config	passwd	package-specific	/usr/share/doc/passwd/copyright	Dockerfile groupadd
+/etc/gshadow-	generated-config	passwd	package-specific	/usr/share/doc/passwd/copyright	Dockerfile groupadd
+/etc/passwd	generated-config	passwd	package-specific	/usr/share/doc/passwd/copyright	Dockerfile useradd
+/etc/passwd-	generated-config	passwd	package-specific	/usr/share/doc/passwd/copyright	Dockerfile useradd
+/etc/shadow	generated-config	passwd	package-specific	/usr/share/doc/passwd/copyright	Dockerfile useradd
+/etc/shadow-	generated-config	passwd	package-specific	/usr/share/doc/passwd/copyright	Dockerfile useradd
+/etc/subgid	generated-config	passwd	package-specific	/usr/share/doc/passwd/copyright	useradd
+/etc/subgid-	generated-config	passwd	package-specific	/usr/share/doc/passwd/copyright	useradd
+/etc/subuid	generated-config	passwd	package-specific	/usr/share/doc/passwd/copyright	useradd
+/etc/subuid-	generated-config	passwd	package-specific	/usr/share/doc/passwd/copyright	useradd
+/etc/.pwd.lock	generated-state	passwd	package-specific	/usr/share/doc/passwd/copyright	useradd
+/etc/security/opasswd	generated-state	passwd	package-specific	/usr/share/doc/passwd/copyright	passwd database
+/etc/profile	generated-config	base-files	package-specific	/usr/share/doc/base-files/copyright	Debian base image
+/etc/fstab	generated-config	base-files	package-specific	/usr/share/doc/base-files/copyright	Debian base image
+/etc/motd	generated-config	base-files	package-specific	/usr/share/doc/base-files/copyright	Debian base image
+/etc/environment	generated-config	base-files	package-specific	/usr/share/doc/base-files/copyright	Debian base image
+/etc/mtab	generated-symlink	base-files	package-specific	/usr/share/doc/base-files/copyright	Debian base image
+/root/.profile	generated-config	base-files	package-specific	/usr/share/doc/base-files/copyright	Debian base image
+/root/.bashrc	generated-config	base-files	package-specific	/usr/share/doc/base-files/copyright	Debian base image
+/home/xenoteer/.profile	generated-config	base-files	package-specific	/usr/share/doc/base-files/copyright	useradd from Debian skel
+/home/xenoteer/.bash_logout	generated-config	base-files	package-specific	/usr/share/doc/base-files/copyright	useradd from Debian skel
+/home/xenoteer/.bashrc	generated-config	base-files	package-specific	/usr/share/doc/base-files/copyright	useradd from Debian skel
+/var/spool/mail	generated-symlink	base-files	package-specific	/usr/share/doc/base-files/copyright	Debian base image
+/var/log/wtmp	generated-log	base-files	package-specific	/usr/share/doc/base-files/copyright	Debian base image
+/var/log/lastlog	generated-log	base-files	package-specific	/usr/share/doc/base-files/copyright	Debian base image
+/var/log/btmp	generated-log	base-files	package-specific	/usr/share/doc/base-files/copyright	Debian base image
+/etc/nsswitch.conf	generated-config	libc-bin	package-specific	/usr/share/doc/libc-bin/copyright	libc maintainer scripts
+/etc/shells	generated-config	debianutils	package-specific	/usr/share/doc/debianutils/copyright	Debian shell registration
+/var/lib/shells.state	generated-state	debianutils	package-specific	/usr/share/doc/debianutils/copyright	Debian shell registration
+/etc/pam.d/common-*	generated-config	libpam-runtime	package-specific	/usr/share/doc/libpam-runtime/copyright	pam-auth-update
+/var/lib/pam/*	generated-state	libpam-runtime	package-specific	/usr/share/doc/libpam-runtime/copyright	pam-auth-update
+/etc/alternatives/*	generated-symlink	dpkg	package-specific	/usr/share/doc/dpkg/copyright	update-alternatives
+/var/lib/dpkg/alternatives/*	generated-state	dpkg	package-specific	/usr/share/doc/dpkg/copyright	update-alternatives
+/usr/bin/pager	generated-symlink	dpkg	package-specific	/usr/share/doc/dpkg/copyright	update-alternatives
+/usr/bin/awk	generated-symlink	dpkg	package-specific	/usr/share/doc/dpkg/copyright	update-alternatives
+/usr/bin/nawk	generated-symlink	dpkg	package-specific	/usr/share/doc/dpkg/copyright	update-alternatives
+/usr/bin/which	generated-symlink	dpkg	package-specific	/usr/share/doc/dpkg/copyright	update-alternatives
+/usr/lib/cpp	generated-symlink	dpkg	package-specific	/usr/share/doc/dpkg/copyright	update-alternatives
+/usr/sbin/rmt	generated-symlink	dpkg	package-specific	/usr/share/doc/dpkg/copyright	update-alternatives
+/etc/rc*.d/*	generated-symlink	init-system-helpers	package-specific	/usr/share/doc/init-system-helpers/copyright	update-rc.d
+/etc/systemd/system/timers.target.wants/*	generated-symlink	init-system-helpers	package-specific	/usr/share/doc/init-system-helpers/copyright	deb-systemd-helper
+/var/lib/systemd/deb-systemd-helper-enabled/*	generated-state	init-system-helpers	package-specific	/usr/share/doc/init-system-helpers/copyright	deb-systemd-helper
+/etc/dpkg/origins/default	generated-symlink	base-files	package-specific	/usr/share/doc/base-files/copyright	Debian base image
+/var/lib/dpkg/arch-native	generated-metadata	dpkg	package-specific	/usr/share/doc/dpkg/copyright	dpkg database
+/etc/dpkg/dpkg.cfg.d/docker*	base-image-config	official-debian-container	NOASSERTION	/usr/share/doc/xenoteer/sources.lock	pinned Debian base digest
+/etc/apt/apt.conf.d/docker*	base-image-config	official-debian-container	NOASSERTION	/usr/share/doc/xenoteer/sources.lock	pinned Debian base digest
+/usr/sbin/policy-rc.d	base-image-config	official-debian-container	NOASSERTION	/usr/share/doc/xenoteer/sources.lock	pinned Debian base digest
+/usr/local/man	base-image-config	official-debian-container	NOASSERTION	/usr/share/doc/xenoteer/sources.lock	pinned Debian base digest
+/etc/default/locale	generated-symlink	locales	package-specific	/usr/share/doc/locales/copyright	locale-gen
+/etc/locale.conf	generated-config	locales	package-specific	/usr/share/doc/locales/copyright	locale-gen
+/etc/locale.gen	generated-config	locales	package-specific	/usr/share/doc/locales/copyright	locale-gen
+/etc/localtime	generated-symlink	tzdata	package-specific	/usr/share/doc/tzdata/copyright	tzdata configuration
+/etc/fonts/conf.d/*	generated-symlink	fontconfig-config	package-specific	/usr/share/doc/fontconfig-config/copyright	fontconfig maintainer scripts
+/etc/ssl/certs/*	generated-data	ca-certificates	package-specific	/usr/share/doc/ca-certificates/copyright	update-ca-certificates
+/etc/ca-certificates.conf	generated-config	ca-certificates	package-specific	/usr/share/doc/ca-certificates/copyright	update-ca-certificates
+/var/lib/dbus/machine-id	generated-config	dbus	package-specific	/usr/share/doc/dbus/copyright	dbus machine-id setup
+/etc/ld.so.cache	generated-cache	libc-bin	package-specific	/usr/share/doc/libc-bin/copyright	ldconfig
+/usr/lib/locale/locale-archive	generated-data	locales	package-specific	/usr/share/doc/locales/copyright	locale-gen
+/var/cache/ldconfig/aux-cache	generated-cache	libc-bin	package-specific	/usr/share/doc/libc-bin/copyright	ldconfig
+/var/lib/apt/extended_states	generated-metadata	apt	package-specific	/usr/share/doc/apt/copyright	apt-get
+/var/log/apt/*	generated-log	apt	package-specific	/usr/share/doc/apt/copyright	apt-get
+/var/cache/apt/archives/lock	generated-cache	apt	package-specific	/usr/share/doc/apt/copyright	apt-get
+/var/cache/debconf/*	generated-cache	debconf	package-specific	/usr/share/doc/debconf/copyright	debconf maintainer scripts
+/run/adduser	generated-state	adduser	package-specific	/usr/share/doc/adduser/copyright	useradd/adduser lock
+/var/lib/dpkg/lock	generated-metadata	dpkg	package-specific	/usr/share/doc/dpkg/copyright	dpkg database
+/var/lib/dpkg/lock-frontend	generated-metadata	dpkg	package-specific	/usr/share/doc/dpkg/copyright	dpkg database
+/var/lib/dpkg/arch	generated-metadata	dpkg	package-specific	/usr/share/doc/dpkg/copyright	dpkg database
+/var/lib/dpkg/available	generated-metadata	dpkg	package-specific	/usr/share/doc/dpkg/copyright	dpkg database
+/var/lib/dpkg/cmethopt	generated-metadata	dpkg	package-specific	/usr/share/doc/dpkg/copyright	dpkg database
+/var/lib/dpkg/diversions	generated-metadata	dpkg	package-specific	/usr/share/doc/dpkg/copyright	dpkg database
+/var/lib/dpkg/diversions-old	generated-metadata	dpkg	package-specific	/usr/share/doc/dpkg/copyright	dpkg database
+/var/lib/dpkg/info/*	generated-metadata	dpkg	package-specific	/usr/share/doc/dpkg/copyright	dpkg database
+/var/lib/dpkg/status	generated-metadata	dpkg	package-specific	/usr/share/doc/dpkg/copyright	dpkg database
+/var/lib/dpkg/status-old	generated-metadata	dpkg	package-specific	/usr/share/doc/dpkg/copyright	dpkg database
+/var/lib/dpkg/statoverride	generated-metadata	dpkg	package-specific	/usr/share/doc/dpkg/copyright	dpkg database
+/var/lib/dpkg/statoverride-old	generated-metadata	dpkg	package-specific	/usr/share/doc/dpkg/copyright	dpkg database
+/var/lib/dpkg/triggers/*	generated-metadata	dpkg	package-specific	/usr/share/doc/dpkg/copyright	dpkg database
+/var/lib/dpkg/updates/*	generated-metadata	dpkg	package-specific	/usr/share/doc/dpkg/copyright	dpkg database
+/var/log/alternatives.log	generated-log	dpkg	package-specific	/usr/share/doc/dpkg/copyright	package installation
+/var/log/dpkg.log	generated-log	dpkg	package-specific	/usr/share/doc/dpkg/copyright	package installation
+/usr/share/doc/s6-overlay/COPYING	locked-third-party-evidence	s6-overlay-3.2.2.0	ISC	/usr/share/doc/s6-overlay/COPYING	/usr/share/doc/xenoteer/sources.lock
+/usr/share/doc/xenoteer/browser-spike-package-manifest.tsv	generated-metadata	browser-spike	NOASSERTION	/usr/share/doc/xenoteer/NOTICE	inventory-debian
+/usr/share/doc/xenoteer/cargo-components.spdx.json	generated-metadata	xenoteerd-cargo-closure	CC0-1.0	/usr/share/common-licenses/CC0-1.0	generate-cargo-manifest
+/usr/share/doc/xenoteer/cargo-components.tsv	generated-metadata	xenoteerd-cargo-closure	NOASSERTION	/usr/share/doc/xenoteer/NOTICE	generate-cargo-manifest
+/usr/share/doc/xenoteer/first-party-files.tsv	generated-metadata	xenoteer	NOASSERTION	/usr/share/doc/xenoteer/NOTICE	inventory-image-first-party
+/usr/share/doc/xenoteer/final-files.tsv	generated-metadata	xenoteer	NOASSERTION	/usr/share/doc/xenoteer/NOTICE	inventory-final-image
+/usr/share/doc/xenoteer/package-manifest.tsv	generated-metadata	debian-packages	NOASSERTION	/usr/share/doc/xenoteer/NOTICE	inventory-debian
+/usr/share/doc/xenoteer/s6-overlay-files.tsv	generated-metadata	s6-overlay-3.2.2.0	NOASSERTION	/usr/share/doc/xenoteer/NOTICE	generate-s6-manifest

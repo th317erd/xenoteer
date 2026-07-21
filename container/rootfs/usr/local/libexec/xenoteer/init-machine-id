@@ -1,0 +1,11 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+root=${CONTAINER_TEST_ROOT:-}
+target="$root/run/xenoteer/machine-id"
+if [ ! -s "$target" ]; then
+  umask 0333
+  dbus-uuidgen >"$target"
+fi
+chmod 0444 "$target"

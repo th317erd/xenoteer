@@ -1,0 +1,7 @@
+This directory is image-owned Xenoteer configuration.
+
+Phase 0 keeps runtime values in the explicit s6 environment directory generated
+at /run/xenoteer/env. Typed daemon values are stored as the exact value plus one
+terminator newline and consumed with `s6-envdir -f -L`; this preserves empty,
+embedded-newline, and trailing-newline values for the strict Rust loader. Future
+immutable desktop profiles belong here; secrets and mutable session state do not.

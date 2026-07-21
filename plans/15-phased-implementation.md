@@ -70,9 +70,14 @@ unknowns with small executable proofs before broad implementation.
 4. libxkbcommon model from the X server and one keycode mapping.
 5. Rust atspi/zbus Tokio connection to a minimal GTK fixture.
 6. X GetImage decode of color-bar fixture (24 depth/32 bpp case).
-7. x11vnc loopback view-only -> websockify -> pinned noVNC smoke.
-8. Chromium and QtWebEngine start under proposed non-root/container sandbox with
-   2 GiB `/dev/shm`; record host/runtime requirements.
+7. TigerVNC `X0tigervnc` loopback/server-view-only -> websockify -> pinned noVNC
+   smoke, including real WebSocket/RFB ServerInit, framebuffer, and attempted
+   key/pointer/clipboard effects.
+8. Chromium and QtWebEngine start non-root with a private 4 GiB `/dev/shm` and
+   the pinned Docker seccomp baseline extended only for `clone`, `setns`, and
+   `unshare`; audit renderer sandbox state and forbidden flags. Debian Chromium
+   150 injects rejected `--disable-dev-shm-usage` below 4,080,218,931 available
+   bytes.
 
 #### Test fixtures
 
@@ -86,8 +91,9 @@ unknowns with small executable proofs before broad implementation.
 - Exact stable direct dependency versions/features.
 - Observation/clipboard connection integration mechanism.
 - Pixel internal format and PNG/resize crates.
-- Chromium sandbox profile compatible with Docker defaults.
-- noVNC/websockify distribution mechanism and pinned versions.
+- Chromium sandbox profile is a machine-checked Docker-default baseline plus
+  only the three required user-namespace syscalls.
+- TigerVNC/noVNC/websockify distribution mechanism and pinned versions.
 - Actual s6 service definition conventions.
 
 ### Exit gate
@@ -174,7 +180,7 @@ browser/toolkit profiles.
 
 - Exact Debian package groups and package/source lock.
 - s6-rc graph: runtime paths, Xauthority, Xvfb, session D-Bus, AT-SPI, XFCE,
-  daemon, x11vnc, websockify.
+  daemon, `X0tigervnc`, websockify.
 - Readiness notification/probes and critical/optional restart policies.
 - Graceful reverse-order shutdown.
 
@@ -311,7 +317,8 @@ X11-native "xdotool whistles," and provide secure human viewing.
 
 #### Viewer
 
-- x11vnc locked server-side view-only/loopback.
+- TigerVNC `X0tigervnc` locked server-side view-only/loopback, with key,
+  pointer, resize, and both clipboard directions disabled.
 - websockify loopback and authenticated viewer gateway/tickets.
 - Pinned noVNC static UI, CSP/origin/input/clipboard/file-transfer disabled.
 - Viewer backend status/restart/conformance boundary.
@@ -439,7 +446,8 @@ artifacts, and release without hidden deployment questions.
 #### Runtime/security
 
 - Hardened read-only-root/tmpfs/cap-drop/seccomp/LSM profile finalized.
-- Browser sandbox status on supported hosts; no `--no-sandbox`.
+- Browser sandbox status on supported hosts; no `--no-sandbox` or
+  `--disable-dev-shm-usage`; private `/dev/shm` is at least 4 GiB.
 - Listener/auth/origin/proxy/token rotation/object authorization tests.
 - Path/process/output/regex/parser/DoS/redaction fault/fuzz matrix.
 - Secret canary scan and core dump/log/artifact policy.
@@ -450,7 +458,8 @@ artifacts, and release without hidden deployment questions.
 - Queue/budget/load tests and documented reference performance.
 - 24-hour desktop/browser/viewer/action soak; zero leak/zombie trend.
 - Graceful/forced shutdown at every effect stage.
-- x11vnc risk review and disable/replace switch tested.
+- TigerVNC risk review, effective view-only regression probe, and
+  disable/replace switch tested.
 
 #### Supply chain/legal
 
@@ -478,7 +487,8 @@ behavior has a recorded implementation decision.
 
 Order based on measured demand/risk:
 
-1. Replace/augment x11vnc with maintained native viewer/streamer.
+1. Evaluate a native viewer/streamer when measured latency, scale, or attack
+   surface justifies replacing the TigerVNC adapter.
 2. Explicit human takeover transaction (still no collaborative input).
 3. Multi-workspace and fixed multi-monitor profiles.
 4. OCR/image matching observation adapter.

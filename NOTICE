@@ -1,0 +1,56 @@
+Xenoteer notices
+
+First-party server, runtime, scripts, and documentation
+-------------------------------------------------------
+
+Unless a narrower package notice says otherwise, original Xenoteer code and
+documentation are licensed under the Business Source License 1.1 parameters in
+the repository root LICENSE. The Licensed Work and Change Date are stated there.
+
+Public protocol and SDK packages
+--------------------------------
+
+The following self-contained packages are Apache License 2.0 works and carry
+their own license and notice files. They are not relicensed under the root BSL:
+
+- crates/xenoteer-protocol/LICENSE and crates/xenoteer-protocol/NOTICE
+- crates/xenoteer-sdk/LICENSE and crates/xenoteer-sdk/NOTICE
+- schemas/LICENSE and schemas/NOTICE
+
+Container seccomp policy derivatives
+------------------------------------
+
+The following two policy files are Apache License 2.0 derivatives, not original
+Xenoteer BSL code:
+
+- `container/spikes/browser/docker-default-seccomp.json` is a canonicalized copy
+  of Moby's Docker Engine 29.1.3 default seccomp profile.
+- `container/spikes/browser/seccomp_profile.json` is that Moby profile plus the
+  three-syscall user-namespace rule copied from Playwright.
+
+The exact upstream revisions and artifact hashes are pinned in
+`container/locks/sources.lock`. Byte-exact upstream license and notice evidence
+is retained under `container/spikes/browser/licenses/moby/` and
+`container/spikes/browser/licenses/playwright/`. Both policy files and their
+evidence are classified as Apache-2.0 before the repository's broader
+`container/*` BSL rule.
+
+Third-party and container contents
+----------------------------------
+
+Debian, Rust/Cargo dependencies, s6-overlay, X.org, browsers, desktop software,
+noVNC, websockify, TigerVNC (`X0tigervnc`), fonts, and other third-party
+components retain their
+own copyright and license terms. Transport in a Xenoteer repository or image
+does not relicense those components.
+
+Phase-0 images place exact evidence under /usr/share/doc/xenoteer, including the
+Debian package/source manifest, first-party file manifest, final-file ownership
+manifest, Cargo component manifest, immutable source lock, and this notice.
+Repository source/SBOM scripts live under scripts/licenses. Risk-spike-specific
+version, license, and source decisions live under container/spikes.
+
+These manifests are provenance and license evidence. They are not, by
+themselves, a complete corresponding-source fulfillment bundle for a public
+binary release. Release automation must assemble and verify the source artifacts
+required by each exact shipped component before publication.

@@ -438,7 +438,8 @@ operations, not mirror every upstream call.
   boundaries.
 - Every external reference carries generation and stale behavior.
 - Every child task/thread is supervised and joined.
-- No normal handler calls shell, xdotool, x11vnc control, or raw X connection.
+- No normal handler calls shell, xdotool, viewer-adapter control, or a raw X
+  connection.
 - Fault tests prove actor death and connection loss transition readiness.
 - Unsafe Rust is absent initially or isolated/documented/audited if a dependency
   interface ultimately requires it.

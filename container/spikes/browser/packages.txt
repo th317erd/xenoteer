@@ -1,0 +1,6 @@
+# Direct spike inputs are exact-version pinned; transitive packages are frozen by
+# the 20260719T000000Z Debian snapshot inherited from the Phase-0 runtime image.
+chromium=150.0.7871.124-1~deb13u1
+chromium-sandbox=150.0.7871.124-1~deb13u1
+python3-pyqt6.qtwebengine=6.9.0-1
+python3-websocket=1.8.0-2

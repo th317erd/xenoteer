@@ -1,0 +1,114 @@
+name: Rust quality gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.97.1
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install native build headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libxkbcommon-dev libxkbcommon-x11-dev libxcb-xkb-dev
+      - run: cargo fmt --all --check
+      - name: Check standalone X11 fixture formatting
+        run: cargo fmt --manifest-path fixtures/x11/Cargo.toml --all --check
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Lint standalone X11 fixtures
+        run: cargo clippy --manifest-path fixtures/x11/Cargo.toml --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --locked
+      - name: Test standalone X11 fixtures
+        run: cargo test --manifest-path fixtures/x11/Cargo.toml --all-targets --locked
+      - run: cargo test --workspace --doc --locked
+      - run: cargo doc --workspace --no-deps --locked
+      - run: cargo run --locked -p xenoteer-protocol --bin generate-schemas -- --check
+
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          command: check
+          arguments: --all-features
+      - name: Check standalone X11 fixture dependencies
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          manifest-path: fixtures/x11/Cargo.toml
+          command: check
+          arguments: --all-features --locked
+
+  native-platform:
+    name: Native X11 and AT-SPI spikes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: native-platform
+      - name: Install native platform and static-gate dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            at-spi2-core \
+            dbus-x11 \
+            gir1.2-gtk-3.0 \
+            jq \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxcb-xkb-dev \
+            python3-gi \
+            ripgrep \
+            shellcheck \
+            x11-utils \
+            xauth \
+            xvfb
+      - name: Container and provenance static gates
+        run: scripts/container/test-static.sh
+      - name: Authenticated X11, XTEST, capture, and xkbcommon spikes
+        run: tests/platform/run-x11-spikes.sh
+      - name: Real GTK and AT-SPI spike
+        run: tests/platform/run-atspi-spike.sh
+      - name: Concurrent isolated-display regression
+        run: tests/platform/run-concurrent-spikes.sh
+
+  container-phase0:
+    name: Pinned Phase 0 container and risk spikes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install static-gate dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends jq ripgrep shellcheck
+      - name: Verify immutable inputs online
+        run: scripts/container/validate-locks.sh --online
+      - name: Build pinned Phase 0 runtime image
+        env:
+          XENOTEER_IMAGE: xenoteer:phase0
+        run: scripts/container/build.sh
+      - name: Exercise PID 1, health, shutdown, failure, and hardened profiles
+        run: sudo scripts/container/test-image.sh xenoteer:phase0
+      - name: Exercise real loopback view-only noVNC chain
+        run: sudo scripts/container/test-novnc-spike.sh
+      - name: Exercise non-root Chromium and QtWebEngine sandboxes
+        run: sudo scripts/container/test-browser-spike.sh xenoteer:phase0 xenoteer:browser-spike

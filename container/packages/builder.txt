@@ -1,0 +1,8 @@
+# Native build inputs only; none are copied into the runtime image directly.
+ca-certificates
+jq
+libatspi2.0-dev
+libdbus-1-dev
+libglib2.0-dev
+libxkbcommon-dev
+pkg-config

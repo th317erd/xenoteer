@@ -1,0 +1,8 @@
+Xenoteer Rust SDK
+Copyright 2026 AEOR Development
+
+This product includes software developed by AEOR Development.
+
+The Xenoteer Rust SDK and the Xenoteer protocol crate it exposes are licensed
+under the Apache License, Version 2.0. The Xenoteer server implementation is a
+separate work governed by the license at the repository root.

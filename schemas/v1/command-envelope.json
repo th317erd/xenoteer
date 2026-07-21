@@ -1,0 +1,236 @@
+{
+  "$defs": {
+    "Command": {
+      "description": "A version-one command body.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Probe command used by the Phase-0 composition skeleton.",
+          "properties": {
+            "type": {
+              "const": "desktop_probe",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Move the global physical pointer.",
+          "properties": {
+            "curve": {
+              "$ref": "#/$defs/PointerCurve",
+              "description": "Interpolation curve."
+            },
+            "duration_ms": {
+              "description": "Requested whole-path duration. Omission selects the configured default.",
+              "format": "uint32",
+              "maximum": 10000,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "target": {
+              "$ref": "#/$defs/Point",
+              "description": "Target root-physical coordinate."
+            },
+            "type": {
+              "const": "pointer_move",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "target",
+            "curve"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CommandId": {
+      "description": "Deduplicates one client-authored command.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ControlLeaseId": {
+      "description": "Identifies the current physical-input lease.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Point": {
+      "additionalProperties": false,
+      "description": "A signed two-dimensional point.",
+      "properties": {
+        "x": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "y": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "PointerCurve": {
+      "description": "Interpolation curve for a pointer movement.",
+      "oneOf": [
+        {
+          "const": "instant",
+          "description": "Move directly to the endpoint with no intermediate samples.",
+          "type": "string"
+        },
+        {
+          "const": "linear",
+          "description": "Use equally spaced samples.",
+          "type": "string"
+        },
+        {
+          "const": "smooth",
+          "description": "Use an ease-in/ease-out smoothstep curve.",
+          "type": "string"
+        }
+      ]
+    },
+    "ProtocolVersion": {
+      "additionalProperties": false,
+      "description": "A negotiated protocol major/minor pair.",
+      "properties": {
+        "major": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor"
+      ],
+      "type": "object"
+    },
+    "RequestId": {
+      "description": "Correlates one transport request and response.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Timestamp": {
+      "description": "A canonical RFC 3339 timestamp with an explicit UTC offset.",
+      "format": "date-time",
+      "type": "string"
+    },
+    "TracePolicy": {
+      "description": "The amount of trace detail requested by a client.",
+      "oneOf": [
+        {
+          "const": "normal",
+          "description": "Retain only normal audit metadata.",
+          "type": "string"
+        },
+        {
+          "const": "detailed",
+          "description": "Retain bounded diagnostic effect evidence.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A complete command submission envelope.",
+  "properties": {
+    "command": {
+      "$ref": "#/$defs/Command",
+      "description": "Typed operation."
+    },
+    "command_id": {
+      "$ref": "#/$defs/CommandId",
+      "description": "Caller-generated deduplication identifier."
+    },
+    "deadline": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Absolute UTC deadline."
+    },
+    "desktop_generation": {
+      "$ref": "#/$defs/DesktopGeneration",
+      "description": "Target desktop generation observed by the caller."
+    },
+    "desktop_id": {
+      "$ref": "#/$defs/DesktopId",
+      "description": "Target desktop."
+    },
+    "lease_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ControlLeaseId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Physical controller lease when required by the command."
+    },
+    "protocol_version": {
+      "$ref": "#/$defs/ProtocolVersion",
+      "description": "Requested protocol version."
+    },
+    "request_id": {
+      "$ref": "#/$defs/RequestId",
+      "description": "Transport request correlation identifier."
+    },
+    "trace_policy": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TracePolicy"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Requested trace detail."
+    }
+  },
+  "required": [
+    "protocol_version",
+    "request_id",
+    "command_id",
+    "desktop_id",
+    "desktop_generation",
+    "command"
+  ],
+  "title": "CommandEnvelope",
+  "type": "object"
+}

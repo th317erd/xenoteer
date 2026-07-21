@@ -37,7 +37,8 @@ are the boundary.
   viewable; obscured regions without backing store are undefined and the cursor
   is absent.
 - `window_surface`: future Composite redirected pixmap capture, capability-gated
-  and deferred until its effects on XFCE/x11vnc are proven.
+  and deferred until its effects on XFCE and the selected viewer adapter are
+  proven.
 
 Never call `window_visible` a full window screenshot. Never return cached pixels
 for an unmapped/minimized target as though they are current.
@@ -190,20 +191,28 @@ Events carry resource URLs/IDs when an explicit trace artifact was captured.
 
 ```text
 Xvfb :99
-  <- x11vnc on 127.0.0.1:5900, shared, forever, server-side view-only
+  <- TigerVNC X0tigervnc on 127.0.0.1:5900, shared, server-side view-only
   <- websockify on 127.0.0.1:6080
   <- authenticated Xenoteer viewer WebSocket gateway
   <- pinned noVNC static client under /viewer/
 ```
 
-x11vnc is useful and compatible but currently declares itself unmaintained. It
-is an adapter, not a core daemon dependency leaked into public APIs. Define a
-`ViewerBackend` supervision/config contract and conformance suite so it can be
-replaced with another RFB server or native streamer.
+The selected package is Debian `tigervnc-scraping-server`; its executable
+`X0tigervnc` scrapes the already-running Xvfb display rather than creating a
+second desktop. Phase-0 executable evidence with version
+`1.15.0+dfsg-2.1~deb13u1` completed RFB 3.8 ServerInit, an 800x600 raw
+framebuffer update, and an actual pinned noVNC canvas/screenshot. It also
+rejected real key, pointer, and clipboard attempts at the server; the real
+process command line separately proved desktop resize disabled.
+
+TigerVNC remains an adapter, not a core daemon dependency leaked into public
+APIs. Define a `ViewerBackend` supervision/config contract and conformance suite
+so it can be replaced with another RFB server or a native streamer.
 
 ### 6.2 Security boundary
 
-- X11 listens on Unix socket only; x11vnc and websockify bind container loopback.
+- X11 listens on a Unix socket only; `X0tigervnc` and websockify bind container
+  loopback.
 - Port 5900 and the raw websockify port are never Docker `EXPOSE`/published
   defaults.
 - The viewer gateway requires the same API authentication plus `viewer:read`.
@@ -211,8 +220,9 @@ replaced with another RFB server or native streamer.
   under the same origin to avoid mixed-content/certificate problems.
 - The RFB hop is local to the container. RFB/VNC password authentication is not
   treated as the external security boundary; external auth is at the gateway.
-- Server-side `viewonly` is mandatory. Disabling noVNC keyboard UI is defense in
-  depth, not enforcement.
+- Server-side `AcceptKeyEvents=0`, `AcceptPointerEvents=0`,
+  `AcceptSetDesktopSize=0`, `AcceptCutText=0`, and `SendCutText=0` are mandatory.
+  Disabling noVNC keyboard/clipboard UI is defense in depth, not enforcement.
 - Origin allowlist and short-lived, audience-bound viewer tickets prevent a URL
   from becoming a bearer session indefinitely.
 
@@ -226,7 +236,7 @@ per-session RFB credentials or a Unix-socket-capable backend.
 Pin a noVNC release and serve immutable hashed assets. Configure:
 
 - view-only at client and server;
-- local cursor rendering tested against x11vnc XFIXES cursor updates;
+- local cursor rendering tested against TigerVNC cursor updates;
 - resize scaling in browser only—never request desktop RandR resize in release
   one;
 - clipboard UI disabled by default because it bypasses Xenoteer's clipboard
@@ -238,23 +248,36 @@ Pin a noVNC release and serve immutable hashed assets. Configure:
 Viewer tickets identify desktop generation. A restarted container/desktop forces
 a new ticket; noVNC must not show a stale framebuffer as live.
 
-### 6.4 x11vnc settings and gotchas
+### 6.4 X0tigervnc settings and gotchas
 
 Required semantic settings (exact supported flags verified against pinned build):
 
-- fixed display/auth file;
-- loopback bind and fixed internal RFB port;
-- `viewonly`, `forever`, and shared viewers;
-- no file transfer, remote command/control, desktop resize, or external HTTP
-  listener;
-- X DAMAGE enabled normally;
-- XFIXES cursor support enabled;
-- bounded client count and disconnect cleanup.
+- `-display :99` with the same private Xauthority environment as the desktop;
+- `-rfbport 5900`, `-interface 127.0.0.1`, and `-localhost=1`;
+- `-SecurityTypes=None` only on inaccessible same-container loopback behind the
+  authenticated gateway;
+- `-AlwaysShared=1` and `-DisconnectClients=0`;
+- `-AcceptKeyEvents=0` and `-AcceptPointerEvents=0`;
+- `-AcceptSetDesktopSize=0` so a viewer cannot mutate desktop geometry;
+- `-AcceptCutText=0`, `-SendCutText=0`, and bounded `-MaxCutText=1024`;
+- no separately published RFB/static-server port.
 
-`-noxdamage` is only a compatibility fallback when a conformance test proves the
-pinned Xvfb/build produces missing updates. It increases polling/CPU and is
-reported in status. x11vnc threaded modes have upstream crash caveats; use the
-simplest tested mode and soak it under multiple viewers.
+At every package update, inspect the real process command line, listener tables,
+and effective behavior. Merely accepting an option is not proof: the conformance
+test sends actual RFB KeyEvent, PointerEvent, and ClientCutText messages and
+requires an independent X11 recorder/clipboard owner to observe no effect. A
+direct XTEST move is the positive control. Re-run multi-viewer, cursor, damage,
+reconnect, slow-client, and long-soak tests before changing performance options.
+
+### 6.5 Rejected measured alternative: x11vnc
+
+Phase 0 evaluated Debian x11vnc `0.9.17-1` with LibVNCServer
+`0.9.15+dfsg-1+deb13u2`. Chromium/noVNC reached websockify, but websockify's raw
+RFB connection deadlocked with LibVNCServer's built-in WebSocket autodetection
+and closed with `webSocketsHandshake: unknown connection error` before
+ServerInit. Upstream also declares x11vnc unmaintained. A timing shim was
+rejected as brittle protocol behavior. This exact stack is retained only as
+decision evidence, not as a shipped dependency.
 
 ## 7. Viewer takeover (future-compatible release-one behavior)
 
@@ -293,7 +316,7 @@ not bytes or guessed OCR content.
 - Invalid drawable/target vanished -> typed failure with last window snapshot.
 - Unsupported visual -> `capture_format_unsupported`.
 - PNG output exceeds limit -> abort/discard and return `artifact_too_large`.
-- x11vnc/websockify failure -> viewer degraded/restarting; bot control remains
+- `X0tigervnc`/websockify failure -> viewer degraded/restarting; bot control remains
   ready unless viewing is configured required.
 - Xvfb failure -> desktop generation invalid; all observation/capture/viewer
   sessions terminate.
@@ -327,7 +350,7 @@ not bytes or guessed OCR content.
 - raw RFB/websockify unreachable outside container loopback;
 - keyboard/pointer/clipboard attempts from noVNC do not reach X event recorder;
 - two simultaneous viewers, reconnect, slow network, cursor updates;
-- x11vnc crash/restart and stale-generation close;
+- `X0tigervnc` crash/restart and stale-generation close;
 - 8-hour viewer soak with bounded RSS/CPU.
 
 Initial performance gates on a documented CI host:
@@ -349,8 +372,9 @@ guarantees.
 - [X11R7.7 extension specifications index](https://www.x.org/releases/X11R7.7/doc/)
 - [X Composite library behavior](https://www.x.org/archive/X11R7.5/doc/man/man3/Xcomposite.3.html)
 - [x11rb image/extension support](https://docs.rs/x11rb/latest/x11rb/)
-- [x11vnc upstream and maintenance status](https://github.com/LibVNC/x11vnc)
-- [x11vnc option reference](https://github.com/LibVNC/x11vnc/blob/master/doc/OPTIONS.md)
+- [TigerVNC `X0tigervnc` documentation](https://tigervnc.org/doc/X0tigervnc.html)
+- [TigerVNC v1.15.0 source](https://github.com/TigerVNC/tigervnc/tree/v1.15.0)
+- [x11vnc upstream status](https://github.com/LibVNC/x11vnc) (rejected alternative)
 - [noVNC upstream](https://github.com/novnc/noVNC)
 - [noVNC integration API](https://github.com/novnc/noVNC/blob/master/docs/API.md)
 - [websockify upstream](https://github.com/novnc/websockify)

@@ -1,0 +1,4 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+# Losing the X server unexpectedly invalidates the desktop generation.
+exec /usr/local/libexec/xenoteer/finish-critical xvfb "$@"

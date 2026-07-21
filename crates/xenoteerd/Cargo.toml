@@ -1,0 +1,22 @@
+[package]
+name = "xenoteerd"
+description = "Xenoteer desktop-control daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license = "BUSL-1.1"
+publish = false
+
+[dependencies]
+clap.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+xenoteer-core = { version = "=0.1.0", path = "../xenoteer-core" }
+xenoteer-server = { version = "=0.1.0", path = "../xenoteer-server" }
+
+[lints]
+workspace = true

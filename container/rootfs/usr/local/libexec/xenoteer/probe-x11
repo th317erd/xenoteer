@@ -1,0 +1,18 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+: "${DISPLAY:?DISPLAY is required}"
+: "${XAUTHORITY:?XAUTHORITY is required}"
+: "${XVFB_SCREEN_WIDTH:?screen width is required}"
+: "${XVFB_SCREEN_HEIGHT:?screen height is required}"
+: "${XVFB_SCREEN_DEPTH:?screen depth is required}"
+[ "$XVFB_SCREEN_WIDTH" = 1920 ]
+[ "$XVFB_SCREEN_HEIGHT" = 1080 ]
+[ "$XVFB_SCREEN_DEPTH" = 24 ]
+
+output=$(xdpyinfo -display "$DISPLAY" 2>&1) || exit 1
+printf '%s\n' "$output" | grep -Fq 'dimensions:    1920x1080 pixels'
+printf '%s\n' "$output" | grep -Fq 'resolution:    96x96 dots per inch'
+printf '%s\n' "$output" | grep -Fq 'depth of root window:    24 planes'
+printf '%s\n' "$output" | grep -Fq XTEST

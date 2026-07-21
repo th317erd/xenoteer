@@ -1,0 +1,85 @@
+{
+  "$defs": {
+    "Capability": {
+      "description": "One capability and its current safe status summary.\n\nJSON Schema string lengths count Unicode code points; admission additionally\napplies the documented UTF-8 byte ceilings before values are exposed.",
+      "properties": {
+        "backend_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/CapabilityId"
+        },
+        "reason_code": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9._-]+$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/CapabilityStatus"
+        }
+      },
+      "required": [
+        "id",
+        "status"
+      ],
+      "type": "object"
+    },
+    "CapabilityId": {
+      "description": "A stable dotted capability identifier such as `input.pointer.smooth`.",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[a-z0-9_-]+(?:\\.[a-z0-9_-]+)*$",
+      "type": "string"
+    },
+    "CapabilityStatus": {
+      "description": "Runtime availability of one advertised capability.",
+      "oneOf": [
+        {
+          "const": "available",
+          "description": "The capability passed its probe and can accept work.",
+          "type": "string"
+        },
+        {
+          "const": "degraded",
+          "description": "The capability works only partially or under a known limitation.",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "The backend or prerequisite is currently unavailable.",
+          "type": "string"
+        },
+        {
+          "const": "disabled",
+          "description": "Configuration or policy disabled the capability.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Capability discovery response.",
+  "properties": {
+    "capabilities": {
+      "items": {
+        "$ref": "#/$defs/Capability"
+      },
+      "maxItems": 256,
+      "type": "array"
+    }
+  },
+  "required": [
+    "capabilities"
+  ],
+  "title": "CapabilityReport",
+  "type": "object"
+}

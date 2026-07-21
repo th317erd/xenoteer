@@ -1,0 +1,418 @@
+{
+  "$defs": {
+    "CommandId": {
+      "description": "Deduplicates one client-authored command.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "CommandLifecycle": {
+      "description": "Lifecycle state of one deduplicated command execution.\n\nDeadline lifecycle wire names remain `deadline_before_effect` and\n`deadline_after_effect`; problem error codes use the fuller\n`deadline_exceeded_*` catalog names.",
+      "oneOf": [
+        {
+          "const": "accepted",
+          "description": "Admitted to the result ledger but not yet executing.",
+          "type": "string"
+        },
+        {
+          "const": "running",
+          "description": "Currently executing.",
+          "type": "string"
+        },
+        {
+          "const": "succeeded",
+          "description": "Completed successfully.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "Completed with a non-cancellation failure.",
+          "type": "string"
+        },
+        {
+          "const": "cancelled_before_effect",
+          "description": "Cancelled without an externally visible effect.",
+          "type": "string"
+        },
+        {
+          "const": "cancelled_after_effect",
+          "description": "Cancelled after an externally visible effect.",
+          "type": "string"
+        },
+        {
+          "const": "deadline_before_effect",
+          "description": "Deadline elapsed without an externally visible effect.",
+          "type": "string"
+        },
+        {
+          "const": "deadline_after_effect",
+          "description": "Deadline elapsed after an externally visible effect.",
+          "type": "string"
+        }
+      ]
+    },
+    "CommandOutcome": {
+      "description": "A successful command payload.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A Phase-0 backend probe acknowledgment.",
+          "properties": {
+            "ready": {
+              "description": "Whether the probed capability was ready at execution time.",
+              "type": "boolean"
+            },
+            "type": {
+              "const": "probe",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "ready"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An operation completed without an additional payload.",
+          "properties": {
+            "type": {
+              "const": "acknowledged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "EffectStage": {
+      "description": "Last externally visible stage reached by a command.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "No effect occurred.",
+          "type": "string"
+        },
+        {
+          "const": "accepted",
+          "description": "The command was admitted but has not touched the target.",
+          "type": "string"
+        },
+        {
+          "const": "pointer_moved",
+          "description": "The pointer moved.",
+          "type": "string"
+        },
+        {
+          "const": "button_pressed",
+          "description": "A pointer button was pressed.",
+          "type": "string"
+        },
+        {
+          "const": "button_released",
+          "description": "A pointer button was released.",
+          "type": "string"
+        },
+        {
+          "const": "postcondition_met",
+          "description": "The requested postcondition was observed.",
+          "type": "string"
+        }
+      ]
+    },
+    "ErrorCode": {
+      "description": "A stable machine-readable error code.",
+      "oneOf": [
+        {
+          "const": "invalid_request",
+          "description": "Request syntax or shape is invalid.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported_version",
+          "description": "Protocol version negotiation failed.",
+          "type": "string"
+        },
+        {
+          "const": "authentication_required",
+          "description": "Authentication is missing or invalid.",
+          "type": "string"
+        },
+        {
+          "const": "permission_denied",
+          "description": "The principal lacks required authority.",
+          "type": "string"
+        },
+        {
+          "const": "not_found",
+          "description": "A referenced resource does not exist.",
+          "type": "string"
+        },
+        {
+          "const": "stale_reference",
+          "description": "A reference points at an earlier generation or identity.",
+          "type": "string"
+        },
+        {
+          "const": "command_id_conflict",
+          "description": "A command identifier was reused with different content.",
+          "type": "string"
+        },
+        {
+          "const": "lease_conflict",
+          "description": "The controller lease is absent or conflicts.",
+          "type": "string"
+        },
+        {
+          "const": "resource_exhausted",
+          "description": "A bounded queue or quota is exhausted.",
+          "type": "string"
+        },
+        {
+          "const": "capability_unavailable",
+          "description": "A required capability is not ready.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported_by_target",
+          "description": "The target cannot perform this operation.",
+          "type": "string"
+        },
+        {
+          "const": "deadline_exceeded_before_effect",
+          "description": "Work exceeded its deadline before any effect.",
+          "type": "string"
+        },
+        {
+          "const": "deadline_exceeded_after_effect",
+          "description": "Work exceeded its deadline after a partial effect.",
+          "type": "string"
+        },
+        {
+          "const": "cancelled_before_effect",
+          "description": "Work was cancelled before any effect.",
+          "type": "string"
+        },
+        {
+          "const": "cancelled_after_effect",
+          "description": "Work was cancelled after a partial effect.",
+          "type": "string"
+        },
+        {
+          "const": "backend_failure",
+          "description": "An external backend failed.",
+          "type": "string"
+        },
+        {
+          "const": "internal",
+          "description": "A server invariant failed. Details remain opaque to clients.",
+          "type": "string"
+        }
+      ]
+    },
+    "Problem": {
+      "description": "RFC 9457-shaped safe problem details.\n\nJSON Schema string lengths count Unicode code points; admission additionally\nenforces the exported UTF-8 byte ceilings.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "desktop_generation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DesktopGeneration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "detail": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "details": {
+          "additionalProperties": true,
+          "maxProperties": 16,
+          "propertyNames": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z0-9._-]+$"
+          },
+          "type": "object"
+        },
+        "effect_stage": {
+          "$ref": "#/$defs/EffectStage"
+        },
+        "instance": {
+          "maxLength": 256,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryAdvice"
+        },
+        "status": {
+          "format": "uint16",
+          "maximum": 599,
+          "minimum": 400,
+          "type": "integer"
+        },
+        "title": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "type": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "title",
+        "status",
+        "code",
+        "detail",
+        "retry",
+        "effect_stage",
+        "details"
+      ],
+      "type": "object"
+    },
+    "RetryAdvice": {
+      "description": "Client retry guidance attached to a failure.",
+      "oneOf": [
+        {
+          "const": "never",
+          "description": "Repeating the operation is unsafe or cannot change the result.",
+          "type": "string"
+        },
+        {
+          "const": "same_command_id",
+          "description": "Retrieve or resubmit the exact request with the same command identifier.",
+          "type": "string"
+        },
+        {
+          "const": "after_resync",
+          "description": "Refresh generation-bound state before creating a new command.",
+          "type": "string"
+        },
+        {
+          "const": "after_backoff",
+          "description": "No effect occurred; a new command may be attempted after delay.",
+          "type": "string"
+        }
+      ]
+    },
+    "Timestamp": {
+      "description": "A canonical RFC 3339 timestamp with an explicit UTC offset.",
+      "format": "date-time",
+      "type": "string"
+    },
+    "Warning": {
+      "description": "A bounded safe warning returned with a result.\n\nJSON Schema string lengths count Unicode code points; admission additionally\nenforces the public UTF-8 byte ceilings.",
+      "properties": {
+        "code": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z0-9._-]+$",
+          "type": "string"
+        },
+        "message": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "State and terminal payload for one command identifier.",
+  "properties": {
+    "accepted_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "command_id": {
+      "$ref": "#/$defs/CommandId"
+    },
+    "effect_stage": {
+      "$ref": "#/$defs/EffectStage"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Problem"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "finished_at": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "lifecycle": {
+      "$ref": "#/$defs/CommandLifecycle"
+    },
+    "outcome": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CommandOutcome"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "started_at": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "warnings": {
+      "items": {
+        "$ref": "#/$defs/Warning"
+      },
+      "maxItems": 16,
+      "type": "array"
+    }
+  },
+  "required": [
+    "command_id",
+    "lifecycle",
+    "effect_stage",
+    "accepted_at",
+    "warnings"
+  ],
+  "title": "CommandResult",
+  "type": "object"
+}

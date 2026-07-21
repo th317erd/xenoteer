@@ -1,0 +1,4 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+# The daemon is critical: any unexpected exit invalidates command/input state.
+exec /usr/local/libexec/xenoteer/finish-critical xenoteerd "$@"

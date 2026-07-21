@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+root=${CONTAINER_TEST_ROOT:-}
+env_dir="$root/run/xenoteer/env"
+display=$(cat "$env_dir/DISPLAY")
+auth_file=$(cat "$env_dir/XAUTHORITY")
+cookie=$(mcookie)
+
+rm -f -- "$auth_file"
+install -m 0600 -o 1000 -g 1000 /dev/null "$auth_file"
+xauth -f "$auth_file" add "$display" MIT-MAGIC-COOKIE-1 "$cookie"
+chown 1000:1000 "$auth_file"
+chmod 0600 "$auth_file"

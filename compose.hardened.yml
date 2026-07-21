@@ -1,0 +1,34 @@
+# Candidate hardening overlay. Apply after compose.dev.yml and run the documented
+# sandbox/read-only-root gates before treating it as supported on a new host.
+services:
+  xenoteer:
+    profiles: [hardened]
+    read_only: true
+    restart: unless-stopped
+    cap_drop: [ALL]
+    # KILL lets root supervision terminate UID-1000 payloads; SYS_CHROOT is
+    # consumed by Chromium's layer-1 namespace/chroot sandbox.
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, KILL, SETGID, SETUID, SYS_CHROOT]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    # /dev/shm pages count against this cgroup budget; 6 GiB is not a promise
+    # that a browser may consume all 4 GiB of shm plus 2 GiB of process memory.
+    mem_limit: 6g
+    cpus: 2.0
+    ulimits:
+      nofile:
+        soft: 8192
+        hard: 8192
+      nproc:
+        soft: 512
+        hard: 512
+    tmpfs:
+      # s6-overlay executes its stage-2 init from /run/s6/basedir/bin.
+      - /run:rw,nosuid,nodev,exec,size=64m,mode=0755
+      - /tmp:rw,nosuid,nodev,noexec,size=1g,mode=1777
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

@@ -1,0 +1,21 @@
+[package]
+name = "xenoteerctl"
+description = "Diagnostic command-line client for Xenoteer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license = "BUSL-1.1"
+publish = false
+
+[[bin]]
+name = "xenoteerctl"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+xenoteer-sdk = { version = "=0.1.0", path = "../xenoteer-sdk" }
+
+[lints]
+workspace = true

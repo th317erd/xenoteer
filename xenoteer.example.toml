@@ -1,0 +1,39 @@
+# Xenoteer Phase-0 configuration example.
+# Defaults are documented and validated in crates/xenoteer-core/src/config.rs.
+
+[server]
+listen = "127.0.0.1:8080"
+request_body_limit_bytes = 1048576
+insecure_disable_auth = false
+
+[auth]
+token_file = "/run/xenoteer/api-token"
+
+[desktop]
+display_width = 1920
+display_height = 1080
+depth = 24
+dpi = 96
+
+[input]
+queue_capacity = 256
+pointer_nominal_speed_px_s = 1200
+pointer_move_min_ms = 80
+pointer_move_max_ms = 650
+pointer_sample_rate_hz = 60
+pre_click_dwell_ms = 30
+pointer_press_ms = 50
+keyboard_hold_ms = 35
+
+[limits]
+default_action_timeout_ms = 30000
+accepted_commands_per_principal = 32
+accepted_commands_per_daemon = 128
+result_ledger_entries = 10000
+result_ledger_ttl_seconds = 900
+
+[viewer]
+view_only = true
+
+[logging]
+filter = "info,xenoteer=debug"

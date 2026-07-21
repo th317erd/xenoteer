@@ -1,0 +1,14 @@
+{
+  "description": "Five ZPixmap pixels: red, green, blue, white, black",
+  "visual_class": "true_color",
+  "depth": 24,
+  "bits_per_pixel": 32,
+  "scanline_pad": 32,
+  "byte_order": "least_significant_first",
+  "red_mask": 16711680,
+  "green_mask": 65280,
+  "blue_mask": 255,
+  "width": 5,
+  "height": 1,
+  "data_hex": "0000ff00 00ff0000 ff000000 ffffff00 00000000"
+}

@@ -1,0 +1,11 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+exec s6-notifyoncheck -d -s 100 -T 15000 -t 2000 -w 200 -n 75 \
+  s6-setuidgid xenoteer \
+    Xvfb "$DISPLAY" \
+    -screen 0 "$XVFB_SCREEN_GEOMETRY" \
+    -dpi 96 \
+    -nolisten tcp \
+    -auth "$XAUTHORITY"

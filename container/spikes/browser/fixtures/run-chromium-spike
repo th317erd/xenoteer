@@ -1,0 +1,69 @@
+#!/bin/bash
+# SPDX-License-Identifier: BUSL-1.1
+set -euo pipefail
+
+[[ $(id -u) -eq 1000 ]] || { printf 'Chromium spike must run as UID 1000\n' >&2; exit 1; }
+[[ $(df -B1 --output=size /dev/shm | awk 'NR == 2 { gsub(/ /, ""); print }') -ge 4294967296 ]] || {
+  printf 'Debian Chromium spike requires a 4 GiB /dev/shm\n' >&2
+  exit 1
+}
+
+profile=$(mktemp -d "$HOME/chromium-profile.XXXXXX")
+log=$(mktemp /tmp/xenoteer-chromium.XXXXXX.log)
+cleanup() {
+  if [[ -n ${browser_pid:-} ]]; then
+    kill -TERM "$browser_pid" >/dev/null 2>&1 || true
+    wait "$browser_pid" >/dev/null 2>&1 || true
+  fi
+  rm -rf -- "$profile"
+  rm -f -- "$log"
+}
+trap cleanup EXIT
+
+chromium \
+  --user-data-dir="$profile" \
+  --remote-debugging-address=127.0.0.1 \
+  --remote-debugging-port=0 \
+  --disable-background-networking \
+  --disable-breakpad \
+  --disable-component-update \
+  --disable-default-apps \
+  --disable-extensions \
+  --disable-gpu \
+  --disable-sync \
+  --force-renderer-accessibility=complete \
+  --no-default-browser-check \
+  --no-first-run \
+  --password-store=basic \
+  --window-size=640,480 \
+  file:///opt/xenoteer-spikes/browser/phase0-browser.html \
+  >"$log" 2>&1 &
+browser_pid=$!
+
+for _ in {1..60}; do
+  [[ -s $profile/DevToolsActivePort ]] && break
+  if ! kill -0 "$browser_pid" 2>/dev/null; then
+    cat "$log" >&2
+    exit 1
+  fi
+  sleep 0.25
+done
+[[ -s $profile/DevToolsActivePort ]] || { cat "$log" >&2; exit 1; }
+port=$(sed -n '1p' "$profile/DevToolsActivePort")
+[[ $port =~ ^[0-9]+$ ]] || { printf 'invalid Chromium DevTools port: %s\n' "$port" >&2; exit 1; }
+
+/opt/xenoteer-spikes/browser/chromium-devtools-probe.py \
+  "$port" /tmp/xenoteer-chromium-spike.png
+
+mapfile -t renderer_pids < <(pgrep -f -- '--type=renderer' || true)
+(( ${#renderer_pids[@]} > 0 )) || { cat "$log" >&2; printf 'no Chromium renderer process\n' >&2; exit 1; }
+for pid in "${renderer_pids[@]}"; do
+  [[ $(stat -c %u "/proc/$pid") -eq 1000 ]]
+  grep -Eq '^Seccomp:[[:space:]]+2$' "/proc/$pid/status"
+  renderer_command=$(tr '\0' ' ' <"/proc/$pid/cmdline")
+  if grep -Eq -- '(^| )--(no-sandbox|disable-dev-shm-usage)( |$)' <<<"$renderer_command"; then
+    printf 'forbidden Chromium flag found on renderer %s: %s\n' "$pid" "$renderer_command" >&2
+    exit 1
+  fi
+done
+printf 'chromium renderer processes use seccomp mode 2 as UID 1000\n'

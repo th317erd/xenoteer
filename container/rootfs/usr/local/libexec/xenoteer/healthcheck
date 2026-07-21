@@ -1,0 +1,13 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+env_dir=/run/xenoteer/env
+test -r "$env_dir/XENOTEER__SERVER__LISTEN"
+http_addr=$(cat "$env_dir/XENOTEER__SERVER__LISTEN")
+case "$http_addr" in
+  0.0.0.0:*) probe_addr="127.0.0.1:${http_addr##*:}" ;;
+  127.0.0.1:*) probe_addr=$http_addr ;;
+  *) exit 1 ;;
+esac
+exec curl --fail --silent --show-error --max-time 2 "http://$probe_addr/livez"

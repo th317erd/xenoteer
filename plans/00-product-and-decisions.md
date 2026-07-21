@@ -68,7 +68,7 @@ Release one is successful when all of these are true:
 | Keyboard model | libxkbcommon binding plus X server mapping | Layout/keycode reasoning; XTEST still emits physical keycodes |
 | Semantics | Rust `atspi` over zbus/Tokio | Native AT-SPI object model and event stream |
 | API | Axum + Tokio, JSON over HTTP/WebSocket | Async Rust ecosystem, typed protocol, streaming events |
-| Viewer | x11vnc -> websockify -> noVNC, isolated behind an adapter | Fastest interoperable initial viewer; replaceable because x11vnc is unmaintained |
+| Viewer | TigerVNC `X0tigervnc` -> websockify -> pinned noVNC, isolated behind an adapter | Exact Phase-0 stack completed real ServerInit/framebuffer and server-enforced view-only tests; adapter remains replaceable |
 | Diagnostics | xdotool installed but never used by the daemon's normal path | Oracle and operator tool without inheriting XSendEvent/subprocess limitations |
 | Server license | Repository Business Source License with four-year change date | Community source availability while delaying hyperscaler exploitation |
 | SDK/schema license | Apache-2.0 in explicitly separated packages | Encourages integration without relicensing the server |
@@ -96,7 +96,7 @@ choose, but the result and trace MUST disclose the selected strategy.
 
 ### 5.3 Human viewing is not collaborative input
 
-x11vnc receives RFB keyboard and pointer messages directly. Those events bypass
+`X0tigervnc` can receive RFB keyboard and pointer messages directly. Those events bypass
 Xenoteer's lease, command IDs, queue, trace, and pressed-state tracker. Therefore
 the server-side VNC session is view-only by default. A noVNC client checkbox is
 not the enforcement boundary.
@@ -148,7 +148,7 @@ never targets whatever now happens to reuse the identifier.
 | Recent command results | 10,000 entries or 15 minutes, first limit wins | Memory and reconnect tests |
 | WebSocket application heartbeat | 15 s; stale after 45 s | Proxy and disconnect tests |
 | Default action timeout | 30 s; per method overrides allowed | Slow-launch and blocked-app tests |
-| `/dev/shm` | 1 GiB minimum documented; 2 GiB recommended for browser-heavy work | Chromium/QtWebEngine stress fixtures |
+| `/dev/shm` | private 4 GiB minimum for the browser profile | Debian Chromium 150 injects forbidden `--disable-dev-shm-usage` below 4,080,218,931 available bytes; runtime rejection plus deterministic Chromium/QtWebEngine render, sandbox, and flag proofs enforce the Phase-0 path, while shared-memory load/stress remains a follow-up stabilization gate |
 
 Initial resource ceilings are also closed defaults, not values for individual
 handlers to invent:
@@ -240,5 +240,5 @@ one-off exception first.
 - [AT-SPI development guide](https://gnome.pages.gitlab.gnome.org/at-spi2-core/devel-docs/index.html)
 - [s6-overlay](https://github.com/just-containers/s6-overlay)
 - [x11rb documentation](https://docs.rs/x11rb/latest/x11rb/)
-- [x11vnc upstream status](https://github.com/LibVNC/x11vnc)
+- [TigerVNC `X0tigervnc` documentation](https://tigervnc.org/doc/X0tigervnc.html)
 - [noVNC upstream](https://github.com/novnc/noVNC)

@@ -1,0 +1,3 @@
+# Preserve verbatim third-party license evidence without applying source-code
+# whitespace diagnostics to its CRLF line endings.
+container/spikes/browser/licenses/playwright/LICENSE -whitespace

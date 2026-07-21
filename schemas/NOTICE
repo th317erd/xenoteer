@@ -1,0 +1,6 @@
+Xenoteer Protocol Schemas
+Copyright 2026 AEOR Development
+
+The JSON schemas in this directory are licensed under the Apache License,
+Version 2.0. They describe a public interoperability boundary and do not license
+the separately implemented Xenoteer server.

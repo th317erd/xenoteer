@@ -1,0 +1,82 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+service=${1-}
+child_status=${2-256}
+child_signal=${3-0}
+service_dir_argument=${4-}
+
+case "$service" in
+  xenoteerd|xvfb) ;;
+  *)
+    echo 'critical finish invoked for an invalid service' >&2
+    exit 125
+    ;;
+esac
+
+# s6-supervise invokes finish from the live service directory and passes that
+# directory as argument 3. s6-rc tells the supervisor to leave a service down
+# before signalling it during every requested teardown, including a stop while
+# startup/readiness is still in progress. An unsolicited child death remains
+# wanted-up. Query `.` because the supplied directory name can be relative to
+# the parent scan directory and must not be resolved again from this cwd.
+wanted_up=invalid
+if [ -n "$service_dir_argument" ]; then
+  wanted_up=$(/command/s6-svstat -o wantedup . 2>/dev/null) || wanted_up=invalid
+fi
+case "$wanted_up" in
+  false) exit 125 ;;
+  true) ;;
+  *)
+    echo 'unable to read critical supervision intent; failing closed' >&2
+    ;;
+esac
+
+case "$child_status" in
+  ''|*[!0-9]*) result=1 ;;
+  0) result=1 ;;
+  256)
+    case "$child_signal" in
+      ''|*[!0-9]*|0) result=1 ;;
+      *)
+        if [ "$child_signal" -le 127 ]; then
+          result=$((128 + child_signal))
+        else
+          result=1
+        fi
+        ;;
+    esac
+    ;;
+  *)
+    if [ "$child_status" -le 255 ]; then
+      result=$child_status
+    else
+      result=1
+    fi
+    ;;
+esac
+
+result_dir=/run/s6-linux-init-container-results
+result_file=$result_dir/exitcode
+temporary="$result_dir/.xenoteer-exitcode.$$"
+trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+umask 022
+if printf '%s\n' "$result" >"$temporary" \
+  && chmod 0644 "$temporary" \
+  && mv -f -- "$temporary" "$result_file"; then
+  trap - EXIT HUP INT TERM
+else
+  echo 'failed to atomically record critical container exit result' >&2
+  rm -f -- "$temporary"
+  printf '%s\n' 1 >"$result_file" 2>/dev/null || :
+  trap - EXIT HUP INT TERM
+fi
+
+printf 'critical service %s exited unexpectedly; container exit result %s\n' \
+  "$service" "$result" >&2
+/run/s6/basedir/bin/halt
+
+# s6-supervise reserves 125 for permanent failure. Never allow the longrun to
+# respawn while the asynchronous overlay halt request is in flight.
+exit 125

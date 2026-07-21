@@ -1,0 +1,12 @@
+# Phase-0 runtime packages. Keep alphabetized; do not add recommends implicitly.
+ca-certificates
+curl
+dbus
+dbus-x11
+locales
+procps
+util-linux
+x11-utils
+x11-xserver-utils
+xauth
+xvfb

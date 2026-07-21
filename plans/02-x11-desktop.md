@@ -58,7 +58,7 @@ consumer distribution metapackage. Expected components:
 - `xfce4-session`, `xfwm4`, `xfsettingsd`, `xfdesktop4`, and a minimal panel;
 - `dbus`, `dbus-x11`, `at-spi2-core`, accessibility bridges pulled by GTK/Qt;
 - Xvfb, X11 utilities used by probes, xauth, XKB data, fonts;
-- x11vnc and viewer dependencies defined elsewhere;
+- TigerVNC scraping server and viewer dependencies defined elsewhere;
 - test fixture dependencies for GTK and Qt in test/development image layers.
 
 Avoid installing display managers, NetworkManager, CUPS, Bluetooth services,
@@ -254,9 +254,10 @@ policy:
 - GPU usage disabled initially if it makes Xvfb behavior unstable; do not claim
   WebGL/GPU compatibility in release one.
 
-Chromium uses `/dev/shm`; the container runtime must satisfy the size contract.
-Avoid papering over an undersized mount with `--disable-dev-shm-usage` as the
-standard profile, because that shifts pressure and changes performance.
+Chromium uses `/dev/shm`; the browser profile requires a private 4 GiB mount.
+The pinned Debian Chromium 150 launcher injects `--disable-dev-shm-usage` below
+4,080,218,931 available bytes, so startup and process-command audits reject both
+an undersized mount and that flag rather than shifting pressure to `/tmp`.
 
 ### 8.2 Firefox
 

@@ -24,7 +24,7 @@ automation behavior.
   +-- AT-SPI bus/registry (longrun, desktop uid)
   +-- XFCE session (longrun, desktop uid)
   +-- xenoteerd (longrun, desktop uid, critical)
-  +-- x11vnc (longrun, desktop uid, loopback/view-only)
+  +-- X0tigervnc (longrun, desktop uid, loopback/view-only)
   +-- websockify/noVNC static server (longrun, desktop uid, loopback)
 ```
 
@@ -51,7 +51,8 @@ Service names and their dependency edges are an integration API and are tested.
 Two inputs are maintained:
 
 1. `release.lock` identifies the base digest, s6 artifacts and checksums, Rust
-   toolchain, Cargo lock, noVNC/websockify sources, and Debian snapshot time.
+   toolchain, Cargo lock, TigerVNC/noVNC/websockify sources, and Debian snapshot
+   time.
 2. `security-candidate.lock` is advanced by scheduled automation to test current
    security packages before it replaces the release lock.
 
@@ -96,7 +97,7 @@ workspace ownership is the deployer's responsibility. The deprecated s6
 | `/run` | root:root 0755 tmpfs | s6 state and runtime hierarchy | writable tmpfs required |
 | `/run/user/1000` | xenoteer:xenoteer 0700 | XDG runtime, session bus | created by oneshot |
 | `/tmp` | root:root 1777 tmpfs | X11 socket and application temp | writable tmpfs required |
-| `/dev/shm` | root:root 1777 tmpfs | browser/toolkit/MIT-SHM | 1 GiB min, 2 GiB recommended |
+| `/dev/shm` | root:root 1777 tmpfs | browser/toolkit/MIT-SHM | private 4 GiB minimum; reject smaller mounts before browser launch |
 | `/home/xenoteer` | xenoteer:xenoteer 0700 | profiles/config/cache | volume or writable layer |
 | `/workspace` | deployment-defined | bot-visible files | optional explicit mount |
 
@@ -150,6 +151,8 @@ Every longrun has:
 - `notification-fd` plus native notification, or `s6-notifyoncheck` with a
   bounded probe;
 - a finish policy that distinguishes expected shutdown from crashes;
+- finish-state inspection through the pinned s6 `wantedup` field, which is set
+  false before a requested stop even when startup/readiness is incomplete;
 - stdout/stderr capture without leaking secret environment values;
 - execution through `s6-setuidgid xenoteer` for desktop services.
 
@@ -171,7 +174,7 @@ base
             -> atspi
             -> xfce
                  -> xenoteerd
-                 -> x11vnc
+                 -> X0tigervnc
                       -> websockify
 ```
 
@@ -261,7 +264,8 @@ Viewer readiness is optional unless `viewer.required=true`.
   increments generation. Prefer container restart for release one.
 - `xenoteerd` is critical. Its unexpected exit stops the container so the
   runtime restart policy can create a clean state.
-- x11vnc/websockify may restart with backoff without invalidating bot control.
+- `X0tigervnc`/websockify may restart with backoff without invalidating bot
+  control.
 - Crash loops use capped exponential backoff and ultimately fail, never spin.
 
 ## 8. Shutdown contract
@@ -279,7 +283,10 @@ On SIGTERM:
 7. After the application grace period, surviving managed groups receive
    SIGKILL and are reaped.
 8. XFCE/viewer/buses/Xvfb stop in reverse dependency order.
-9. PID 1 reaps all descendants and exits with the daemon/critical-service result.
+9. PID 1 reaps all descendants and exits 0 for a requested operator stop, or
+   with a nonzero daemon/critical-service result after an unsolicited critical
+   exit. The pinned supervisor's `wantedup` state distinguishes these paths
+   before the finish hook records a result.
 
 No shutdown step waits indefinitely. A dirty input reset is logged as a
 structured error and exposed in final diagnostics, but cannot prevent PID 1
@@ -292,7 +299,7 @@ from honoring the container timeout.
 ```text
 docker run --rm \
   -p 127.0.0.1:8080:8080 \
-  --shm-size=2g \
+  --shm-size=4g \
   -v "$PWD/workspace:/workspace" \
   xenoteer:dev
 ```
@@ -323,13 +330,13 @@ sandbox startup failure with `--no-sandbox` in production.
 
 | Gotcha | Prevention/test |
 |---|---|
-| `/dev/shm` defaults to 64 MiB on many Docker setups | Startup warning below minimum; Chromium and QtWebEngine stress tests at documented size |
+| `/dev/shm` defaults to 64 MiB on many Docker setups | Fail startup below private 4 GiB; Debian Chromium 150 injects forbidden `--disable-dev-shm-usage` below 4,080,218,931 available bytes; audit real process flags and run Chromium/QtWebEngine stress tests |
 | Socket exists before service is usable | Protocol-level readiness notifications/probes |
 | Multiple session buses | Assert one bus address in every supervised service; fail unexpected `DBUS_SESSION_BUS_ADDRESS` |
 | X server accepts unauthenticated clients | Negative Xauthority test; assert `-nolisten tcp`; scan listeners |
 | Saved XFCE session launches stale apps | Clear session cache and disable save in image initialization |
 | Random UID cannot own `/run` | Do not claim arbitrary UID support; dedicated compatibility test when added |
-| PID 1 reports success after critical child crash | Critical finish policy writes failure and halts container |
+| PID 1 reports success after critical child crash | Critical finish reads the pinned s6 `wantedup` state, atomically writes an unsolicited child/signal failure to s6-overlay's exit result, halts, and exits 125 to prevent respawn. Built tests require immediate and ready requested stops to return 0, and Xvfb/xenoteerd crashes in normal and hardened profiles to return nonzero |
 | Read-only root breaks packages writing outside declared paths | Run full end-to-end suite with read-only profile |
 | Container stop kills before cleanup | Assert stop timeout exceeds service grace; forced-stop fault test |
 | Host mount recursively chowned | Never boot-time chown unknown mounts; ownership error is explicit |

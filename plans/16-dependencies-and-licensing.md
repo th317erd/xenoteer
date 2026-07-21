@@ -24,9 +24,10 @@ it out later" is not an acceptable release strategy.
 4. Third-party programs, libraries, fonts, themes, and assets retain their own
    licenses. They are not relicensed as Xenoteer and are explicitly excluded from
    the Licensed Work by the root `LICENSE`.
-5. GPL tools such as x11vnc remain separate executables connected through normal
-   operating-system interfaces. Original BSL code does not link to GPL libraries
-   without a specific compatibility and derivative-work review.
+5. Copyleft tools, including GPL/LGPL-covered files in the TigerVNC and
+   websockify package aggregates, remain separate executables connected through
+   normal operating-system interfaces. Original BSL code does not link to GPL
+   libraries without a specific compatibility and derivative-work review.
 6. Every released image has a machine-readable package/source manifest, SBOM,
    human-readable notices, full license texts, and a durable corresponding-source
    fulfillment artifact tied to the image digest.
@@ -43,9 +44,10 @@ The release is an aggregate containing several legally distinct sets of work:
 | Protocol schema and generated-model source | Apache-2.0 | A self-contained `LICENSE` and `NOTICE` in its package/directory; no BSL-only implementation copied into it |
 | Rust, TypeScript, and Python client SDKs | Apache-2.0 | Each published package includes Apache license metadata and text; package source remains usable without server source |
 | Debian base and installed Debian packages | Package-specific terms | Preserve Debian copyright data and license texts; publish binary-to-source mapping and corresponding source |
-| noVNC | MPL-2.0 | Keep notices; make source for the shipped version and any modified MPL-covered files available |
-| websockify | LGPL-3.0 (verify at lock/update time) | Run as a separate Python program; retain notices/source and comply with the exact shipped version's terms |
-| x11vnc | GPL-2.0 (verify exact repository/package expression) | Run as a separate executable; publish exact corresponding source, patches, and build/install provenance |
+| noVNC | Multi-license aggregate: Debian copyright records BSD-2-clause, CC-BY-SA-3.0, Expat, MPL-2.0, OFL-1.1, and Zlib | Preserve exact file-level mapping/notices; publish the shipped source and modifications required by each covered file |
+| websockify | Multi-license aggregate: Debian copyright records BSD-2-clauses, GPL-2+, LGPL-2, LGPL-3, and MPL-2.0 | Run as a separate Python program; preserve exact file-level notices/source and comply with the shipped package's terms |
+| TigerVNC scraping server (`X0tigervnc`) | Multi-license aggregate: Debian copyright records BSD-3-Clause, BSD-style-descipher, GPL-2+, GPL-3+, LGPL-2.1+, MIT/X11-style, fsfap, and public-domain | Run as a separate executable; preserve the Debian copyright mapping and publish exact corresponding source, patches, and build/install provenance |
+| Container seccomp JSON policies | Apache-2.0 derivatives from pinned Moby and Playwright revisions | Classify before the `container/*` BSL catchall; retain byte-exact upstream LICENSE/NOTICE files and locked source hashes |
 | Fonts, icons, themes, fixtures, and test media | Asset-specific terms | Admit only reviewed redistributable assets; record authorship/source/license per asset |
 
 The container image as a transport is not assigned one blanket license. User-facing
@@ -157,10 +159,10 @@ License expressions must be reverified when versions change.
 | `zbus` and `atspi` crate | session D-Bus and accessibility | Rust libraries linked into BSL process | Verify exact crate expressions and feature graph; D-Bus XML/spec is not runtime source code |
 | `tracing`, metrics, error crates | observability/error plumbing | Rust libraries linked into BSL process | Redaction is a product issue; license remains normal permissive dependency review |
 | Debian/Xorg/XFCE/AT-SPI packages | operating environment | Aggregated packages in image | GPL/LGPL/permissive mixture, copyright retention, source-package mapping, patches |
-| x11vnc | optional VNC observation adapter | Separate supervised process over X11/socket | GPL source fulfillment; unmaintained upstream risk; never call library code from BSL process |
-| websockify | VNC WebSocket bridge | Separate supervised Python process | LGPL compliance, Python dependency graph, proxy/auth deployment |
-| noVNC | browser viewer assets | Static web application served/gated separately | MPL file-level obligations, asset/npm inventory, preserve source notices |
-| `xdotool` | diagnostic compatibility tool only | Separate optional command | GPL executable/source obligations; never the authoritative automation path |
+| TigerVNC `X0tigervnc` | selected VNC observation adapter | Separate supervised process over X11/socket | Multi-license source fulfillment; RFB parser exposure; preserve exact Debian copyright mapping; never call library code from BSL process |
+| websockify | VNC WebSocket bridge | Separate supervised Python process | Preserve the exact BSD/GPL/LGPL/MPL file mapping, Python dependency graph, and proxy/auth deployment |
+| noVNC | browser viewer assets | Static web application served/gated separately | MPL file-level obligations plus BSD/CC-BY-SA/Expat/OFL/Zlib assets, asset/npm inventory, and source notices |
+| `xdotool` | diagnostic compatibility tool only | Separate optional command | Exact Debian package records BSD-3-clause; preserve notice/source provenance; never the authoritative automation path |
 
 Process separation is an architectural risk-control boundary, not a magic legal
 test. If first-party code and a copyleft program later exchange intimate,
@@ -215,7 +217,7 @@ equivalent immutable OCI artifact) containing:
 - upstream source archives/commits for vendored or manually installed programs;
 - all Xenoteer modifications as applied source or patches;
 - build scripts, package rules, and configuration needed by the applicable license;
-- noVNC/websockify/x11vnc sources matching the shipped files exactly;
+- noVNC/websockify/TigerVNC sources matching the shipped files exactly;
 - a signed manifest mapping every binary/image path to source and license records.
 
 Publish that artifact beside the image for at least the period required by the
@@ -258,14 +260,14 @@ Each record contains:
 
 ```json
 {
-  "component": "x11vnc",
-  "binary_paths": ["/usr/bin/x11vnc"],
-  "binary_version": "distribution-version",
-  "source_name": "distribution-source-name",
-  "source_version": "distribution-source-version",
+  "component": "tigervnc-scraping-server",
+  "binary_paths": ["/usr/bin/X0tigervnc"],
+  "binary_version": "1.15.0+dfsg-2.1~deb13u1",
+  "source_name": "tigervnc",
+  "source_version": "1.15.0+dfsg-2.1~deb13u1",
   "source_sha256": "hex",
   "source_artifact_path": "sources/...",
-  "license_expression": "reviewed SPDX expression",
+  "license_expression": "NOASSERTION",
   "license_evidence_paths": ["licenses/..."],
   "modified": false,
   "patch_paths": [],
@@ -273,9 +275,12 @@ Each record contains:
 }
 ```
 
-The actual version/hash/license values are generated from the lock and final image;
-placeholders are forbidden in a release artifact. Files are sorted deterministically
-so diffs expose dependency changes.
+The aggregate uses `NOASSERTION` rather than collapsing distinct file-level
+terms into a guessed expression; `license_evidence_paths` points to the exact
+Debian copyright file and parsed per-file records. Actual hashes and artifact
+paths are generated from the lock and final image; placeholders are forbidden
+in a release artifact. Files are sorted deterministically so diffs expose
+dependency changes.
 
 ## 8. Automated enforcement
 
@@ -358,17 +363,19 @@ A release candidate passes only when all of the following are true:
 - notices render successfully and contain required full license texts;
 - corresponding-source bundle passes offline resolution and rebuild spot checks;
 - SBOM/package/source/notices inventories agree with the signed image digest;
-- x11vnc, websockify, noVNC, xdotool, and all modified copyleft components have
+- TigerVNC, websockify, noVNC, xclip, and all modified copyleft components have
   exact source and patch coverage;
 - published artifacts remain accessible from a clean, unauthenticated environment;
 - an engineer other than the artifact author signs the compliance review record.
 
 ## 11. Implementation checklist
 
-- [ ] Add directory-specific Apache-2.0 licenses before the protocol/SDK crates land.
+- [x] Add directory-specific Apache-2.0 licenses for the delivered protocol,
+  SDK, schema, and derived seccomp-policy boundaries.
 - [ ] Add SPDX/copyright policy and a formatter/checker for source headers.
 - [ ] Commit dependency/license allowlists and exception schema.
-- [ ] Build final-image `dpkg` and unowned-file inventory tooling.
+- [x] Build Phase-0 final-image `dpkg` and unowned-file inventory tooling;
+  unknown regular files and symlinks fail the production image build.
 - [ ] Build binary-to-source resolver against the pinned Debian snapshot.
 - [ ] Generate deterministic notice, package, and source manifests.
 - [ ] Assemble and offline-verify corresponding-source OCI/release artifact.
@@ -377,6 +384,15 @@ A release candidate passes only when all of the following are true:
 - [ ] Add release test for BSL parameters and four-year maximum.
 - [ ] Publish SBOM/provenance/source/notices together and bind each to the digest.
 - [ ] Obtain counsel review before the first public production release.
+
+Delivered Phase-0 gates also include a deterministic first-party source
+manifest/SPDX document, the production Cargo normal/build closure with SPDX
+license evidence, an exact s6 archive/file manifest with ISC evidence, locked
+online source checks, and explicit source-license classification tests for the
+BSL, Apache SDK/schema, Moby, and Playwright boundaries. These are checked-in
+build gates, not substitutes for the still-open corresponding-source bundle,
+rendered aggregate notices, digest-bound attestations/signatures, offline
+verification, or counsel review above.
 
 ## 12. Primary references
 
@@ -387,7 +403,7 @@ A release candidate passes only when all of the following are true:
 - [Debian license information](https://www.debian.org/legal/licenses/)
 - [Debian package search, including source packages](https://www.debian.org/distrib/packages)
 - [Debian snapshot service](https://snapshot.debian.org/)
-- [x11vnc upstream repository and license](https://github.com/LibVNC/x11vnc)
+- [TigerVNC v1.15.0 source and license files](https://github.com/TigerVNC/tigervnc/tree/v1.15.0)
 - [noVNC upstream repository and license](https://github.com/novnc/noVNC)
 - [websockify upstream repository and license](https://github.com/novnc/websockify)
 - [x11rb crate documentation](https://docs.rs/x11rb/latest/x11rb/)

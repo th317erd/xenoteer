@@ -1,0 +1,16 @@
+[package]
+name = "xenoteer-sdk"
+description = "Apache-licensed Rust SDK boundary for Xenoteer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+xenoteer-protocol = { version = "=0.1.0", path = "../xenoteer-protocol" }
+
+[lints]
+workspace = true

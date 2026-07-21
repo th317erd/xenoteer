@@ -49,7 +49,7 @@ Rust / TypeScript / Python SDKs      Human observer
         HTTP + WebSocket API       noVNC (view-only)
                  |                       |
                  v                       v
-        Action coordinator       websockify -> x11vnc
+        Action coordinator       websockify -> X0tigervnc
        /        |         \              |
       v         v          v             |
  Input actor  X11 observe  AT-SPI actor   |

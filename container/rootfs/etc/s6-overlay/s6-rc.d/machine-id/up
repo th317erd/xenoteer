@@ -1,0 +1,2 @@
+#!/command/execlineb -P
+/usr/local/libexec/xenoteer/init-machine-id

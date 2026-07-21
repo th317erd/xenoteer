@@ -69,6 +69,58 @@ All direct dependencies need license, maintenance, advisory, and transitive
 review under [16](16-dependencies-and-licensing.md). `cargo-deny` enforces allowed
 licenses, duplicate/version policy, advisories, and approved git sources.
 
+### 2.1 Phase 0 selected platform mechanics (2026-07-20)
+
+Phase 0 closed two previously provisional choices with executable Linux/Xvfb
+proofs:
+
+| Concern | Selected dependency and feature surface | Decision |
+|---|---|---|
+| X11 observation readiness | `mio = 1.2.2`, features `os-ext`, `os-poll` | One named poll thread owns the x11rb connection and its buffered event queue. A `mio::Waker` is the control FD. |
+| PNG | `png = 0.18.1`, `default-features = false` | Encode only explicit RGBA8 PNG after bounded BGRA-to-RGBA conversion. |
+| Resize | `fast_image_resize = 6.0.0`, `default-features = false`, features `std`, `only_u8x4` | Treat BGRA8 as channel-independent `U8x4`; expose only nearest-neighbor and Lanczos3. |
+
+The observation measurement is encoded as a regression gate rather than a
+one-off benchmark: the live test sends 1,024 `CreateNotify` events into an
+undrained 256-entry receiver and requires stop/wake/join to finish within one
+second. The pure stress test offers 10,000 events under the same one-second
+ceiling and observes exactly one `ResyncRequired` marker after capacity returns.
+The worker never blocks on delivery, checks shutdown while draining, and uses a
+100 ms bounded `poll` timeout as a wake-failure backstop. Explicit shutdown and
+`Drop` both join the thread; a failed wake is reported only after join.
+
+Rejected observation alternatives:
+
+- Tokio `AsyncFd` was not selected because x11rb can buffer events while a
+  reply path drains the socket. Until all connection/reply ownership lives in
+  one proven async task, FD readability alone can miss an internally buffered
+  event.
+- A shared connection mutex was rejected because request/reply waits and event
+  draining would obstruct each other and obscure ownership.
+- Sleep polling and an unbounded event channel were rejected for latency,
+  memory, and shutdown failure modes. The selected bounded channel drops an
+  overflow burst and emits one resync marker so the model owner rebuilds from
+  X11 instead of trusting a partial history.
+
+Rejected image alternatives:
+
+- The broad `image` facade/default codec set was unnecessary for a PNG-only
+  artifact contract and would expand licenses, advisories, compile time, and
+  decoder attack surface.
+- A handwritten PNG encoder or resampler would create more correctness and
+  maintenance risk than the two narrowly featured, MIT/Apache-2.0 crates.
+
+Ownership and bounds remain part of the selection: the observation connection
+never leaves its worker; receiver drop terminates the worker; image inputs and
+outputs enforce immutable 8,192-per-dimension, 16,000,000-pixel, and 32 MiB PNG
+ceilings before allocation. Revisit the observation choice only if x11rb offers
+a reviewed integration that proves one async owner for both replies and events,
+or profiling shows the poll thread is a material bottleneck. Revisit image
+crates/features only for a protocol-approved new format, alpha/color-management
+requirement, demonstrated resize bottleneck, upstream maintenance/advisory
+change, or a license-policy change. Any revisit repeats feature-tree,
+`cargo-deny`, golden pixel, hostile-bound, and live platform tests.
+
 ## 3. `xenoteer-protocol`
 
 ### 3.1 Boundary
@@ -295,14 +347,17 @@ receiver after principal/request-hash checks.
 `CommandRecord` state transitions are closed:
 
 ```text
-Accepted -> Running -> Succeeded
-                    -> Failed
-                    -> CancelledAfterEffect
+Accepted -> Running
 Accepted -> CancelledBeforeEffect | DeadlineBeforeEffect
-Running  -> DeadlineAfterEffect
+Running  -> Succeeded | Failed
+Running  -> CancelledBeforeEffect | CancelledAfterEffect
+Running  -> DeadlineBeforeEffect | DeadlineAfterEffect
 ```
 
-Terminal state cannot change. Property tests generate transition sequences.
+`Running -> *BeforeEffect` means execution began, but it was cancelled or reached
+its deadline before crossing any externally visible effect boundary. Its result
+retains `started_at`. Terminal state cannot change. Property tests generate
+transition sequences.
 
 ### 4.6 Execution dispatcher/sagas
 
@@ -407,20 +462,15 @@ same-connection barrier semantics.
 
 ### 5.6 Observation event loop
 
-Preferred Unix implementation wraps the connection file descriptor in Tokio
-`AsyncFd` under a single owner task using x11rb's event-loop integration feature:
-
-1. await readability;
-2. drain `poll_for_event` until empty;
-3. clear readiness and retry correctly for edge-trigger races;
-4. normalize/update model without awaiting slow subscribers;
-5. service bounded command messages in `select!`;
-6. batch/coalesce property refreshes.
-
-If the pinned x11rb `RustConnection` cannot satisfy `AsyncFd` safely, implement a
-dedicated poll thread with an explicit wake FD. Do not fall back to a sleep-poll
-loop or shared mutex. Phase 0's connection spike decides only this mechanical
-adapter detail; actor APIs and ownership remain fixed.
+Phase 0 selected the dedicated `mio` poll thread documented in
+[2.1](#21-phase-0-selected-platform-mechanics-2026-07-20). The thread is the
+sole owner of the x11rb connection, drains its internal event queue before
+blocking, and uses an explicit wake FD plus a 100 ms poll backstop. It publishes
+through a fixed-capacity, nonblocking channel; overflow is represented by one
+`ResyncRequired` marker rather than blocking the X11 owner or silently treating
+partial history as complete. Receiver drop, explicit shutdown, and handle drop
+all terminate and join the worker. Actor APIs and ownership remain fixed if the
+mechanical readiness adapter is revisited.
 
 ### 5.7 Clipboard loop
 

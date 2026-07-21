@@ -223,7 +223,8 @@ Document the actual level: `input-reproducible`, `file-manifest-reproducible`, o
 - listener bind and trusted proxy/TLS arrangement;
 - home persistence policy;
 - workspace mount/ownership;
-- `/dev/shm` size (>=1 GiB; 2 GiB recommended browser-heavy);
+- private `/dev/shm` size (4 GiB minimum for the browser profile; fail smaller
+  mounts before launch);
 - CPU/memory/PID/fd/log limits;
 - egress/network policy external to container;
 - artifact directory/retention if enabled;
@@ -235,11 +236,13 @@ No hidden dependency on systemd, host X11, `/dev/input`, GPU, or privileged mode
 
 - restart policy on nonzero critical exit;
 - API published to host loopback or protected proxy network;
-- `shm_size: 2gb`;
+- `shm_size: 4gb`; Debian Chromium 150 injects forbidden
+  `--disable-dev-shm-usage` below 4,080,218,931 available bytes;
 - healthcheck uses `/readyz` with start period covering desktop boot;
 - stop grace exceeds s6/daemon cleanup;
 - read-only root plus tmpfs in hardened example;
-- capabilities dropped and default seccomp/LSM;
+- capabilities dropped and the pinned Docker-default seccomp baseline extended
+  only for `clone`, `setns`, and `unshare`, with the host LSM still active;
 - named ephemeral/persistent home and workspace mounts;
 - logging rotation at runtime.
 
@@ -303,8 +306,8 @@ from terminal ledger before drain or unknown after forced restart.
 - Monthly routine image rebuild even without Xenoteer code change.
 - Immediate critical reachable security rebuild.
 - Quarterly restore/rollback/source-offer/signature verification drill.
-- Each release rechecks x11vnc maintenance/security status and replacement
-  candidates.
+- Each release rechecks TigerVNC maintenance/security status, mandatory
+  server-side view-only behavior, and replacement candidates.
 - Deprecation announced at least one minor release before removal within major,
   unless security requires immediate disable.
 

@@ -1,0 +1,7 @@
+# noVNC 1:1.6.0-2 files as shipped by Debian snapshot 20260719T000000Z.
+# The package archive SHA-256 in packages.lock pins every other packaged asset.
+770176ac9adb1de0a1ee322c7d3149715fc1e4160d66ac0c3a6243deb664d9b4  /usr/share/novnc/app/ui.js
+563a8c8469dfb55d1deee05262a311637d0e6fe8f65ae34c8222ee22e34e8a93  /usr/share/novnc/core/rfb.js
+6abe99c285e775ee43dfdbfb73c0a24052e633491232ee90446f20ffea743f16  /usr/share/novnc/core/websock.js
+cd979f4c1dc4d7c0dd2794b93ca1c89b3c20c01fd4dee5d489330b291e441897  /usr/share/novnc/package.json
+df7dbd37428667773afe5ddc7cee916e200ef27dcc748186c48ce13e8cd32242  /usr/share/novnc/vnc.html

@@ -1,0 +1,5 @@
+# Cargo build outputs from the root workspace and standalone fixture crates.
+**/target/
+*.profraw
+**/__pycache__/
+*.pyc

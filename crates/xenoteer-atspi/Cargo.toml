@@ -1,0 +1,25 @@
+[package]
+name = "xenoteer-atspi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license = "BUSL-1.1"
+description = "AT-SPI platform adapter and executable backend probes for Xenoteer"
+publish = false
+
+[features]
+default = []
+live-atspi = ["dep:atspi", "dep:tokio"]
+
+[dependencies]
+atspi = { version = "=0.30.0", default-features = false, features = ["connection", "proxies", "tokio"], optional = true }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"], optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["time"] }
+
+[lints]
+workspace = true

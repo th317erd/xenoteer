@@ -1,0 +1,10 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+case "$XENOTEER__SERVER__LISTEN" in
+  0.0.0.0:*) probe_addr="127.0.0.1:${XENOTEER__SERVER__LISTEN##*:}" ;;
+  127.0.0.1:*) probe_addr=$XENOTEER__SERVER__LISTEN ;;
+  *) exit 1 ;;
+esac
+exec curl --fail --silent --show-error --max-time 2 "http://$probe_addr/livez"

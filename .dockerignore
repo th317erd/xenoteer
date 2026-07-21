@@ -1,0 +1,13 @@
+.git
+.github
+.codex
+target
+**/target
+dist
+**/dist
+artifacts
+*.log
+.env
+.env.*
+!.env.example
+compose*.yml

@@ -1,0 +1,6 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+exec s6-notifyoncheck -d -s 100 -T 30000 -t 3000 -w 250 -n 120 \
+  s6-setuidgid xenoteer /usr/local/bin/xenoteerd

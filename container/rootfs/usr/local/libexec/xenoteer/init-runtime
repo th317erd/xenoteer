@@ -1,0 +1,136 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+root=${CONTAINER_TEST_ROOT:-}
+if [ -z "$root" ] && [ "$(id -u)" -ne 0 ]; then
+  echo 'runtime initialization must run as root' >&2
+  exit 1
+fi
+
+display=${DISPLAY:-:99}
+width=${XVFB_SCREEN_WIDTH-1920}
+height=${XVFB_SCREEN_HEIGHT-1080}
+depth=${XVFB_SCREEN_DEPTH-24}
+profile=${DESKTOP_PROFILE:-bare}
+http_addr=${XENOTEER__SERVER__LISTEN-0.0.0.0:8080}
+token_file=${XENOTEER__AUTH__TOKEN_FILE-/run/secrets/xenoteer_api_token}
+
+case "$display" in :[0-9]*) ;; *) echo "invalid DISPLAY: $display" >&2; exit 64 ;; esac
+case "${display#:}" in *[!0-9]*|'') echo "invalid DISPLAY: $display" >&2; exit 64 ;; esac
+if [ "$width" != 1920 ] || [ "$height" != 1080 ] || [ "$depth" != 24 ]; then
+  echo 'Phase 0 requires fixed Xvfb geometry 1920x1080x24 at 96 DPI' >&2
+  exit 64
+fi
+case "$profile" in bare|standard) ;; *) echo "invalid desktop profile: $profile" >&2; exit 64 ;; esac
+printf '%s' "$http_addr" | grep -Eq '^(127\.0\.0\.1|0\.0\.0\.0):[1-9][0-9]{0,4}$' || {
+  echo "invalid XENOTEER__SERVER__LISTEN: $http_addr" >&2
+  exit 64
+}
+http_port=${http_addr##*:}
+[ "$http_port" -le 65535 ] || { echo "invalid HTTP port: $http_port" >&2; exit 64; }
+case "$token_file" in /*) ;; *) echo 'XENOTEER__AUTH__TOKEN_FILE must be absolute' >&2; exit 64 ;; esac
+case "$token_file" in *..*) echo 'XENOTEER__AUTH__TOKEN_FILE may not contain ..' >&2; exit 64 ;; esac
+token_path="$root$token_file"
+[ -f "$token_path" ] || { echo "authentication token file is missing: $token_file" >&2; exit 78; }
+token_owner=$(stat -c '%u' "$token_path")
+token_mode=$(stat -c '%a' "$token_path")
+token_bytes=$(wc -c <"$token_path")
+[ "$token_owner" -eq 1000 ] || { echo 'authentication token file must be owned by UID 1000' >&2; exit 78; }
+case "$token_mode" in 400|600) ;; *) echo "authentication token file must have mode 0400 or 0600 (observed $token_mode)" >&2; exit 78 ;; esac
+[ "$token_bytes" -ge 32 ] || { echo 'authentication token must contain at least 256 bits' >&2; exit 78; }
+
+shm_path=${SHM_PATH:-/dev/shm}
+shm_bytes=$(df -B1 --output=size "$shm_path" | awk 'NR == 2 { gsub(/ /, ""); print }')
+shm_mode=$(stat -c '%a' "$shm_path")
+[ "$shm_mode" = 1777 ] || { echo "$shm_path must have mode 1777 (observed $shm_mode)" >&2; exit 78; }
+[ "$shm_bytes" -ge 4294967296 ] || {
+  echo "$shm_path must be at least 4 GiB; Debian Chromium enables --disable-dev-shm-usage below 4080218931 available bytes (observed $shm_bytes bytes)" >&2
+  exit 78
+}
+
+umask 077
+install -d -m 0755 "$root/run/xenoteer"
+install -d -m 0700 -o 1000 -g 1000 "$root/run/user/1000"
+install -d -m 0700 -o 1000 -g 1000 "$root/home/xenoteer"
+install -d -m 0755 "$root/run/xenoteer/env"
+install -d -m 1777 "$root/tmp/.X11-unix"
+
+write_env() {
+  name=$1
+  value=$2
+  printf '%s' "$value" >"$root/run/xenoteer/env/$name"
+  chmod 0644 "$root/run/xenoteer/env/$name"
+}
+
+write_env DISPLAY "$display"
+write_env XAUTHORITY "$root/run/user/1000/Xauthority"
+write_env XDG_RUNTIME_DIR "$root/run/user/1000"
+write_env DBUS_SESSION_BUS_ADDRESS "unix:path=$root/run/user/1000/bus"
+write_env XDG_CURRENT_DESKTOP XFCE
+write_env XDG_SESSION_DESKTOP xfce
+write_env XDG_SESSION_TYPE x11
+write_env DESKTOP_SESSION xfce
+write_env LANG en_US.UTF-8
+write_env LC_ALL en_US.UTF-8
+write_env TZ UTC
+write_env NO_AT_BRIDGE 0
+write_env QT_LINUX_ACCESSIBILITY_ALWAYS_ON 1
+write_env XENOTEER__SERVER__LISTEN "$http_addr"
+write_env XENOTEER__AUTH__TOKEN_FILE "$token_file"
+write_env DESKTOP_PROFILE "$profile"
+write_env XVFB_SCREEN_WIDTH "$width"
+write_env XVFB_SCREEN_HEIGHT "$height"
+write_env XVFB_SCREEN_DEPTH "$depth"
+write_env XVFB_SCREEN_GEOMETRY "${width}x${height}x${depth}"
+
+# with-contenv supplies the original container environment only to this
+# initialization oneshot. Validate every Xenoteer key with the same two-segment
+# grammar as the Rust loader, then persist its value byte-for-byte for s6-envdir.
+# Diagnostics deliberately contain neither attacker-controlled names nor values.
+awk -v output_dir="$root/run/xenoteer/env" '
+  BEGIN { RS = "\0" }
+
+  function valid_segment(segment) {
+    return segment ~ /^[A-Z0-9]+(_[A-Z0-9]+)*$/
+  }
+
+  {
+    equals = index($0, "=")
+    if (equals == 0) {
+      next
+    }
+    name = substr($0, 1, equals - 1)
+    if (substr(name, 1, 9) != "XENOTEER_") {
+      next
+    }
+    if (substr(name, 1, 10) != "XENOTEER__") {
+      invalid = 1
+      next
+    }
+    path = substr(name, 11)
+    count = split(path, segments, /__/)
+    if (count != 2 || !valid_segment(segments[1]) || !valid_segment(segments[2])) {
+      invalid = 1
+      next
+    }
+    value = substr($0, equals + 1)
+    destination = output_dir "/" name
+    # s6-envdir -f (without -n) chomps exactly this terminator. An empty value
+    # therefore remains an empty variable instead of becoming an unset one;
+    # values that already end in newlines retain every original newline.
+    printf "%s\n", value > destination
+    close(destination)
+  }
+
+  END {
+    if (invalid) {
+      print "invalid Xenoteer environment configuration key" > "/dev/stderr"
+      exit 64
+    }
+  }
+' /proc/self/environ
+chmod 0644 "$root"/run/xenoteer/env/XENOTEER__*
+
+printf '%s\n' "$shm_bytes" >"$root/run/xenoteer/shm-bytes"
+chmod 0644 "$root/run/xenoteer/shm-bytes"

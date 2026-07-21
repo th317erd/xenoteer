@@ -1,0 +1,71 @@
+#!/bin/bash
+# SPDX-License-Identifier: BUSL-1.1
+set -euo pipefail
+
+[[ $(id -u) -eq 1000 ]] || { printf 'QtWebEngine spike must run as UID 1000\n' >&2; exit 1; }
+[[ -z ${QTWEBENGINE_DISABLE_SANDBOX:-} ]]
+[[ ${QTWEBENGINE_CHROMIUM_FLAGS:-} != *--no-sandbox* ]]
+[[ $(df -B1 --output=size /dev/shm | awk 'NR == 2 { gsub(/ /, ""); print }') -ge 4294967296 ]]
+
+log=$(mktemp /tmp/xenoteer-qtwebengine.XXXXXX.log)
+cleanup() {
+  if [[ -n ${fixture_pid:-} ]]; then
+    kill -TERM "$fixture_pid" >/dev/null 2>&1 || true
+    wait "$fixture_pid" >/dev/null 2>&1 || true
+  fi
+  rm -f -- "$log"
+}
+trap cleanup EXIT
+
+QT_LOGGING_RULES='qt.webenginecontext.debug=true' \
+QTWEBENGINE_REMOTE_DEBUGGING=9223 \
+QTWEBENGINE_CHROMIUM_FLAGS='--disable-gpu --remote-debugging-address=127.0.0.1' \
+  /opt/xenoteer-spikes/browser/qtwebengine-fixture.py >"$log" 2>&1 &
+fixture_pid=$!
+for _ in {1..120}; do
+  grep -Fq '"type": "qtwebengine_spike_ready"' "$log" && break
+  if ! kill -0 "$fixture_pid" 2>/dev/null; then
+    cat "$log" >&2
+    exit 1
+  fi
+  sleep 0.25
+done
+grep -F '"type": "qtwebengine_spike_ready"' "$log"
+
+for _ in {1..40}; do
+  if /opt/xenoteer-spikes/browser/chromium-devtools-probe.py \
+    9223 /tmp/xenoteer-qtwebengine-spike.png --skip-sandbox-status; then
+    devtools_ready=1
+    break
+  fi
+  sleep 0.25
+done
+[[ ${devtools_ready:-0} -eq 1 ]] || { cat "$log" >&2; exit 1; }
+
+mapfile -t webengine_pids < <(
+  for status in /proc/[0-9]*/status; do
+    pid=${status#/proc/}
+    pid=${pid%/status}
+    [[ -r /proc/$pid/comm ]] || continue
+    [[ $(cat "/proc/$pid/comm") == QtWebEngineProc ]] && printf '%s\n' "$pid"
+  done
+)
+(( ${#webengine_pids[@]} > 0 )) || { cat "$log" >&2; printf 'no QtWebEngine subprocess\n' >&2; exit 1; }
+observed_nested_pid_namespace=0
+for pid in "${webengine_pids[@]}"; do
+  [[ $(stat -c %u "/proc/$pid") -eq 1000 ]]
+  grep -Eq '^Seccomp:[[:space:]]+2$' "/proc/$pid/status"
+  grep -Eq '^NoNewPrivs:[[:space:]]+1$' "/proc/$pid/status"
+  if awk '/^NSpid:/ { exit NF >= 3 ? 0 : 1 }' "/proc/$pid/status"; then
+    observed_nested_pid_namespace=1
+  fi
+  if tr '\0' ' ' <"/proc/$pid/cmdline" | grep -Eq -- '(^| )--(no-sandbox|disable-dev-shm-usage)( |$)'; then
+    printf 'forbidden QtWebEngine flag found on subprocess %s\n' "$pid" >&2
+    exit 1
+  fi
+done
+[[ $observed_nested_pid_namespace -eq 1 ]] || {
+  printf 'QtWebEngine created no subprocess in a nested PID namespace\n' >&2
+  exit 1
+}
+printf 'QtWebEngine subprocess tree uses nested PID namespaces, seccomp mode 2, and no-new-privileges as UID 1000\n'

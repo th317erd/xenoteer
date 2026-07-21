@@ -61,7 +61,7 @@ supports one trust domain per container.
 
 - Xvfb uses Unix socket and `-nolisten tcp` with Xauthority.
 - D-Bus uses Unix sockets only.
-- x11vnc and websockify bind 127.0.0.1 inside container.
+- TigerVNC `X0tigervnc` and websockify bind 127.0.0.1 inside the container.
 - Only the authenticated HTTP/WS API listener is intended for publication.
 - API auth is mandatory by default, even if a host maps the port to loopback.
 - TLS/WSS is mandatory over untrusted networks; plaintext is acceptable only on
@@ -188,23 +188,25 @@ web browsing. Supported profile must prove active sandbox status.
 
 Container conflicts to test:
 
-- Docker seccomp may deny namespace creation needed by Chromium user-namespace
-  sandbox;
+- Docker's default seccomp profile denies namespace operations needed by the
+  pinned Chromium sandbox; the selected pinned profile is the Docker baseline
+  plus unconditional `clone`, `setns`, and `unshare` only;
 - `no-new-privileges` prevents setuid elevation used by the legacy setuid helper;
 - host sysctl/LSM may restrict unprivileged user namespaces;
 - packaged Chromium may expect a correctly owned mode-4755 sandbox helper;
 - root-launched browser often demands `--no-sandbox`, which is why apps run as
   desktop user;
-- small `/dev/shm` causes crashes unrelated to sandbox.
+- Debian Chromium 150 injects forbidden `--disable-dev-shm-usage` below
+  4,080,218,931 available `/dev/shm` bytes.
 
 Preferred order:
 
-1. non-root browser with user-namespace + seccomp sandbox under default container
-   confinement;
+1. non-root browser with user-namespace + seccomp sandbox under the pinned
+   Docker-baseline-plus-three-syscalls profile, with a private 4 GiB `/dev/shm`;
 2. packaged setuid helper only if image ownership/mode and `no-new-privileges`
    profile are deliberately managed;
 3. fail browser capability with diagnostic if host prevents both;
-4. never silently add `--no-sandbox`.
+4. never silently add `--no-sandbox` or `--disable-dev-shm-usage`.
 
 The operator guide lists host requirements and a `doctor browser-sandbox` probe.
 
@@ -269,7 +271,8 @@ For mutually untrusted applications, use separate Xenoteer containers/X servers.
 
 ## 12. Viewer security
 
-- x11vnc is server-side view-only.
+- TigerVNC `X0tigervnc` enforces view-only server-side with key, pointer,
+  desktop-resize, and both clipboard directions disabled.
 - Raw RFB/websockify listener loopback only.
 - Authenticated viewer gateway uses WSS and exact origin.
 - Viewer ticket: random, short-lived, single-use, audience/origin/principal/
@@ -281,8 +284,9 @@ For mutually untrusted applications, use separate Xenoteer containers/X servers.
 - Do not place long-lived ticket in query if fragment/postMessage/bootstrap can
   avoid it; if WebSocket needs query, consume immediately and redact access logs.
 
-x11vnc is unmaintained and processes attacker-influenced RFB messages from the
-local gateway. Pin it, scan LibVNC advisories, minimize flags, and plan replacement.
+TigerVNC still processes attacker-influenced RFB messages from the local
+gateway. Pin the exact package, scan its advisories, minimize flags, never
+publish its listener, and keep the `ViewerBackend` replaceable.
 
 ## 13. Clipboard, screenshots, accessibility, logs
 
@@ -372,13 +376,14 @@ does not build a bespoke tamper-proof log store in release one.
 - Port/listener scan and unauthenticated X/D-Bus/RFB tests pass.
 - Container works without privileged/host namespaces/devices/socket.
 - Browser sandbox status proves required layers; production flags contain no
-  `--no-sandbox`.
+  `--no-sandbox` or `--disable-dev-shm-usage`; private `/dev/shm` is at least
+  4 GiB.
 - Read-only-root/cap-drop/no-new-privileges profiles tested and documented.
 - Path traversal/symlink/PID reuse/command injection tests pass.
 - Fuzzers cover untrusted parsers and length fields.
 - Canary secret never appears in logs/status/problem/metrics.
 - SBOM/provenance/signature and source obligations published.
-- x11vnc can be disabled/replaced without protocol break.
+- `X0tigervnc` can be disabled/replaced without a public protocol break.
 
 ## 19. Primary references
 
@@ -392,5 +397,5 @@ does not build a bespoke tamper-proof log store in release one.
 - [Docker build attestations](https://docs.docker.com/build/metadata/attestations/)
 - [Sigstore keyless signing overview](https://docs.sigstore.dev/cosign/signing/overview/)
 - [Cosign verification](https://docs.sigstore.dev/cosign/verifying/verify/)
-- [x11vnc upstream status](https://github.com/LibVNC/x11vnc)
-- [LibVNCServer security advisories](https://github.com/LibVNC/libvncserver/security)
+- [TigerVNC `X0tigervnc` documentation](https://tigervnc.org/doc/X0tigervnc.html)
+- [TigerVNC security advisories](https://github.com/TigerVNC/tigervnc/security)

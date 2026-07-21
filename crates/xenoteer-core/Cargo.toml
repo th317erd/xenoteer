@@ -1,0 +1,19 @@
+[package]
+name = "xenoteer-core"
+description = "Backend-independent domain and configuration logic for Xenoteer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license = "BUSL-1.1"
+publish = false
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+xenoteer-protocol = { version = "=0.1.0", path = "../xenoteer-protocol" }
+
+[lints]
+workspace = true

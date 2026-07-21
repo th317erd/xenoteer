@@ -1,0 +1,37 @@
+name: xenoteer
+
+services:
+  xenoteer:
+    profiles: [dev]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${XENOTEER_IMAGE:-xenoteer:dev}
+    environment:
+      XENOTEER__AUTH__TOKEN_FILE: /run/secrets/xenoteer_api_token
+      DESKTOP_PROFILE: ${DESKTOP_PROFILE:-bare}
+    ports:
+      - "127.0.0.1:${XENOTEER_PORT:-8080}:8080"
+    security_opt:
+      # Moby 29.1.3 default plus clone/setns/unshare for browser user namespaces.
+      - seccomp=./container/spikes/browser/seccomp_profile.json
+    secrets:
+      - source: xenoteer_api_token
+        target: xenoteer_api_token
+        uid: "1000"
+        gid: "1000"
+        mode: 0400
+    # Debian Chromium 150 injects --disable-dev-shm-usage below 3.8 GiB.
+    shm_size: 4gb
+    stop_grace_period: 40s
+    volumes:
+      - xenoteer_home:/home/xenoteer
+      - xenoteer_workspace:/workspace
+
+secrets:
+  xenoteer_api_token:
+    file: ${XENOTEER_TOKEN_FILE:?Set XENOTEER_TOKEN_FILE to a 0600 file containing a 256-bit token}
+
+volumes:
+  xenoteer_home:
+  xenoteer_workspace:
