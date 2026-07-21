@@ -71,7 +71,8 @@ expected_root = collections.Counter(
     {
         "s6-ipcserverd": 1,
         "s6-linux-init-s": 1,
-        "s6-supervise": 10,
+        "run-critical-sh": 1,
+        "s6-supervise": 11,
         "s6-svscan": 1,
     }
 )

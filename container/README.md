@@ -216,8 +216,9 @@ sets `wantedup=false` before signalling the process, including while startup is
 still in progress, and therefore preserves graceful exit 0. An unsolicited
 critical death remains `wantedup=true`. The first cascading critical finish hook
 atomically claims shutdown, records a nonzero child/signal result for s6-overlay,
-publishes a request to the dedicated supervised coordinator, and exits 125 so
-the service cannot respawn. The coordinator waits for the claimant's definitive
+publishes a request over a root-only FIFO to the dedicated supervised
+coordinator, and exits 125 so the service cannot respawn. The coordinator waits
+for the claimant's definitive
 down event before requesting halt, retries transient shutdown-daemon FIFO
 failures, and requires an unlocked downward s6-rc transaction within five
 seconds. If the orderly transaction cannot start, it

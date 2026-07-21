@@ -223,6 +223,10 @@ fi
 grep -Fq 'critical-shutdown-request' "$libexec/finish-critical"
 grep -Fq "/usr/local/libexec/xenoteer/request-critical-shutdown \"\$service\"" \
   "$libexec/run-critical-shutdown-coordinator"
+grep -Fq "mkfifo -m 0600 \"\$request_fifo\"" \
+  "$libexec/run-critical-shutdown-coordinator"
+grep -Fq "IFS= read -r service <\"\$request_fifo\"" \
+  "$libexec/run-critical-shutdown-coordinator"
 grep -Fq 'exec sleep infinity' "$libexec/run-critical-shutdown-coordinator"
 grep -Fq '/command/s6-svwait -D -t 5000' "$libexec/request-critical-shutdown"
 grep -Fq '/run/s6/basedir/bin/halt' "$libexec/request-critical-shutdown"

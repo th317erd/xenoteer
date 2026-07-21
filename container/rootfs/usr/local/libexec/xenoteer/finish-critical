@@ -99,21 +99,16 @@ if [ "$service" = critical-shutdown-coordinator ]; then
   exit 125
 fi
 
-# Publish one root-owned request only after the exit result is durable. The
-# dedicated supervised coordinator remains alive independently of this finish
-# process and waits for the claimant's definitive D event before requesting the
-# asynchronous overlay halt.
-request_file=/run/xenoteer/critical-shutdown-request
-request_temporary="/run/xenoteer/.critical-shutdown-request.$$"
-trap 'rm -f -- "$request_temporary"' EXIT HUP INT TERM
-if printf '%s\n' "$service" >"$request_temporary" \
-  && chmod 0600 "$request_temporary" \
-  && mv -f -- "$request_temporary" "$request_file"; then
-  trap - EXIT HUP INT TERM
-else
+# Publish one request only after the exit result is durable. The root-only FIFO
+# is opened by the dedicated supervised coordinator before it advertises
+# readiness. Bound the write in case the coordinator disappears in the narrow
+# interval between readiness and this finish hook.
+request_fifo=/run/xenoteer/critical-shutdown-request
+# The inner shell expands its positional parameters after timeout starts it.
+# shellcheck disable=SC2016
+if ! /usr/bin/timeout --signal=KILL 2 /bin/sh -c \
+  'printf "%s\n" "$1" >"$2"' sh "$service" "$request_fifo"; then
   echo 'failed to publish critical shutdown request; terminating supervision tree' >&2
-  rm -f -- "$request_temporary"
-  trap - EXIT HUP INT TERM
   /command/s6-svscanctl -t /run/service 2>/dev/null || :
 fi
 

@@ -154,8 +154,8 @@ Every longrun has:
 - finish-state inspection through the pinned s6 `wantedup` field, which is set
   false before a requested stop even when startup/readiness is incomplete;
 - a first-writer critical-shutdown claim, with a dedicated supervised
-  coordinator that waits for the claimant's definitive down event before
-  contacting the internal shutdown daemon;
+  coordinator waiting on a root-only FIFO; it waits for the claimant's
+  definitive down event before contacting the internal shutdown daemon;
 - stdout/stderr capture without leaking secret environment values;
 - execution through `s6-setuidgid xenoteer` for desktop services.
 

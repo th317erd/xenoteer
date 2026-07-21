@@ -2,18 +2,24 @@
 # SPDX-License-Identifier: BUSL-1.1
 set -eu
 
-request_file=/run/xenoteer/critical-shutdown-request
+request_fifo=/run/xenoteer/critical-shutdown-request
+
+if [ -e "$request_fifo" ] && [ ! -p "$request_fifo" ]; then
+  echo 'critical shutdown request path exists but is not a FIFO' >&2
+  exit 78
+fi
+if [ ! -p "$request_fifo" ]; then
+  umask 077
+  mkfifo -m 0600 "$request_fifo"
+fi
+chmod 0600 "$request_fifo"
 
 # Native readiness proves the independently supervised coordinator is running
 # before any critical X11 service can start.
 printf '\n' >&3
 exec 3>&-
 
-while [ ! -s "$request_file" ]; do
-  sleep 0.1
-done
-
-IFS= read -r service <"$request_file"
+IFS= read -r service <"$request_fifo"
 case "$service" in
   atspi|session-dbus|websockify|x0tigervnc|xenoteerd|xfce|xvfb) ;;
   *)

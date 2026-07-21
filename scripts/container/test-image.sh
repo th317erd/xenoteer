@@ -350,6 +350,9 @@ docker exec "$container_name" sh -eu -c '
   test "$(stat -c %a:%u:%g /run/user/1000/xdg/config)" = 700:1000:1000
   test "$(stat -c %a:%u:%g /run/user/1000/xdg/cache)" = 700:1000:1000
   test "$(stat -c %a:%u:%g /run/user/1000/xdg/data)" = 700:1000:1000
+  test -p /run/xenoteer/critical-shutdown-request
+  test "$(stat -c %a:%u:%g /run/xenoteer/critical-shutdown-request)" = 600:0:0
+  test "$(pgrep -f -c "^/bin/sh /usr/local/libexec/xenoteer/run-critical-shutdown-coordinator$")" -eq 1
   test "$(cat /run/xenoteer/shm-bytes)" -ge 4294967296
   test "$(cat /run/xenoteer/env/XVFB_SCREEN_GEOMETRY)" = 1920x1080x24
   DISPLAY=:99 XAUTHORITY=/run/user/1000/Xauthority xdpyinfo \
