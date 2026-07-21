@@ -1,0 +1,41 @@
+{
+  "browser": {
+    "check_default_browser": false,
+    "show_home_button": false
+  },
+  "credentials_enable_service": false,
+  "distribution": {
+    "do_not_create_any_shortcuts": true,
+    "do_not_create_desktop_shortcut": true,
+    "import_bookmarks": false,
+    "import_history": false,
+    "import_search_engine": false,
+    "make_chrome_default": false,
+    "skip_first_run_ui": true,
+    "suppress_first_run_bubble": true
+  },
+  "download": {
+    "default_directory": "/workspace/downloads",
+    "prompt_for_download": false
+  },
+  "intl": {
+    "accept_languages": "en-US,en"
+  },
+  "password_manager_enabled": false,
+  "profile": {
+    "default_content_setting_values": {
+      "geolocation": 2,
+      "notifications": 2
+    },
+    "exit_type": "Normal",
+    "exited_cleanly": true,
+    "password_manager_enabled": false
+  },
+  "session": {
+    "restore_on_startup": 5
+  },
+  "translate": {
+    "enabled": false
+  }
+}
+

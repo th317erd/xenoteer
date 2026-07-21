@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod desktop_supervisor;
 mod shutdown;
 
 use std::{fs, net::SocketAddr, path::PathBuf, process::ExitCode};
@@ -91,30 +92,46 @@ async fn run() -> Result<(), DaemonError> {
         .map_err(DaemonError::Bind)?;
     let local_address = listener.local_addr().map_err(DaemonError::Bind)?;
 
-    readiness.transition(ReadinessSnapshot::phase0_backend_probes_not_wired());
+    let desktop_spec = desktop_supervisor::DesktopProbeSpec::from_config(&config)?;
+    let (desktop_supervisor, mut desktop_fatal) =
+        desktop_supervisor::spawn(readiness.clone(), desktop_spec);
+    let desktop_cancellation = desktop_supervisor.cancellation();
     tracing::info!(
         listen = %local_address,
         readiness = "probing",
-        reason_code = "phase0_backend_probes_not_wired",
+        reason_code = "desktop_capabilities_pending",
         "xenoteerd HTTP listener started"
     );
 
     let shutdown_readiness = readiness.clone();
-    serve(listener, router(readiness.clone()), async move {
-        match shutdown_signals.wait().await {
-            Ok(signal) => tracing::info!(signal = %signal, "shutdown signal received"),
-            Err(error) => {
-                tracing::error!(error = %error, "failed to listen for shutdown signal");
+    let serve_result = serve(listener, router(readiness.clone()), async move {
+        tokio::select! {
+            signal = shutdown_signals.wait() => {
+                match signal {
+                    Ok(signal) => tracing::info!(signal = %signal, "shutdown signal received"),
+                    Err(error) => {
+                        tracing::error!(error = %error, "failed to listen for shutdown signal");
+                    }
+                }
+            }
+            _ = &mut desktop_fatal => {
+                tracing::error!("desktop supervisor requested daemon shutdown");
             }
         }
+        desktop_cancellation.cancel();
         shutdown_readiness.transition(ReadinessSnapshot::new(
             DesktopReadiness::Draining,
             None,
             Some("shutdown_in_progress"),
         ));
     })
-    .await
-    .map_err(DaemonError::Serve)?;
+    .await;
+
+    let supervisor_result = desktop_supervisor.shutdown().await;
+    if let Err(error) = serve_result {
+        return Err(DaemonError::Serve(error));
+    }
+    supervisor_result?;
 
     readiness.transition(ReadinessSnapshot::new(
         DesktopReadiness::Stopped,
@@ -149,6 +166,8 @@ enum DaemonError {
     ShutdownSignal(#[from] shutdown::ShutdownSignalError),
     #[error("HTTP server failed: {0}")]
     Serve(std::io::Error),
+    #[error(transparent)]
+    DesktopSupervisor(#[from] desktop_supervisor::DesktopSupervisorError),
 }
 
 #[cfg(test)]

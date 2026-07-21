@@ -1,0 +1,3 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+exec s6-setuidgid xenoteer /usr/local/libexec/xenoteer/probe-session-dbus

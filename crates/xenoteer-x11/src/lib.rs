@@ -8,6 +8,7 @@
 mod barrier;
 pub mod capture;
 mod connect;
+mod desktop;
 mod error;
 pub mod input;
 pub mod keyboard;
@@ -16,6 +17,9 @@ mod observe;
 pub use barrier::{fake_absolute_motion, query_pointer_barrier};
 pub use connect::{
     ExtensionInfo, ExtensionInventory, ExtensionName, OpenedConnection, XConnectionInfo, connect,
+};
+pub use desktop::{
+    DesktopProbeEvidence, DesktopProbeExpectation, probe_desktop, probe_desktop_steady_state,
 };
 pub use error::{Result, X11Error};
 pub use observe::{

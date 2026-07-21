@@ -44,7 +44,7 @@ components retain their
 own copyright and license terms. Transport in a Xenoteer repository or image
 does not relicense those components.
 
-Phase-0 images place exact evidence under /usr/share/doc/xenoteer, including the
+Production images place exact evidence under /usr/share/doc/xenoteer, including the
 Debian package/source manifest, first-party file manifest, final-file ownership
 manifest, Cargo component manifest, immutable source lock, and this notice.
 Repository source/SBOM scripts live under scripts/licenses. Risk-spike-specific

@@ -1,0 +1,14 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+case "${VIEWER_ENABLED:?viewer enabled setting is missing}" in
+  0) exec s6-setuidgid xenoteer s6-pause ;;
+  1) ;;
+  *) exit 64 ;;
+esac
+
+exec s6-setuidgid xenoteer \
+  env PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    websockify --web=/usr/share/novnc --heartbeat=30 \
+      127.0.0.1:6080 127.0.0.1:5900

@@ -16,7 +16,7 @@ fi
 
 while IFS= read -r line || [[ -n $line ]]; do
   [[ -z $line || $line == \#* ]] && continue
-  if [[ ! $line =~ ^[A-Z][A-Z0-9_]*=[A-Za-z0-9._:/@+-]+$ ]]; then
+  if [[ ! $line =~ ^[A-Z][A-Z0-9_]*=[A-Za-z0-9._:/@+~-]+$ ]]; then
     printf 'unsafe or malformed release.lock line: %s\n' "$line" >&2
     exit 1
   fi
@@ -27,9 +27,17 @@ done <"$release_lock"
 source "$release_lock"
 
 required=(
-  LOCK_FORMAT_VERSION SUPPORTED_PLATFORM DEBIAN_BASE_TAG DEBIAN_BASE_DIGEST
-  DEBIAN_SNAPSHOT RUST_BUILDER_TAG RUST_BUILDER_DIGEST RUST_BUILDER_DEBIAN_SUITE S6_OVERLAY_VERSION
+  LOCK_FORMAT_VERSION SUPPORTED_PLATFORM DOCKERFILE_FRONTEND HADOLINT_IMAGE
+  DEBIAN_BASE_TAG DEBIAN_BASE_DIGEST DEBIAN_SNAPSHOT DEBIAN_SUITE
+  DEBIAN_INRELEASE_SHA256 DEBIAN_UPDATES_INRELEASE_SHA256
+  DEBIAN_SECURITY_INRELEASE_SHA256 RUST_BUILDER_TAG RUST_BUILDER_DIGEST
+  RUST_BUILDER_DEBIAN_SUITE RUST_BUILDER_DEBIAN_INRELEASE_SHA256
+  RUST_BUILDER_DEBIAN_UPDATES_INRELEASE_SHA256
+  RUST_BUILDER_DEBIAN_SECURITY_INRELEASE_SHA256 S6_OVERLAY_VERSION
   S6_OVERLAY_NOARCH_SHA256 S6_OVERLAY_X86_64_SHA256 S6_OVERLAY_COPYING_SHA256
+  NOVNC_VERSION NOVNC_DEB_SHA256 PYTHON3_WEBSOCKIFY_VERSION
+  PYTHON3_WEBSOCKIFY_DEB_SHA256 TIGERVNC_SCRAPING_SERVER_VERSION
+  TIGERVNC_SCRAPING_SERVER_DEB_SHA256
 )
 for name in "${required[@]}"; do
   if [[ -z ${!name:-} ]]; then
@@ -40,12 +48,27 @@ done
 
 [[ $LOCK_FORMAT_VERSION == 1 ]]
 [[ $SUPPORTED_PLATFORM == linux/amd64 ]]
+[[ $DOCKERFILE_FRONTEND =~ ^docker/dockerfile:[0-9]+\.[0-9]+\.[0-9]+@sha256:[a-f0-9]{64}$ ]]
+[[ $HADOLINT_IMAGE =~ ^hadolint/hadolint:v[0-9]+\.[0-9]+\.[0-9]+-debian@sha256:[a-f0-9]{64}$ ]]
 [[ $DEBIAN_BASE_DIGEST =~ ^sha256:[a-f0-9]{64}$ ]]
 [[ $RUST_BUILDER_DIGEST =~ ^sha256:[a-f0-9]{64}$ ]]
 [[ $DEBIAN_SNAPSHOT =~ ^[0-9]{8}T[0-9]{6}Z$ ]]
+[[ $DEBIAN_SUITE == trixie ]]
+for metadata_hash in \
+  "$DEBIAN_INRELEASE_SHA256" \
+  "$DEBIAN_UPDATES_INRELEASE_SHA256" \
+  "$DEBIAN_SECURITY_INRELEASE_SHA256" \
+  "$RUST_BUILDER_DEBIAN_INRELEASE_SHA256" \
+  "$RUST_BUILDER_DEBIAN_UPDATES_INRELEASE_SHA256" \
+  "$RUST_BUILDER_DEBIAN_SECURITY_INRELEASE_SHA256"; do
+  [[ $metadata_hash =~ ^[a-f0-9]{64}$ ]]
+done
 [[ $S6_OVERLAY_NOARCH_SHA256 =~ ^[a-f0-9]{64}$ ]]
 [[ $S6_OVERLAY_X86_64_SHA256 =~ ^[a-f0-9]{64}$ ]]
 [[ $S6_OVERLAY_COPYING_SHA256 =~ ^[a-f0-9]{64}$ ]]
+[[ $NOVNC_DEB_SHA256 =~ ^[a-f0-9]{64}$ ]]
+[[ $PYTHON3_WEBSOCKIFY_DEB_SHA256 =~ ^[a-f0-9]{64}$ ]]
+[[ $TIGERVNC_SCRAPING_SERVER_DEB_SHA256 =~ ^[a-f0-9]{64}$ ]]
 
 if rg -n '(^|[=[:space:]])(latest|edge|main|master|UNRESOLVED|TODO)([=[:space:]]|$)' \
   "$release_lock" "$sources_lock" >/dev/null; then
@@ -72,11 +95,34 @@ awk -F '\t' '
   END { exit failed }
 ' "$sources_lock"
 
+test "$(head -n 1 "$repo_root/Dockerfile")" = "# syntax=$DOCKERFILE_FRONTEND"
+test "$(awk -F '\t' '$1 == "dockerfile-frontend" { print $5 }' "$sources_lock")" = \
+  "${DOCKERFILE_FRONTEND##*@sha256:}"
+test "$(awk -F '\t' '$1 == "hadolint" { print $5 }' "$sources_lock")" = \
+  "${HADOLINT_IMAGE##*@sha256:}"
 test "$(awk -F '\t' '$1 == "debian-base" { print $5 }' "$sources_lock")" = "${DEBIAN_BASE_DIGEST#sha256:}"
 test "$(awk -F '\t' '$1 == "rust-builder" { print $5 }' "$sources_lock")" = "${RUST_BUILDER_DIGEST#sha256:}"
+test "$(awk -F '\t' '$1 == "debian-inrelease-trixie" { print $5 }' "$sources_lock")" = \
+  "$DEBIAN_INRELEASE_SHA256"
+test "$(awk -F '\t' '$1 == "debian-inrelease-trixie-updates" { print $5 }' "$sources_lock")" = \
+  "$DEBIAN_UPDATES_INRELEASE_SHA256"
+test "$(awk -F '\t' '$1 == "debian-security-inrelease-trixie" { print $5 }' "$sources_lock")" = \
+  "$DEBIAN_SECURITY_INRELEASE_SHA256"
+test "$(awk -F '\t' '$1 == "rust-builder-debian-inrelease" { print $5 }' "$sources_lock")" = \
+  "$RUST_BUILDER_DEBIAN_INRELEASE_SHA256"
+test "$(awk -F '\t' '$1 == "rust-builder-debian-updates-inrelease" { print $5 }' "$sources_lock")" = \
+  "$RUST_BUILDER_DEBIAN_UPDATES_INRELEASE_SHA256"
+test "$(awk -F '\t' '$1 == "rust-builder-debian-security-inrelease" { print $5 }' "$sources_lock")" = \
+  "$RUST_BUILDER_DEBIAN_SECURITY_INRELEASE_SHA256"
 test "$(awk -F '\t' '$1 == "s6-overlay-noarch" { print $5 }' "$sources_lock")" = "$S6_OVERLAY_NOARCH_SHA256"
 test "$(awk -F '\t' '$1 == "s6-overlay-x86_64" { print $5 }' "$sources_lock")" = "$S6_OVERLAY_X86_64_SHA256"
 test "$(awk -F '\t' '$1 == "s6-overlay-copying" { print $5 }' "$sources_lock")" = "$S6_OVERLAY_COPYING_SHA256"
+test "$(awk -F '\t' '$1 == "novnc-debian-package" { print $2 ":" $5 }' "$sources_lock")" = \
+  "$NOVNC_VERSION:$NOVNC_DEB_SHA256"
+test "$(awk -F '\t' '$1 == "python3-websockify-debian-package" { print $2 ":" $5 }' "$sources_lock")" = \
+  "$PYTHON3_WEBSOCKIFY_VERSION:$PYTHON3_WEBSOCKIFY_DEB_SHA256"
+test "$(awk -F '\t' '$1 == "tigervnc-scraping-server-debian-package" { print $2 ":" $5 }' "$sources_lock")" = \
+  "$TIGERVNC_SCRAPING_SERVER_VERSION:$TIGERVNC_SCRAPING_SERVER_DEB_SHA256"
 test "$(awk -F '\t' '$1 == "moby-docker-default-seccomp" { print $2 ":" $5 }' "$sources_lock")" = \
   'docker-v29.1.3@fbf3ed25f893e6ce21336f1101590e40a13934f4:01536f1d1df938ae611eba20d6349e0de7a99b6ecdee1549427a0b01b8301e28'
 test "$(awk -F '\t' '$1 == "playwright-browser-seccomp-rule" { print $2 ":" $5 }' "$sources_lock")" = \

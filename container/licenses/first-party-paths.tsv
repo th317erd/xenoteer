@@ -3,6 +3,7 @@
 .editorconfig	BUSL-1.1	LICENSE
 .gitattributes	BUSL-1.1	LICENSE
 .gitignore	BUSL-1.1	LICENSE
+.cargo/*	BUSL-1.1	LICENSE
 .codex/*	BUSL-1.1	LICENSE
 .github/*	BUSL-1.1	LICENSE
 Cargo.lock	BUSL-1.1	LICENSE

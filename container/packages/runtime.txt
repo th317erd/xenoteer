@@ -1,12 +1,18 @@
-# Phase-0 runtime packages. Keep alphabetized; do not add recommends implicitly.
+# Core runtime packages. Keep alphabetized; do not add recommends implicitly.
 ca-certificates
 curl
 dbus
-dbus-x11
+dbus-bin
+dbus-daemon
+dbus-user-session
+libglib2.0-bin
+libxkbcommon-x11-0
 locales
 procps
+tzdata
 util-linux
 x11-utils
 x11-xserver-utils
 xauth
+xkb-data
 xvfb

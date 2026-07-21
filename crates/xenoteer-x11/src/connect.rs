@@ -117,6 +117,10 @@ pub struct XConnectionInfo {
     pub width_px: u16,
     /// Root height in physical pixels.
     pub height_px: u16,
+    /// Server-reported screen width in millimeters.
+    pub width_mm: u16,
+    /// Server-reported screen height in millimeters.
+    pub height_mm: u16,
     /// Core minimum keycode.
     pub min_keycode: u8,
     /// Core maximum keycode.
@@ -184,6 +188,8 @@ pub fn connect(display: &str) -> Result<OpenedConnection> {
         root_depth: screen.root_depth,
         width_px: screen.width_in_pixels,
         height_px: screen.height_in_pixels,
+        width_mm: screen.width_in_millimeters,
+        height_mm: screen.height_in_millimeters,
         min_keycode: setup.min_keycode,
         max_keycode: setup.max_keycode,
         extensions,

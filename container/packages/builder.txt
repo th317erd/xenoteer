@@ -5,4 +5,5 @@ libatspi2.0-dev
 libdbus-1-dev
 libglib2.0-dev
 libxkbcommon-dev
+libxkbcommon-x11-dev
 pkg-config

@@ -13,10 +13,15 @@ publish = false
 clap.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+uuid.workspace = true
+xenoteer-atspi = { version = "=0.1.0", path = "../xenoteer-atspi", features = ["live-atspi"] }
 xenoteer-core = { version = "=0.1.0", path = "../xenoteer-core" }
+xenoteer-protocol = { version = "=0.1.0", path = "../xenoteer-protocol" }
 xenoteer-server = { version = "=0.1.0", path = "../xenoteer-server" }
+xenoteer-x11 = { version = "=0.1.0", path = "../xenoteer-x11", features = ["native-xkbcommon"] }
 
 [lints]
 workspace = true

@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+fixture_root=/usr/share/xenoteer/fixtures/desktop-apps
+profile=${XDG_DATA_HOME:?XDG_DATA_HOME is required}/xenoteer/browser-profiles/electron
+cache=${XDG_CACHE_HOME:?XDG_CACHE_HOME is required}/xenoteer/electron
+"$fixture_root/browser-runtime-doctor"
+install -d -m 0700 "$profile" "$cache" /workspace/downloads
+
+exec /opt/xenoteer-electron/electron \
+  --remote-debugging-address=127.0.0.1 \
+  --remote-debugging-port=0 \
+  --user-data-dir="$profile" \
+  "$fixture_root/electron-main.js"

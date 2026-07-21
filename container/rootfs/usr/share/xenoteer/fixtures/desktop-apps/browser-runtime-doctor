@@ -1,0 +1,65 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+warn_only=false
+case "${1:-}" in
+  '') ;;
+  --warn) warn_only=true ;;
+  *) echo 'usage: browser-runtime-doctor [--warn]' >&2; exit 64 ;;
+esac
+
+problems=0
+problem() {
+  problems=$((problems + 1))
+  printf 'browser runtime warning: %s\n' "$1" >&2
+}
+
+expected_uid=${BROWSER_EXPECTED_UID:-1000}
+if [ "$(id -u)" -ne "$expected_uid" ]; then
+  problem "browser must run as UID $expected_uid"
+fi
+
+for variable in CHROMIUM_USER_FLAGS QTWEBENGINE_CHROMIUM_FLAGS; do
+  case "$variable" in
+    CHROMIUM_USER_FLAGS) value=${CHROMIUM_USER_FLAGS:-} ;;
+    QTWEBENGINE_CHROMIUM_FLAGS) value=${QTWEBENGINE_CHROMIUM_FLAGS:-} ;;
+  esac
+  case " $value " in
+    *' --no-sandbox '*) problem "$variable disables the browser sandbox" ;;
+    *' --disable-dev-shm-usage '*) problem "$variable diverts shared memory to /tmp" ;;
+  esac
+done
+if [ -n "${QTWEBENGINE_DISABLE_SANDBOX:-}" ]; then
+  problem 'QTWEBENGINE_DISABLE_SANDBOX disables the QtWebEngine sandbox'
+fi
+
+shm_path=${SHM_PATH:-/dev/shm}
+if [ ! -d "$shm_path" ]; then
+  problem "$shm_path is missing"
+else
+  shm_mode=$(stat -c '%a' "$shm_path")
+  [ "$shm_mode" = 1777 ] || problem "$shm_path mode is $shm_mode, expected 1777"
+  shm_stats=$(df -B1 --output=size,avail "$shm_path" | awk 'NR == 2 { print $1, $2 }')
+  shm_bytes=${shm_stats%% *}
+  shm_available=${shm_stats#* }
+  case "$shm_bytes:$shm_available" in
+    *[!0-9:]*|:*) problem "could not parse $shm_path capacity"; shm_bytes=0; shm_available=0 ;;
+  esac
+  [ "$shm_bytes" -ge 4294967296 ] \
+    || problem "$shm_path is $shm_bytes bytes, expected at least 4294967296"
+  [ "$shm_available" -ge 4080218931 ] \
+    || problem "$shm_path has $shm_available available bytes; Debian Chromium may inject the forbidden shared-memory fallback below 4080218931"
+fi
+
+userns_clone_path=${USERNS_CLONE_PATH:-/proc/sys/kernel/unprivileged_userns_clone}
+if [ -r "$userns_clone_path" ] \
+  && [ "$(cat "$userns_clone_path")" != 1 ]; then
+  problem 'unprivileged user namespaces are disabled'
+fi
+
+if [ "$problems" -ne 0 ] && [ "$warn_only" != true ]; then
+  exit 78
+fi
+printf '{"type":"browser_runtime_doctor","ok":%s,"warnings":%s}\n' \
+  "$([ "$problems" -eq 0 ] && printf true || printf false)" "$problems"

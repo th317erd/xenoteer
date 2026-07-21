@@ -4,10 +4,24 @@ set -eu
 
 env_dir=/run/xenoteer/env
 test -r "$env_dir/XENOTEER__SERVER__LISTEN"
+test -r "$env_dir/VIEWER_REQUIRED"
 http_addr=$(cat "$env_dir/XENOTEER__SERVER__LISTEN")
+viewer_required=$(cat "$env_dir/VIEWER_REQUIRED")
 case "$http_addr" in
   0.0.0.0:*) probe_addr="127.0.0.1:${http_addr##*:}" ;;
   127.0.0.1:*) probe_addr=$http_addr ;;
   *) exit 1 ;;
 esac
-exec curl --fail --silent --show-error --max-time 2 "http://$probe_addr/livez"
+/command/s6-envdir -f -L "$env_dir" \
+  /command/s6-setuidgid xenoteer /usr/local/libexec/xenoteer/probe-xfce
+case "$viewer_required" in
+  0) ;;
+  1)
+    /command/s6-envdir -f -L "$env_dir" \
+      /command/s6-setuidgid xenoteer /usr/local/libexec/xenoteer/probe-x0tigervnc
+    /command/s6-envdir -f -L "$env_dir" \
+      /command/s6-setuidgid xenoteer /usr/local/libexec/xenoteer/probe-websockify
+    ;;
+  *) exit 1 ;;
+esac
+exec curl --fail --silent --show-error --max-time 2 "http://$probe_addr/readyz"

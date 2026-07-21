@@ -1,0 +1,15 @@
+{
+  "background_mode": {
+    "enabled": false
+  },
+  "browser": {
+    "enabled_labs_experiments": []
+  },
+  "metrics": {
+    "reporting_enabled": false
+  },
+  "stability": {
+    "exited_cleanly": true
+  }
+}
+

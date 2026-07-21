@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="color-scheme" content="light">
+<title>Xenoteer Browser Fixture</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { width: 100%; min-height: 100%; margin: 0; }
+  body {
+    background: #203040;
+    color: #f8f8f2;
+    display: grid;
+    font: 15px "DejaVu Sans", sans-serif;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    padding: 16px;
+  }
+  section { border: 2px solid #8be9fd; padding: 12px; min-width: 0; }
+  label, button, [role="button"] { display: block; margin: 8px 0; }
+  input, textarea, select { font: 15px "DejaVu Sans Mono", monospace; max-width: 100%; }
+  #drag-source, #drop-target { border: 1px solid #ffb86c; padding: 8px; }
+  #hover-menu-items { display: none; }
+  #hover-menu:focus-within #hover-menu-items, #hover-menu:hover #hover-menu-items { display: block; }
+  #animated { width: 20px; height: 20px; background: #50fa7b; animation: pulse 1s steps(2) infinite; }
+  @keyframes pulse { to { transform: translateX(40px); } }
+  canvas { border: 1px solid #bd93f9; }
+</style>
+<body data-xenoteer-marker="phase2-rendered">
+  <section aria-label="Form controls">
+    <h1 id="fixture-heading">Xenoteer browser fixture</h1>
+    <p id="browser-marker" tabindex="0">Browser fixture marker</p>
+    <label for="entry">Stable entry</label>
+    <input id="entry" aria-label="Stable entry" value="editable fixture text">
+    <label for="password">Protected entry</label>
+    <input id="password" aria-label="Protected entry" type="password" value="fixture-secret">
+    <label><input id="check" type="checkbox" checked> Stable checkbox</label>
+    <fieldset><legend>Stable radio group</legend>
+      <label><input type="radio" name="radio" checked> Alpha radio</label>
+      <label><input type="radio" name="radio"> Beta radio</label>
+    </fieldset>
+    <label for="choice">Stable choice</label>
+    <select id="choice" aria-label="Stable choice"><option>Alpha</option><option selected>Beta</option></select>
+    <label for="range">Stable range</label><input id="range" aria-label="Stable range" type="range" value="40">
+    <button id="button" type="button">Stable button</button>
+    <button id="disabled" type="button" disabled>Disabled button</button>
+  </section>
+  <section aria-label="Rich interactions">
+    <h2>Rich interaction surface</h2>
+    <div id="editable" role="textbox" aria-label="Editable content" contenteditable="true">editable rich text</div>
+    <div id="hover-menu" tabindex="0" role="menu" aria-label="Hover menu">Hover menu
+      <div id="hover-menu-items"><button role="menuitem">Nested menu item</button></div>
+    </div>
+    <div id="drag-source" draggable="true" role="button" tabindex="0" aria-label="Drag source">Drag source</div>
+    <div id="drop-target" role="region" aria-label="Drop target">Drop target</div>
+    <div id="shadow-host"></div>
+    <iframe title="Stable iframe" srcdoc="<!doctype html><button aria-label='Iframe button'>Iframe button</button>"></iframe>
+    <ul id="virtual-tree" role="tree" aria-label="Virtual tree"></ul>
+    <canvas id="canvas" width="180" height="60" role="img" aria-label="Deterministic canvas"></canvas>
+    <div id="animated" role="img" aria-label="Deterministic animation"></div>
+    <p id="font-coverage" aria-label="Font coverage">Latin — العربية — 中文 — e&#x301; — 😀</p>
+    <p id="status" role="status">ready</p>
+  </section>
+<script>
+  "use strict";
+  const kind = new URLSearchParams(location.search).get("browser") || "generic";
+  const labels = {
+    chromium: ["Chromium", "Chromium fixture marker"],
+    firefox: ["Firefox", "Firefox fixture marker"],
+    qtwebengine: ["QtWebEngine", "QtWebEngine fixture marker"],
+    electron: ["Electron", "Electron fixture marker"],
+    generic: ["Browser", "Browser fixture marker"]
+  };
+  const [display, marker] = labels[kind] || labels.generic;
+  document.title = `Xenoteer ${display} Browser Fixture`;
+  document.getElementById("fixture-heading").textContent = `${display} browser fixture`;
+  document.getElementById("browser-marker").textContent = marker;
+  document.getElementById("browser-marker").setAttribute("aria-label", marker);
+  document.body.dataset.browser = kind;
+
+  const shadow = document.getElementById("shadow-host").attachShadow({mode: "open"});
+  shadow.innerHTML = '<button aria-label="Shadow button">Shadow button</button>';
+  const tree = document.getElementById("virtual-tree");
+  for (let i = 0; i < 64; i += 1) {
+    const item = document.createElement("li");
+    item.setAttribute("role", "treeitem");
+    item.setAttribute("aria-label", `Virtual item ${String(i).padStart(2, "0")}`);
+    item.textContent = `Virtual item ${String(i).padStart(2, "0")}`;
+    tree.appendChild(item);
+  }
+  const context = document.getElementById("canvas").getContext("2d");
+  context.fillStyle = "#ff79c6"; context.fillRect(0, 0, 60, 60);
+  context.fillStyle = "#8be9fd"; context.fillRect(60, 0, 60, 60);
+  context.fillStyle = "#f1fa8c"; context.fillRect(120, 0, 60, 60);
+  document.getElementById("drag-source").addEventListener("dragstart", event => {
+    event.dataTransfer.setData("text/plain", "xenoteer-drag-payload");
+  });
+  document.getElementById("drop-target").addEventListener("dragover", event => event.preventDefault());
+  document.getElementById("drop-target").addEventListener("drop", event => {
+    event.preventDefault(); document.getElementById("status").textContent = event.dataTransfer.getData("text/plain");
+  });
+</script>
+</body>
+</html>

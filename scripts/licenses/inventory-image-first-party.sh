@@ -5,9 +5,28 @@ set -euo pipefail
 root=${1:-/}
 output=${2:-/usr/share/doc/xenoteer/first-party-files.tsv}
 policy=${3:-/usr/share/xenoteer/image-first-party-paths.tsv}
+s6_manifest=${4:-/usr/share/doc/xenoteer/s6-overlay-files.tsv}
 temporary=$(mktemp)
 trap 'rm -f -- "$temporary"' EXIT
 rm -f -- "$root$output"
+
+# The final image contains stock s6-overlay files and Xenoteer service files in
+# the same directory tree. Exact locked s6 paths remain third-party: skip them
+# here so the final inventory can enforce the s6 manifest's hash and reverse
+# completeness without ambiguous first-party ownership.
+declare -A locked_s6_path
+if [[ -f $root$s6_manifest ]]; then
+  while IFS=$'\t' read -r path kind hash _target; do
+    [[ $path == path ]] && continue
+    [[ $path == /* && $kind =~ ^(file|symlink)$ && $hash =~ ^[a-f0-9]{64}$ \
+      && -z ${locked_s6_path[$path]:-} ]] || {
+      printf 'invalid or duplicate s6 path while inventorying first-party files: %s\n' \
+        "$path" >&2
+      exit 1
+    }
+    locked_s6_path["$path"]=true
+  done <"$root$s6_manifest"
+fi
 
 classify() {
   local path=$1 pattern license evidence
@@ -34,7 +53,9 @@ scopes=(
   /usr/local/libexec/xenoteer
   /usr/share/doc/xenoteer/LICENSE
   /usr/share/doc/xenoteer/NOTICE
+  /usr/share/doc/xenoteer/release.lock
   /usr/share/doc/xenoteer/sources.lock
+  /usr/share/novnc/mandatory.json
   /usr/share/xenoteer
 )
 [[ -e $root/usr/local/bin/xenoteerd ]] && scopes+=(/usr/local/bin/xenoteerd)
@@ -43,6 +64,7 @@ for scope in "${scopes[@]}"; do
   [[ -e $root$scope ]] || { printf 'missing first-party image scope: %s\n' "$scope" >&2; exit 1; }
   while IFS= read -r -d '' file; do
     path=${file#"$root"}
+    [[ -z ${locked_s6_path[$path]:-} ]] || continue
     classification=$(classify "$path")
     IFS=$'\t' read -r license evidence <<<"$classification"
     hash=$(sha256sum "$file" | awk '{print $1}')

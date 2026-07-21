@@ -4,6 +4,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '17 7 * * *'
 
 permissions:
   contents: read
@@ -84,6 +87,11 @@ jobs:
             xvfb
       - name: Container and provenance static gates
         run: scripts/container/test-static.sh
+      - name: Lint Dockerfile with pinned Hadolint
+        run: |
+          source container/locks/release.lock
+          sudo docker run --rm -i "$HADOLINT_IMAGE" \
+            hadolint --failure-threshold warning - < Dockerfile
       - name: Authenticated X11, XTEST, capture, and xkbcommon spikes
         run: tests/platform/run-x11-spikes.sh
       - name: Real GTK and AT-SPI spike
@@ -91,8 +99,8 @@ jobs:
       - name: Concurrent isolated-display regression
         run: tests/platform/run-concurrent-spikes.sh
 
-  container-phase0:
-    name: Pinned Phase 0 container and risk spikes
+  container-phase2:
+    name: Pinned Phase 2 container and application matrix
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -102,13 +110,38 @@ jobs:
           sudo apt-get install --yes --no-install-recommends jq ripgrep shellcheck
       - name: Verify immutable inputs online
         run: scripts/container/validate-locks.sh --online
-      - name: Build pinned Phase 0 runtime image
+      - name: Build pinned Phase 2 runtime image
         env:
-          XENOTEER_IMAGE: xenoteer:phase0
+          XENOTEER_IMAGE: xenoteer:phase2
         run: scripts/container/build.sh
       - name: Exercise PID 1, health, shutdown, failure, and hardened profiles
-        run: sudo scripts/container/test-image.sh xenoteer:phase0
+        run: sudo scripts/container/test-image.sh xenoteer:phase2
       - name: Exercise real loopback view-only noVNC chain
-        run: sudo scripts/container/test-novnc-spike.sh
-      - name: Exercise non-root Chromium and QtWebEngine sandboxes
-        run: sudo scripts/container/test-browser-spike.sh xenoteer:phase0 xenoteer:browser-spike
+        run: sudo env XENOTEER_NOVNC_SPIKE_BASE_IMAGE=xenoteer:phase2 scripts/container/test-novnc-spike.sh
+      - name: Build exact derived desktop application fixture
+        env:
+          XENOTEER_IMAGE: xenoteer:phase2
+          XENOTEER_DESKTOP_APPS_IMAGE: xenoteer:desktop-apps-test
+        run: scripts/container/build-desktop-app-fixture.sh
+      - name: Exercise GTK, Qt, browser, Electron, accessibility, and hardened matrix
+        run: sudo scripts/container/test-desktop-app-image.sh xenoteer:desktop-apps-test
+
+  container-phase2-soak:
+    name: Phase 2 30-minute idle soak
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install build-gate dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends jq ripgrep shellcheck
+      - name: Verify immutable inputs online
+        run: scripts/container/validate-locks.sh --online
+      - name: Build pinned Phase 2 runtime image
+        env:
+          XENOTEER_IMAGE: xenoteer:phase2-soak
+        run: scripts/container/build.sh
+      - name: Hold exact idle runtime healthy for 30 minutes
+        run: sudo env XENOTEER_IDLE_SOAK_SECONDS=1800 scripts/container/test-idle-soak.sh xenoteer:phase2-soak

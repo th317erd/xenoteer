@@ -1,0 +1,32 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+fixture_root=/usr/share/xenoteer/fixtures/desktop-apps
+profile=${XDG_DATA_HOME:?XDG_DATA_HOME is required}/xenoteer/browser-profiles/chromium
+cache=${XDG_CACHE_HOME:?XDG_CACHE_HOME is required}/xenoteer/chromium
+"$fixture_root/browser-runtime-doctor"
+install -d -m 0700 "$profile" "$cache" /workspace/downloads
+
+exec chromium \
+  --user-data-dir="$profile" \
+  --disk-cache-dir="$cache" \
+  --disable-background-networking \
+  --disable-breakpad \
+  --disable-component-update \
+  --disable-default-apps \
+  --disable-extensions \
+  --disable-features=AutofillServerCommunication,MediaRouter,OptimizationHints,Translate \
+  --disable-gpu \
+  --disable-notifications \
+  --disable-session-crashed-bubble \
+  --disable-sync \
+  --force-renderer-accessibility=complete \
+  --lang=en-US \
+  --no-default-browser-check \
+  --no-first-run \
+  --password-store=basic \
+  --remote-debugging-address=127.0.0.1 \
+  --remote-debugging-port=0 \
+  --window-size=800,600 \
+  'file:///usr/share/xenoteer/fixtures/desktop-apps/fixture.html?browser=chromium'

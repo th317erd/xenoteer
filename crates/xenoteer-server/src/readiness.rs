@@ -14,7 +14,7 @@ pub enum DesktopReadiness {
     Probing,
     /// Every required capability probe passed.
     Ready,
-    /// The daemon is alive but a required capability is unavailable.
+    /// Every required capability passed, but an optional capability is unavailable.
     Degraded,
     /// New work is refused while shutdown cleanup runs.
     Draining,
@@ -31,7 +31,7 @@ pub struct ReadinessSnapshot {
     pub state: DesktopReadiness,
     /// Desktop generation, once a session exists.
     pub desktop_generation: Option<DesktopGeneration>,
-    /// Stable safe reason code for non-ready states.
+    /// Stable safe reason code for non-nominal states.
     pub reason_code: Option<String>,
 }
 
@@ -66,15 +66,17 @@ impl ReadinessSnapshot {
     /// Returns whether command admission may claim the desktop is ready.
     #[must_use]
     pub const fn is_ready(&self) -> bool {
-        matches!(self.state, DesktopReadiness::Ready)
+        matches!(
+            self.state,
+            DesktopReadiness::Ready | DesktopReadiness::Degraded
+        )
     }
 }
 
 /// Cloneable readiness reader and sole transition interface.
 ///
-/// The full supervisor actor becomes the sole writer in a later phase. This
-/// Phase-0 handle provides the same revision-safe watch semantics to health
-/// handlers without implying that desktop probes already exist.
+/// The desktop supervisor owns normal lifecycle writes. The handle provides
+/// revision-safe watch semantics to health and future status handlers.
 #[derive(Debug, Clone)]
 pub struct ReadinessHandle {
     sender: watch::Sender<ReadinessSnapshot>,
@@ -93,6 +95,27 @@ impl ReadinessHandle {
         self.sender.send_replace(snapshot);
     }
 
+    /// Publishes a supervisor transition unless shutdown already owns state.
+    ///
+    /// This closes the race where an in-flight startup probe completes after
+    /// the signal path has entered `Draining` and would otherwise advertise the
+    /// desktop as probing or ready again.
+    pub fn transition_if_not_stopping(&self, snapshot: ReadinessSnapshot) -> bool {
+        let mut changed = false;
+        self.sender.send_if_modified(|current| {
+            if matches!(
+                current.state,
+                DesktopReadiness::Draining | DesktopReadiness::Stopped
+            ) {
+                return false;
+            }
+            *current = snapshot.clone();
+            changed = true;
+            true
+        });
+        changed
+    }
+
     /// Returns an immutable clone of current readiness.
     #[must_use]
     pub fn snapshot(&self) -> ReadinessSnapshot {
@@ -103,5 +126,42 @@ impl ReadinessHandle {
     #[must_use]
     pub fn subscribe(&self) -> watch::Receiver<ReadinessSnapshot> {
         self.sender.subscribe()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DesktopReadiness, ReadinessHandle, ReadinessSnapshot};
+
+    #[test]
+    fn supervisor_transition_cannot_regress_shutdown_state() {
+        let readiness = ReadinessHandle::new(ReadinessSnapshot::new(
+            DesktopReadiness::Booting,
+            None,
+            Some("test_boot"),
+        ));
+        readiness.transition(ReadinessSnapshot::new(
+            DesktopReadiness::Draining,
+            None,
+            Some("test_draining"),
+        ));
+        assert!(
+            !readiness.transition_if_not_stopping(ReadinessSnapshot::new(
+                DesktopReadiness::Ready,
+                None,
+                None::<String>,
+            ))
+        );
+        assert_eq!(readiness.snapshot().state, DesktopReadiness::Draining);
+    }
+
+    #[test]
+    fn optional_degradation_preserves_required_readiness() {
+        let snapshot = ReadinessSnapshot::new(
+            DesktopReadiness::Degraded,
+            Some(xenoteer_protocol::DesktopGeneration::new()),
+            Some("optional_viewer_unavailable"),
+        );
+        assert!(snapshot.is_ready());
     }
 }

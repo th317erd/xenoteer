@@ -25,7 +25,9 @@ services:
         hard: 512
     tmpfs:
       # s6-overlay executes its stage-2 init from /run/s6/basedir/bin.
-      - /run:rw,nosuid,nodev,exec,size=64m,mode=0755
+      # Ephemeral XDG config/data/cache and bounded browser profiles also live
+      # under /run/user/1000; keep this private and large enough for smoke use.
+      - /run:rw,nosuid,nodev,exec,size=512m,mode=0755
       - /tmp:rw,nosuid,nodev,noexec,size=1g,mode=1777
     logging:
       driver: json-file

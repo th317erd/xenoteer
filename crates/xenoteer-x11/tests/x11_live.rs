@@ -8,8 +8,8 @@ use x11rb::protocol::xproto::{
     WindowClass,
 };
 use xenoteer_x11::{
-    ExtensionName, OBSERVATION_EVENT_CAPACITY, ObservationPollThread, PollThreadEvent, connect,
-    fake_absolute_motion, query_pointer_barrier,
+    DesktopProbeExpectation, ExtensionName, OBSERVATION_EVENT_CAPACITY, ObservationPollThread,
+    PollThreadEvent, connect, fake_absolute_motion, probe_desktop, query_pointer_barrier,
 };
 
 fn display() -> Result<String, Box<dyn std::error::Error>> {
@@ -41,6 +41,28 @@ fn core_roundtrip_inventories_extensions_and_barriers() -> Result<(), Box<dyn st
 
     let pointer = query_pointer_barrier(&opened.connection, opened.info.root)?;
     assert!(pointer.same_screen);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires the authenticated Phase-2 Xvfb/XFCE profile"]
+fn desktop_probe_proves_ewmh_lifecycle_workspace_and_capture()
+-> Result<(), Box<dyn std::error::Error>> {
+    let evidence = probe_desktop(
+        &display()?,
+        DesktopProbeExpectation {
+            width_px: 1_920,
+            height_px: 1_080,
+            depth: 24,
+            dpi: 96,
+        },
+    )?;
+    assert_ne!(evidence.supporting_wm_window, 0);
+    assert!(evidence.supported_atom_count >= 5);
+    assert_eq!(evidence.workspace_count, 1);
+    assert_eq!(evidence.current_workspace, 0);
+    assert_eq!((evidence.dpi_x, evidence.dpi_y), (96, 96));
+    assert_eq!(evidence.capture_bytes, 4);
     Ok(())
 }
 

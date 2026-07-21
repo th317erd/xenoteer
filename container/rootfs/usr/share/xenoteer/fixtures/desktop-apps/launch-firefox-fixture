@@ -1,0 +1,22 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+fixture_root=/usr/share/xenoteer/fixtures/desktop-apps
+profile=${XDG_DATA_HOME:?XDG_DATA_HOME is required}/xenoteer/browser-profiles/firefox
+"$fixture_root/browser-runtime-doctor"
+install -d -m 0700 "$profile" /workspace/downloads
+cat >"$profile/user.js" <<'EOF'
+user_pref("accessibility.force_disabled", 0);
+user_pref("app.normandy.enabled", false);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("toolkit.telemetry.enabled", false);
+EOF
+
+exec firefox-esr \
+  --no-remote \
+  --new-instance \
+  --profile "$profile" \
+  'file:///usr/share/xenoteer/fixtures/desktop-apps/fixture.html?browser=firefox'

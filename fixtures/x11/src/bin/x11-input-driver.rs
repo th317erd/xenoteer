@@ -6,7 +6,9 @@ use std::error::Error;
 
 use serde::Serialize;
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{ConnectionExt as _, MOTION_NOTIFY_EVENT};
+use x11rb::protocol::xproto::{
+    ConnectionExt as _, KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT,
+};
 use x11rb::protocol::xtest::ConnectionExt as _;
 
 #[derive(Serialize)]
@@ -15,12 +17,17 @@ struct BarrierEvidence {
     root_x: i16,
     root_y: i16,
     child: u32,
+    focus: u32,
 }
 
 struct Options {
     x: i16,
     y: i16,
     expected_window: u32,
+    query_only: bool,
+    skip_window_check: bool,
+    expected_focus_window: Option<u32>,
+    keycode: Option<u8>,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -33,9 +40,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or("selected screen is absent")?
         .root;
 
-    connection
-        .xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, options.x, options.y, 0)?
-        .check()?;
+    if !options.query_only {
+        connection
+            .xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, options.x, options.y, 0)?
+            .check()?;
+        if let Some(keycode) = options.keycode {
+            connection
+                .xtest_fake_input(KEY_PRESS_EVENT, keycode, 0, root, 0, 0, 0)?
+                .check()?;
+            connection
+                .xtest_fake_input(KEY_RELEASE_EVENT, keycode, 0, root, 0, 0, 0)?
+                .check()?;
+        }
+    }
     // QueryPointer is deliberately issued on this same connection. Its reply
     // is an ordering barrier for the preceding XTEST request.
     let reply = connection.query_pointer(root)?.reply()?;
@@ -46,7 +63,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         )
         .into());
     }
-    if reply.child != options.expected_window {
+    if !options.skip_window_check && reply.child != options.expected_window {
         let attributes = connection
             .get_window_attributes(options.expected_window)?
             .reply()?;
@@ -65,6 +82,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         )
         .into());
     }
+    let focus = connection.get_input_focus()?.reply()?.focus;
+    if options
+        .expected_focus_window
+        .is_some_and(|expected| focus != expected)
+    {
+        return Err(format!(
+            "input focus mismatch: expected {}, got {focus}",
+            options.expected_focus_window.unwrap_or_default()
+        )
+        .into());
+    }
     println!(
         "{}",
         serde_json::to_string(&BarrierEvidence {
@@ -72,6 +100,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             root_x: reply.root_x,
             root_y: reply.root_y,
             child: reply.child,
+            focus,
         })?
     );
     Ok(())
@@ -81,6 +110,10 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut x = None;
     let mut y = None;
     let mut expected_window = None;
+    let mut query_only = false;
+    let mut skip_window_check = false;
+    let mut expected_focus_window = None;
+    let mut keycode = None;
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -93,8 +126,29 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                         .parse()?,
                 );
             }
+            "--query-only" => query_only = true,
+            "--skip-window-check" => skip_window_check = true,
+            "--expected-focus-window" => {
+                expected_focus_window = Some(
+                    args.next()
+                        .ok_or("--expected-focus-window requires an integer")?
+                        .parse()?,
+                );
+            }
+            "--keycode" => {
+                keycode = Some(
+                    args.next()
+                        .ok_or("--keycode requires an integer")?
+                        .parse()?,
+                );
+            }
             _ => {
-                return Err("usage: x11-input-driver --x N --y N --expected-window WINDOW".into());
+                return Err(
+                    "usage: x11-input-driver --x N --y N --expected-window WINDOW \
+                     [--query-only] [--skip-window-check] \
+                     [--expected-focus-window WINDOW] [--keycode KEYCODE]"
+                        .into(),
+                );
             }
         }
     }
@@ -102,5 +156,9 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         x: x.ok_or("missing --x")?,
         y: y.ok_or("missing --y")?,
         expected_window: expected_window.ok_or("missing --expected-window")?,
+        query_only,
+        skip_window_check,
+        expected_focus_window,
+        keycode,
     })
 }

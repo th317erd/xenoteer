@@ -101,13 +101,30 @@ It:
 3. negotiates RFB 3.8 and checks ServerInit geometry against Xvfb;
 4. requests raw encoding and proves the pixel stream contains the mapped
    recorder's black/white framebuffer content;
-5. sends real RFB KeyEvent, PointerEvent, and ClientCutText messages.
+5. sends real RFB KeyEvent, PointerEvent, ClientCutText, and SetDesktopSize
+   messages.
 
 An independent x11rb event recorder is mapped before `X0tigervnc` starts. The
 harness asserts that it sees no key, pointer, or button event after those RFB
-attempts. It also keeps a real X11 CLIPBOARD owner and proves both ownership and
-sentinel content survive ClientCutText. Finally, a direct XTEST move is sent as
-a positive control: the same recorder must observe it at exact coordinates.
+attempts and that focus is unchanged. For resize denial, the client advertises
+the RFB ExtendedDesktopSize pseudo-encoding, sends SetDesktopSize, and requires
+TigerVNC's ordered `reason=client`, `result=prohibited` response to repeat the
+1920x1080 ServerInit geometry. The client remains connected at that explicit
+protocol barrier while the harness independently proves X11 geometry is still
+1920x1080, eliminating a check-before-processing race. It
+also keeps real X11 CLIPBOARD and PRIMARY ownership in a sentinel armed with a
+runtime-unique secret canary. The gate identifies the requestor windows rather
+than conflating TigerVNC with xfsettingsd: both request `TARGETS`, and the
+sentinel answers with protocol-correct capability metadata. With
+`SendCutText=0`, TigerVNC must not follow that lookup with `UTF8_STRING`, `TEXT`,
+or `STRING`; therefore the sentinel must report zero canary-bearing responses.
+The connected RFB client independently rejects every `ServerCutText` and proves
+that the exact armed canary was not received. Serving the canary to TigerVNC
+would require enabling clipboard egress or fabricating an invalid selection
+response, which would weaken or alter the production semantics the gate is
+meant to prove. The separate ClientCutText attempt proves the reverse direction
+is denied without displacing the sentinel. Finally, direct XTEST motion and key
+events are sent as positive controls and must be observed by the same recorder.
 This distinguishes effective server enforcement from a recorder that could not
 observe input at all.
 

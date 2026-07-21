@@ -125,6 +125,29 @@ mod live {
             Ok(Self { connection })
         }
 
+        /// Prove that the registry root is reachable and returns a bounded root
+        /// set without calling into any application-owned accessible object.
+        ///
+        /// Application names and trees are target capability evidence, not
+        /// infrastructure readiness: one stalled application must not make the
+        /// entire desktop fail its health check.
+        pub async fn probe_registry_service(
+            &self,
+            deadline: Instant,
+        ) -> Result<usize, AtspiProbeError> {
+            let root = registry_operation(
+                deadline,
+                "registry root lookup",
+                self.connection.root_accessible_on_registry(),
+            )
+            .await?;
+            let children =
+                registry_operation(deadline, "registry children fetch", root.get_children())
+                    .await?;
+            validate_root_count(children.len())?;
+            Ok(children.len())
+        }
+
         /// Query the registry root and each current application root by its
         /// unique bus name/object path pair under one terminal deadline.
         pub async fn inspect_registry(

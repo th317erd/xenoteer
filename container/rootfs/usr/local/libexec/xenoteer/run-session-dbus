@@ -1,0 +1,8 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+exec s6-notifyoncheck -d -s 100 -T 15000 -t 2000 -w 100 -n 150 \
+  s6-setuidgid xenoteer \
+    dbus-daemon --session --nofork --nopidfile --nosyslog \
+      --address=unix:path=/run/user/1000/bus

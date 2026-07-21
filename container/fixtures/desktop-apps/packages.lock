@@ -1,0 +1,12 @@
+# Exact direct acceptance-fixture packages from Debian snapshot 20260719T000000Z.
+# This image is test-only and non-distributable until final-image inventory is extended.
+chromium=150.0.7871.124-1~deb13u1
+chromium-sandbox=150.0.7871.124-1~deb13u1
+firefox-esr=140.12.0esr-1~deb13u1
+gir1.2-gtk-3.0=3.24.49-3
+python3-gi=3.50.0-4+b1
+python3-pyatspi=2.46.1-1
+python3-pyqt6=6.9.0-2
+python3-pyqt6.qtwebengine=6.9.0-1
+python3-websocket=1.8.0-2
+wmctrl=1.07+git20240228.1105759-1

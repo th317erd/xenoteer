@@ -60,27 +60,46 @@ mkdir -p \
   "$image_root/etc/xenoteer/kept" \
   "$image_root/usr/local/libexec/xenoteer" \
   "$image_root/usr/share/doc/xenoteer" \
+  "$image_root/usr/share/novnc" \
   "$image_root/usr/share/xenoteer"
 cp "$repo_root/LICENSE" "$image_root/usr/share/doc/xenoteer/LICENSE"
 printf 'fixture notice\n' >"$image_root/usr/share/doc/xenoteer/NOTICE"
+printf 'fixture release lock\n' >"$image_root/usr/share/doc/xenoteer/release.lock"
 printf 'fixture source lock\n' >"$image_root/usr/share/doc/xenoteer/sources.lock"
+printf '{}\n' >"$image_root/usr/share/novnc/mandatory.json"
 printf 'kept\n' >"$image_root/etc/xenoteer/kept/runtime.txt"
+mkdir -p "$image_root/etc/s6-overlay/s6-rc.d/user2"
+printf 'bundle\n' >"$image_root/etc/s6-overlay/s6-rc.d/user2/type"
+s6_hash=$(sha256sum "$image_root/etc/s6-overlay/s6-rc.d/user2/type" | awk '{print $1}')
+{
+  printf 'path\ttype\tsha256\tsymlink_target\n'
+  printf '/etc/s6-overlay/s6-rc.d/user2/type\tfile\t%s\t-\n' "$s6_hash"
+} >"$image_root/usr/share/doc/xenoteer/s6-overlay-files.tsv"
 for ignored in .git .codex target dist; do
   mkdir -p "$image_root/etc/xenoteer/nested/$ignored"
   printf 'generated\n' >"$image_root/etc/xenoteer/nested/$ignored/generated.txt"
 done
 printf '%s\t%s\t%s\n' \
   '/etc/xenoteer/*' 'BUSL-1.1' '/usr/share/doc/xenoteer/LICENSE' \
+  '/etc/s6-overlay/s6-rc.d/*' 'BUSL-1.1' '/usr/share/doc/xenoteer/LICENSE' \
   '/usr/share/doc/xenoteer/*' 'BUSL-1.1' '/usr/share/doc/xenoteer/LICENSE' \
+  '/usr/share/novnc/mandatory.json' 'BUSL-1.1' '/usr/share/doc/xenoteer/LICENSE' \
   '/usr/share/xenoteer/*' 'BUSL-1.1' '/usr/share/doc/xenoteer/LICENSE' \
   >"$image_root/usr/share/xenoteer/test-policy.tsv"
 
 "$repo_root/scripts/licenses/inventory-image-first-party.sh" \
   "$image_root" \
   /usr/share/doc/xenoteer/first-party-files.tsv \
-  /usr/share/xenoteer/test-policy.tsv >/dev/null
+  /usr/share/xenoteer/test-policy.tsv \
+  /usr/share/doc/xenoteer/s6-overlay-files.tsv >/dev/null
 image_inventory="$image_root/usr/share/doc/xenoteer/first-party-files.tsv"
 grep -Fq $'/etc/xenoteer/kept/runtime.txt\t' "$image_inventory"
+grep -Fq $'/usr/share/doc/xenoteer/release.lock\t' "$image_inventory"
+grep -Fq $'/usr/share/doc/xenoteer/sources.lock\t' "$image_inventory"
+if grep -Fq $'/etc/s6-overlay/s6-rc.d/user2/type\t' "$image_inventory"; then
+  printf 'image first-party inventory duplicated an exact locked s6 path\n' >&2
+  exit 1
+fi
 if grep -Eq '(^|/)(\.git|\.codex|target|dist)/' "$image_inventory"; then
   printf 'image inventory included a nested build/cache directory\n' >&2
   exit 1

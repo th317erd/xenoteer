@@ -1,0 +1,3 @@
+# Loopback, server-side view-only viewer chain. noVNC is extracted separately.
+python3-websockify
+tigervnc-scraping-server

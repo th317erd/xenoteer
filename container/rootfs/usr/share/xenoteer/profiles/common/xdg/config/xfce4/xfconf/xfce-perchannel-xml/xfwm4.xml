@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="activate_action" type="string" value="bring"/>
+    <property name="borderless_maximize" type="bool" value="false"/>
+    <property name="box_move" type="bool" value="false"/>
+    <property name="box_resize" type="bool" value="false"/>
+    <property name="button_layout" type="string" value="O|HMC"/>
+    <property name="click_to_focus" type="bool" value="true"/>
+    <property name="cycle_apps_only" type="bool" value="true"/>
+    <property name="cycle_draw_frame" type="bool" value="false"/>
+    <property name="cycle_preview" type="bool" value="false"/>
+    <property name="cycle_raise" type="bool" value="false"/>
+    <property name="cycle_workspaces" type="bool" value="false"/>
+    <property name="double_click_action" type="string" value="maximize"/>
+    <property name="double_click_distance" type="int" value="5"/>
+    <property name="double_click_time" type="int" value="400"/>
+    <property name="easy_click" type="string" value="Alt"/>
+    <property name="focus_delay" type="int" value="0"/>
+    <property name="focus_hint" type="bool" value="true"/>
+    <property name="focus_new" type="bool" value="true"/>
+    <property name="frame_opacity" type="int" value="100"/>
+    <property name="inactive_opacity" type="int" value="100"/>
+    <property name="move_opacity" type="int" value="100"/>
+    <property name="placement_mode" type="string" value="center"/>
+    <property name="placement_ratio" type="int" value="100"/>
+    <property name="popup_opacity" type="int" value="100"/>
+    <property name="prevent_focus_stealing" type="bool" value="false"/>
+    <property name="raise_delay" type="int" value="0"/>
+    <property name="raise_on_click" type="bool" value="true"/>
+    <property name="raise_on_focus" type="bool" value="false"/>
+    <property name="raise_with_any_button" type="bool" value="false"/>
+    <property name="repeat_urgent_blink" type="bool" value="false"/>
+    <property name="resize_opacity" type="int" value="100"/>
+    <property name="restore_on_move" type="bool" value="false"/>
+    <property name="scroll_workspaces" type="bool" value="false"/>
+    <property name="show_dock_shadow" type="bool" value="false"/>
+    <property name="show_frame_shadow" type="bool" value="false"/>
+    <property name="show_popup_shadow" type="bool" value="false"/>
+    <property name="snap_resist" type="bool" value="false"/>
+    <property name="snap_to_border" type="bool" value="false"/>
+    <property name="snap_to_windows" type="bool" value="false"/>
+    <property name="sync_to_vblank" type="bool" value="false"/>
+    <property name="theme" type="string" value="Greybird"/>
+    <property name="tile_on_move" type="bool" value="false"/>
+    <property name="title_alignment" type="string" value="center"/>
+    <property name="title_font" type="string" value="DejaVu Sans Bold 10"/>
+    <property name="toggle_workspaces" type="bool" value="false"/>
+    <property name="urgent_blink" type="bool" value="false"/>
+    <property name="use_compositing" type="bool" value="false"/>
+    <property name="workspace_count" type="int" value="1"/>
+    <property name="wrap_cycle" type="bool" value="false"/>
+    <property name="wrap_layout" type="bool" value="false"/>
+    <property name="wrap_windows" type="bool" value="false"/>
+    <property name="wrap_workspaces" type="bool" value="false"/>
+    <property name="zoom_desktop" type="bool" value="false"/>
+    <property name="zoom_pointer" type="bool" value="false"/>
+  </property>
+</channel>
+

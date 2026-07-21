@@ -8,7 +8,7 @@ child_signal=${3-0}
 service_dir_argument=${4-}
 
 case "$service" in
-  xenoteerd|xvfb) ;;
+  atspi|session-dbus|websockify|x0tigervnc|xenoteerd|xfce|xvfb) ;;
   *)
     echo 'critical finish invoked for an invalid service' >&2
     exit 125

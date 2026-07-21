@@ -1,0 +1,79 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+root=${CONTAINER_TEST_ROOT:-}
+profile=${DESKTOP_PROFILE:-bare}
+runtime_uid=1000
+runtime_gid=1000
+if [ -n "$root" ]; then
+  runtime_uid=${CONTAINER_TEST_UID:-1000}
+  runtime_gid=${CONTAINER_TEST_GID:-1000}
+fi
+case "$runtime_uid:$runtime_gid" in
+  *[!0-9:]*|:*|*:) echo 'invalid test runtime identity' >&2; exit 64 ;;
+esac
+
+case "$profile" in
+  bare|standard) ;;
+  *)
+    echo "invalid desktop profile: $profile" >&2
+    exit 64
+    ;;
+esac
+
+runtime="$root/run/user/1000"
+destination="$runtime/xdg"
+profile_root="$root/usr/share/xenoteer/profiles"
+common_source="$profile_root/common/xdg"
+profile_source="$profile_root/$profile/xdg"
+
+case "$destination" in
+  /run/user/1000/xdg|*/run/user/1000/xdg) ;;
+  *)
+    echo 'refusing unsafe XDG destination' >&2
+    exit 70
+    ;;
+esac
+
+for source in "$common_source" "$profile_source"; do
+  if [ ! -d "$source" ]; then
+    echo "desktop profile asset tree is missing: $source" >&2
+    exit 78
+  fi
+  if find "$source" -type l -print -quit | grep -q .; then
+    echo "desktop profile asset tree contains a symbolic link: $source" >&2
+    exit 78
+  fi
+done
+
+umask 077
+install -d -m 0700 -o "$runtime_uid" -g "$runtime_gid" "$runtime"
+staging="$runtime/.xdg.new.$$"
+case "$staging" in
+  /run/user/1000/.xdg.new.*|*/run/user/1000/.xdg.new.*) ;;
+  *)
+    echo 'refusing unsafe XDG staging destination' >&2
+    exit 70
+    ;;
+esac
+rm -rf -- "$staging"
+trap 'rm -rf -- "$staging"' EXIT INT TERM
+install -d -m 0700 "$staging/config" "$staging/cache" "$staging/data"
+cp -a "$common_source/." "$staging/"
+cp -a "$profile_source/." "$staging/"
+
+# Session state is always ephemeral and starts empty. A stale runtime tree can
+# exist when this idempotent oneshot is repeated during diagnostics; it must not
+# become an implicit XFCE restore source.
+rm -rf -- "$staging/cache/sessions"
+install -d -m 0700 "$staging/cache/sessions" "$staging/cache/xenoteer"
+printf '%s\n' "$profile" >"$staging/cache/xenoteer/desktop-profile"
+
+find "$staging" -type d -exec chmod 0700 {} +
+find "$staging" -type f -exec chmod 0600 {} +
+chown -R "$runtime_uid:$runtime_gid" "$staging"
+
+rm -rf -- "$destination"
+mv "$staging" "$destination"
+trap - EXIT INT TERM

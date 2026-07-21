@@ -1,0 +1,64 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+: "${DISPLAY:?display is required}"
+: "${XAUTHORITY:?Xauthority is required}"
+: "${DESKTOP_PROFILE:?desktop profile is required}"
+
+require_count() {
+  expected=$1
+  process=$2
+  pids=$(pgrep -u 1000 -x "$process" 2>/dev/null || :)
+  observed=$(printf '%s\n' "$pids" | sed '/^$/d' | wc -l)
+  [ "$observed" -eq "$expected" ]
+  for pid in $pids; do
+    [ -r "/proc/$pid/stat" ]
+    state=$(sed -n 's/^[^)]*) \([^ ]\).*/\1/p' "/proc/$pid/stat")
+    case "$state" in
+      R|S|D|I) ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
+forbid_process() {
+  process=$1
+  ! pgrep -u 1000 -x "$process" >/dev/null 2>&1
+}
+
+require_count 1 xfce4-session
+require_count 1 xfwm4
+require_count 1 xfsettingsd
+require_count 1 xfdesktop
+require_count 1 xfconfd
+case "$DESKTOP_PROFILE" in
+  bare) require_count 0 xfce4-panel ;;
+  standard) require_count 1 xfce4-panel ;;
+  *) exit 1 ;;
+esac
+
+for process in Thunar tumblerd xfce4-power-man xfce4-screensav \
+  xfce4-notifyd light-locker xscreensaver mate-screensaver \
+  gnome-screensav kscreenlocker_gr xautolock ssh-agent gpg-agent \
+  gnome-keyring-d dunst; do
+  forbid_process "$process"
+done
+if pgrep -u 1000 -f '^sleep 9999$' >/dev/null 2>&1; then
+  exit 1
+fi
+
+root_properties=$(xprop -root _NET_SUPPORTING_WM_CHECK _NET_SUPPORTED \
+  _NET_NUMBER_OF_DESKTOPS)
+printf '%s\n' "$root_properties" \
+  | grep -Eq '^_NET_SUPPORTING_WM_CHECK\(WINDOW\): window id # 0x[0-9a-fA-F]+$'
+printf '%s\n' "$root_properties" | grep -Fq '_NET_SUPPORTED(ATOM) ='
+printf '%s\n' "$root_properties" \
+  | grep -Eq '^_NET_NUMBER_OF_DESKTOPS\(CARDINAL\) = 1$'
+
+[ "$(xfconf-query -c xfwm4 -p /general/use_compositing)" = false ]
+xset_output=$(xset q)
+printf '%s\n' "$xset_output" | grep -Eq 'prefer blanking:[[:space:]]+no([[:space:]]|$)'
+printf '%s\n' "$xset_output" | grep -Eq 'timeout:[[:space:]]+0([[:space:]]|$)'
+printf '%s\n' "$xset_output" \
+  | grep -Eq 'DPMS is Disabled|Server does not have the DPMS Extension'

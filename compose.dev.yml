@@ -3,9 +3,6 @@ name: xenoteer
 services:
   xenoteer:
     profiles: [dev]
-    build:
-      context: .
-      dockerfile: Dockerfile
     image: ${XENOTEER_IMAGE:-xenoteer:dev}
     environment:
       XENOTEER__AUTH__TOKEN_FILE: /run/secrets/xenoteer_api_token
@@ -18,10 +15,8 @@ services:
     secrets:
       - source: xenoteer_api_token
         target: xenoteer_api_token
-        uid: "1000"
-        gid: "1000"
-        mode: 0400
-    # Debian Chromium 150 injects --disable-dev-shm-usage below 3.8 GiB.
+    # Debian Chromium 150 injects its rejected /tmp shared-memory fallback
+    # below 3.8 GiB, so the private shm mount is fixed at 4 GiB.
     shm_size: 4gb
     stop_grace_period: 40s
     volumes:

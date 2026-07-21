@@ -1,0 +1,17 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+: "${DBUS_SESSION_BUS_ADDRESS:?session bus address is required}"
+root=${CONTAINER_TEST_ROOT:-}
+expected="unix:path=$root/run/user/1000/bus"
+[ "$DBUS_SESSION_BUS_ADDRESS" = "$expected" ]
+[ -S "$root/run/user/1000/bus" ] || [ -n "${CONTAINER_TEST_ALLOW_MISSING_SOCKET:-}" ]
+
+owner=$(gdbus call \
+  --address "$DBUS_SESSION_BUS_ADDRESS" \
+  --dest org.freedesktop.DBus \
+  --object-path /org/freedesktop/DBus \
+  --method org.freedesktop.DBus.NameHasOwner \
+  org.freedesktop.DBus)
+printf '%s\n' "$owner" | grep -Eq '^\(true,\)$'

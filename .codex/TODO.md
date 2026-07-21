@@ -21,15 +21,19 @@ Plan: `plans/15-phased-implementation.md`
 
 ## Phase 2 — deterministic desktop container
 
-- [ ] Complete s6/Xvfb/D-Bus/AT-SPI/XFCE/viewer service graph
-- [ ] Deterministic standard/bare desktop profiles
-- [ ] GTK/Qt/browser application profiles and fixtures
-- [ ] Development/hardened runtime profiles and phase verification
+- [x] Complete s6/Xvfb/D-Bus/AT-SPI/XFCE/viewer service graph
+- [x] Deterministic standard/bare desktop profiles
+- [x] GTK/Qt/browser application profiles and fixtures
+- [x] Development/hardened runtime profiles and phase verification
 
 ## Phase 3 — raw control plane and process lifecycle
 
 - [ ] Coordinator, lease, ledger, deadlines, generation, event hub
 - [ ] Authenticated HTTP/WebSocket protocol and limits
+- [ ] Daemon-only bearer credential ingestion before exposing `/v1`: GUI
+      applications share UID 1000 for X11/D-Bus and must never receive or be
+      able to reopen the API token file; use a root/external gateway handoff,
+      close the plaintext source before app launch, and retain only a keyed hash
 - [ ] Managed application lifecycle
 - [ ] Raw input integration, black-box verification, and enforcement that
       temporary keyboard mappings require an exclusive controller lease plus
@@ -71,6 +75,9 @@ Plan: `plans/15-phased-implementation.md`
 - Rust/Cargo 1.97.1, Xvfb, D-Bus, XKB, AT-SPI, GTK, cargo-deny, cargo-audit,
   shellcheck, noVNC, websockify, and the viewer/browser test dependencies are
   installed. cargo-nextest is not installed and is not a Phase 0 requirement.
+- Repository Cargo configuration caps builds at four jobs. Heavy build and test
+  gates run sequentially at reduced CPU/I/O priority; desktop matrix and idle
+  soak containers are capped at two CPUs.
 - Chromium's supported sandbox path requires the pinned, narrow seccomp profile,
   a private `/dev/shm` of at least 4 GiB, and the documented seven-capability
   allowlist in the hardened s6-overlay runtime. `KILL` is retained solely so

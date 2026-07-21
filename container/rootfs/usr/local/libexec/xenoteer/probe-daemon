@@ -7,4 +7,13 @@ case "$XENOTEER__SERVER__LISTEN" in
   127.0.0.1:*) probe_addr=$XENOTEER__SERVER__LISTEN ;;
   *) exit 1 ;;
 esac
-exec curl --fail --silent --show-error --max-time 2 "http://$probe_addr/livez"
+/usr/local/libexec/xenoteer/probe-xfce
+case "${VIEWER_REQUIRED:?viewer required setting is missing}" in
+  0) ;;
+  1)
+    /usr/local/libexec/xenoteer/probe-x0tigervnc
+    /usr/local/libexec/xenoteer/probe-websockify
+    ;;
+  *) exit 1 ;;
+esac
+exec curl --fail --silent --show-error --max-time 2 "http://$probe_addr/readyz"

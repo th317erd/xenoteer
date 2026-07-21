@@ -23,7 +23,9 @@ cargo run -p xenoteer-protocol --bin generate-schemas
 git diff -- schemas/
 ```
 
-Run the Phase-0 daemon with a configuration file:
+Run the daemon with a configuration file. Outside the supported container it
+will expose liveness while desktop capability probes remain non-ready unless an
+authenticated X11/XFCE/AT-SPI session is available:
 
 ```sh
 cargo run -p xenoteerd -- --config ./xenoteer.toml
@@ -43,11 +45,31 @@ Protocol problem codes use `deadline_exceeded_before_effect` and
 `deadline_before_effect` and `deadline_after_effect` names because they describe
 terminal state rather than the error catalog.
 
-`/livez` proves that the Phase-0 HTTP process is alive and is the current
-container/s6 health signal. `/readyz` truthfully remains `503` with internal state
-`phase0_backend_probes_not_wired`; Phase 2 must wire and pass the required X11,
-desktop-session, accessibility, capture, and viewer probes before it may become
-`200`.
+`/livez` proves only that the HTTP process is alive. `/readyz` becomes `200`
+only after the Phase 2 supervisor proves the fixed authenticated X11 display,
+XFCE/EWMH lifecycle, native input actor, one-pixel capture, and AT-SPI registry.
+When the viewer is configured as required, readiness also completes a bounded
+WebSocket upgrade through websockify and completes RFB 3.8 negotiation through
+TigerVNC's bounded `ServerInit`. Losing a required capability makes readiness
+fail and asks s6 to stop the container. An unavailable enabled-but-optional
+viewer reports `200 {"status":"degraded"}` without falsely taking down the
+control plane, and returns to `ready` after recovery.
+
+## Container runtime
+
+Build and verify the deterministic Debian/XFCE image with:
+
+```sh
+sudo scripts/container/build.sh
+sudo scripts/container/test-image.sh xenoteer:dev
+```
+
+The image runs Xvfb, one session D-Bus, AT-SPI, deterministic bare or standard
+XFCE, the Rust daemon, and a loopback-only server-side view-only noVNC chain
+under s6-overlay. Only the control-plane port is exposed. Exact package,
+download, final-filesystem, and licensing evidence is embedded in the image;
+the complete development, hardened, browser/toolkit, and acceptance workflow is
+documented in [`container/README.md`](container/README.md).
 
 ## License boundaries
 

@@ -1,0 +1,21 @@
+# Deliberate XFCE/AT-SPI/font/theme closure; never replace with a metapackage.
+adwaita-icon-theme
+at-spi2-core
+dconf-gsettings-backend
+fontconfig
+fonts-dejavu-core
+fonts-liberation2
+fonts-noto-cjk
+fonts-noto-color-emoji
+fonts-noto-core
+fonts-noto-mono
+greybird-gtk-theme
+hicolor-icon-theme
+libatk-bridge2.0-0t64
+librsvg2-common
+xfce4-panel
+xfce4-session
+xfce4-settings
+xfconf
+xfdesktop4
+xfwm4

@@ -9,6 +9,7 @@ import base64
 import hashlib
 import json
 import os
+import pathlib
 import socket
 import struct
 import sys
@@ -197,6 +198,9 @@ class WebSocket:
         finally:
             self._socket.close()
 
+    def set_timeout(self, timeout: float) -> None:
+        self._socket.settimeout(timeout)
+
 
 def wait_port(host: str, port: int, timeout: float) -> None:
     deadline = time.monotonic() + timeout
@@ -369,7 +373,30 @@ def run_chromium_probe(port: int, screenshot_path: str) -> dict[str, object]:
         websocket.close()
 
 
-def run_rfb_probe() -> dict[str, object]:
+def run_rfb_probe(
+    expected_width: int = 800,
+    expected_height: int = 600,
+    prove_framebuffer: bool = True,
+    ready_file: str | None = None,
+    continue_file: str | None = None,
+    observe_seconds: float = 0.0,
+    forbidden_server_bytes_file: str | None = None,
+    resize_ready_file: str | None = None,
+    resize_continue_file: str | None = None,
+) -> dict[str, object]:
+    if observe_seconds < 0:
+        raise ProbeError("RFB observation duration cannot be negative")
+    if (ready_file is None) != (continue_file is None):
+        raise ProbeError("--ready-file and --continue-file must be used together")
+    if (resize_ready_file is None) != (resize_continue_file is None):
+        raise ProbeError(
+            "--resize-ready-file and --resize-continue-file must be used together"
+        )
+    forbidden_server_bytes = b""
+    if forbidden_server_bytes_file is not None:
+        forbidden_server_bytes = pathlib.Path(forbidden_server_bytes_file).read_bytes()
+        if not forbidden_server_bytes or len(forbidden_server_bytes) > MAX_RFB_TEXT:
+            raise ProbeError("forbidden server byte canary has an invalid length")
     websocket = WebSocket("127.0.0.1", 6080, "/websockify")
     try:
         version = websocket.recv_rfb(12)
@@ -397,51 +424,102 @@ def run_rfb_probe() -> dict[str, object]:
         if name_length > MAX_RFB_NAME:
             raise ProbeError("RFB desktop name exceeds the configured bound")
         name = websocket.recv_rfb(name_length).decode("utf-8", "replace")
-        if (width, height) != (800, 600):
-            raise ProbeError(f"RFB geometry was {width}x{height}, expected Xvfb 800x600")
+        if (width, height) != (expected_width, expected_height):
+            raise ProbeError(
+                f"RFB geometry was {width}x{height}, expected Xvfb "
+                f"{expected_width}x{expected_height}"
+            )
         bytes_per_pixel = pixel_format[0] // 8
         if bytes_per_pixel not in (2, 3, 4):
             raise ProbeError(f"unsupported RFB bits-per-pixel {pixel_format[0]}")
 
-        websocket.send_binary(struct.pack(">BBHi", 2, 0, 1, 0))
-        websocket.send_binary(struct.pack(">BBHHHH", 3, 0, 0, 0, 80, 80))
         pixels = bytearray()
-        while not pixels:
-            message_type = websocket.recv_rfb(1)[0]
-            if message_type == 0:
-                rectangle_count = struct.unpack(">xH", websocket.recv_rfb(3))[0]
-                if rectangle_count > MAX_RFB_RECTANGLES:
-                    raise ProbeError("RFB rectangle count exceeds the configured bound")
-                for _ in range(rectangle_count):
-                    _x, _y, rect_width, rect_height, encoding = struct.unpack(
-                        ">HHHHi", websocket.recv_rfb(12)
-                    )
-                    if encoding != 0:
-                        raise ProbeError(f"unexpected RFB encoding {encoding}")
-                    if rect_width > width or rect_height > height:
-                        raise ProbeError("RFB rectangle exceeds negotiated framebuffer geometry")
-                    rectangle_bytes = rect_width * rect_height * bytes_per_pixel
-                    if rectangle_bytes > MAX_FRAMEBUFFER_BYTES:
-                        raise ProbeError("RFB rectangle exceeds the framebuffer byte bound")
-                    if len(pixels) + rectangle_bytes > MAX_FRAMEBUFFER_BYTES:
-                        raise ProbeError("RFB update exceeds the total framebuffer byte bound")
-                    pixels.extend(websocket.recv_rfb(rectangle_bytes))
-            elif message_type == 2:
-                continue
-            elif message_type == 3:
-                cut_length = struct.unpack(">xxxI", websocket.recv_rfb(7))[0]
-                if cut_length > MAX_RFB_TEXT:
-                    raise ProbeError("RFB ServerCutText exceeds the configured bound")
-                websocket.recv_rfb(cut_length)
-            else:
-                raise ProbeError(f"unexpected RFB server message {message_type}")
-        chunks = {
-            bytes(pixels[index : index + bytes_per_pixel])
-            for index in range(0, len(pixels), bytes_per_pixel)
-        }
-        if len(chunks) < 2:
-            raise ProbeError("framebuffer proof did not contain the recorder's black/white grid")
+        if prove_framebuffer:
+            websocket.send_binary(struct.pack(">BBHi", 2, 0, 1, 0))
+            websocket.send_binary(struct.pack(">BBHHHH", 3, 0, 0, 0, 80, 80))
+            while not pixels:
+                message_type = websocket.recv_rfb(1)[0]
+                if message_type == 0:
+                    rectangle_count = struct.unpack(">xH", websocket.recv_rfb(3))[0]
+                    if rectangle_count > MAX_RFB_RECTANGLES:
+                        raise ProbeError("RFB rectangle count exceeds the configured bound")
+                    for _ in range(rectangle_count):
+                        _x, _y, rect_width, rect_height, encoding = struct.unpack(
+                            ">HHHHi", websocket.recv_rfb(12)
+                        )
+                        if encoding != 0:
+                            raise ProbeError(f"unexpected RFB encoding {encoding}")
+                        if rect_width > width or rect_height > height:
+                            raise ProbeError(
+                                "RFB rectangle exceeds negotiated framebuffer geometry"
+                            )
+                        rectangle_bytes = rect_width * rect_height * bytes_per_pixel
+                        if rectangle_bytes > MAX_FRAMEBUFFER_BYTES:
+                            raise ProbeError("RFB rectangle exceeds the framebuffer byte bound")
+                        if len(pixels) + rectangle_bytes > MAX_FRAMEBUFFER_BYTES:
+                            raise ProbeError("RFB update exceeds the total framebuffer byte bound")
+                        pixels.extend(websocket.recv_rfb(rectangle_bytes))
+                elif message_type == 2:
+                    continue
+                elif message_type == 3:
+                    cut_length = struct.unpack(">xxxI", websocket.recv_rfb(7))[0]
+                    if cut_length > MAX_RFB_TEXT:
+                        raise ProbeError("RFB ServerCutText exceeds the configured bound")
+                    websocket.recv_rfb(cut_length)
+                else:
+                    raise ProbeError(f"unexpected RFB server message {message_type}")
+            chunks = {
+                bytes(pixels[index : index + bytes_per_pixel])
+                for index in range(0, len(pixels), bytes_per_pixel)
+            }
+            if len(chunks) < 2:
+                raise ProbeError(
+                    "framebuffer proof did not contain the recorder's black/white grid"
+                )
 
+        if ready_file is not None:
+            if continue_file is None:
+                raise ProbeError("--ready-file requires --continue-file")
+            ready_path = pathlib.Path(ready_file)
+            continue_path = pathlib.Path(continue_file)
+            ready_path.write_text("rfb_client_ready\n", encoding="ascii")
+            deadline = time.monotonic() + 10.0
+            while not continue_path.exists():
+                if time.monotonic() >= deadline:
+                    raise ProbeError("RFB probe continuation barrier timed out")
+                time.sleep(0.01)
+
+        # Observe after the test sentinel acquires CLIPBOARD/PRIMARY but before
+        # hostile client messages. A broken SendCutText policy is rejected
+        # before exercising the separately ordered resize-denial path.
+        if observe_seconds > 0:
+            deadline = time.monotonic() + observe_seconds
+            websocket.set_timeout(min(0.1, observe_seconds))
+            while time.monotonic() < deadline:
+                try:
+                    message_type = websocket.recv_rfb(1)[0]
+                except TimeoutError:
+                    continue
+                if message_type == 2:
+                    continue
+                if message_type == 3:
+                    cut_length = struct.unpack(">xxxI", websocket.recv_rfb(7))[0]
+                    if cut_length > MAX_RFB_TEXT:
+                        raise ProbeError("RFB ServerCutText exceeds the configured bound")
+                    cut_payload = websocket.recv_rfb(cut_length)
+                    if forbidden_server_bytes and forbidden_server_bytes in cut_payload:
+                        raise ProbeError(
+                            "viewer received forbidden clipboard canary in ServerCutText"
+                        )
+                    raise ProbeError("viewer received forbidden RFB ServerCutText")
+                raise ProbeError(
+                    f"unexpected RFB server message during clipboard denial {message_type}"
+                )
+
+        # Advertise ExtendedDesktopSize before the hostile request. TigerVNC
+        # then returns an ordered reason=client/result=prohibited rectangle
+        # instead of closing a client that cannot receive its resize result.
+        websocket.send_binary(struct.pack(">BBHii", 2, 0, 2, 0, -308))
         websocket.send_binary(struct.pack(">BBxxI", 4, 1, 0x61))
         websocket.send_binary(struct.pack(">BBxxI", 4, 0, 0x61))
         websocket.send_binary(struct.pack(">BBHH", 5, 0, 120, 100))
@@ -449,13 +527,138 @@ def run_rfb_probe() -> dict[str, object]:
         websocket.send_binary(struct.pack(">BBHH", 5, 0, 120, 100))
         cut_text = b"rfb-viewer-must-not-own-x11-clipboard"
         websocket.send_binary(struct.pack(">BxxxI", 6, len(cut_text)) + cut_text)
+        websocket.send_binary(
+            struct.pack(">BBHHBBIHHHHI", 251, 0, 1024, 768, 1, 0, 0, 0, 0, 1024, 768, 0)
+        )
+        # Client messages are processed in transport order. This
+        # non-incremental request makes the queued resize rejection observable
+        # as a FramebufferUpdate ExtendedDesktopSize pseudo-rectangle.
+        websocket.send_binary(struct.pack(">BBHHHH", 3, 0, 0, 0, 1, 1))
+        websocket.set_timeout(5.0)
+        resize_rejection: dict[str, object] | None = None
+        for _ in range(32):
+            message_type = websocket.recv_rfb(1)[0]
+            if message_type == 2:
+                continue
+            if message_type == 3:
+                cut_length = struct.unpack(">xxxI", websocket.recv_rfb(7))[0]
+                if cut_length > MAX_RFB_TEXT:
+                    raise ProbeError("RFB ServerCutText exceeds the configured bound")
+                cut_payload = websocket.recv_rfb(cut_length)
+                if forbidden_server_bytes and forbidden_server_bytes in cut_payload:
+                    raise ProbeError(
+                        "viewer received forbidden clipboard canary in ServerCutText"
+                    )
+                raise ProbeError("viewer received forbidden RFB ServerCutText")
+            if message_type != 0:
+                raise ProbeError(
+                    f"unexpected RFB server message during resize barrier {message_type}"
+                )
+            rectangle_count = struct.unpack(">xH", websocket.recv_rfb(3))[0]
+            if rectangle_count > MAX_RFB_RECTANGLES:
+                raise ProbeError("RFB rectangle count exceeds the configured bound")
+            for _ in range(rectangle_count):
+                rect_x, rect_y, rect_width, rect_height, encoding = struct.unpack(
+                    ">HHHHi", websocket.recv_rfb(12)
+                )
+                if encoding == 0:
+                    rectangle_bytes = rect_width * rect_height * bytes_per_pixel
+                    if rectangle_bytes > MAX_FRAMEBUFFER_BYTES:
+                        raise ProbeError("RFB rectangle exceeds the framebuffer byte bound")
+                    websocket.recv_rfb(rectangle_bytes)
+                    continue
+                if encoding != -308:
+                    raise ProbeError(
+                        f"unexpected RFB encoding during resize barrier {encoding}"
+                    )
+                screen_count = websocket.recv_rfb(1)[0]
+                websocket.recv_rfb(3)
+                if screen_count > 64:
+                    raise ProbeError("ExtendedDesktopSize screen count exceeds bound")
+                screens: list[dict[str, int]] = []
+                for _ in range(screen_count):
+                    screen_id, screen_x, screen_y, screen_width, screen_height, flags = (
+                        struct.unpack(">IHHHHI", websocket.recv_rfb(16))
+                    )
+                    screens.append(
+                        {
+                            "id": screen_id,
+                            "x": screen_x,
+                            "y": screen_y,
+                            "width": screen_width,
+                            "height": screen_height,
+                            "flags": flags,
+                        }
+                    )
+                if rect_x != 1:
+                    continue
+                if rect_y != 1:
+                    raise ProbeError(
+                        f"SetDesktopSize result was {rect_y}, expected prohibited (1)"
+                    )
+                if (rect_width, rect_height) != (width, height):
+                    raise ProbeError(
+                        "resize rejection reported changed RFB geometry "
+                        f"{rect_width}x{rect_height}, ServerInit was {width}x{height}"
+                    )
+                if not any(
+                    screen["x"] == 0
+                    and screen["y"] == 0
+                    and screen["width"] == width
+                    and screen["height"] == height
+                    for screen in screens
+                ):
+                    raise ProbeError(
+                        "resize rejection layout does not cover unchanged ServerInit geometry"
+                    )
+                resize_rejection = {
+                    "ordered_protocol_barrier": "extended_desktop_size",
+                    "reason": "client",
+                    "reason_code": rect_x,
+                    "result": "prohibited",
+                    "result_code": rect_y,
+                    "requested_geometry": "1024x768",
+                    "server_init_geometry": f"{width}x{height}",
+                    "response_geometry": f"{rect_width}x{rect_height}",
+                    "screens": screens,
+                }
+                break
+            if resize_rejection is not None:
+                break
+        if resize_rejection is None:
+            raise ProbeError("timed out without ordered ExtendedDesktopSize rejection")
+
+        if resize_ready_file is not None:
+            if resize_continue_file is None:
+                raise ProbeError("--resize-ready-file requires --resize-continue-file")
+            pathlib.Path(resize_ready_file).write_text(
+                json.dumps(resize_rejection, sort_keys=True) + "\n", encoding="ascii"
+            )
+            resize_continue_path = pathlib.Path(resize_continue_file)
+            deadline = time.monotonic() + 30.0
+            while not resize_continue_path.exists():
+                if time.monotonic() >= deadline:
+                    raise ProbeError("RFB resize evidence continuation barrier timed out")
+                time.sleep(0.01)
         return {
             "framebuffer_bytes": len(pixels),
             "framebuffer_sha256": hashlib.sha256(pixels).hexdigest(),
             "geometry": f"{width}x{height}",
             "rfb_name": name,
             "rfb_version": version.decode("ascii").strip(),
-            "sent_input_attempts": ["key", "pointer", "client_cut_text"],
+            "sent_input_attempts": [
+                "key",
+                "pointer",
+                "client_cut_text",
+                "set_desktop_size",
+            ],
+            "resize_rejection": resize_rejection,
+            "server_cut_text_observation_seconds": observe_seconds,
+            "server_cut_text_messages": 0,
+            "forbidden_server_bytes_seen": False,
+            "forbidden_server_bytes_sha256": hashlib.sha256(
+                forbidden_server_bytes
+            ).hexdigest(),
             "websocket_subprotocol": "binary",
         }
     finally:
@@ -478,7 +681,16 @@ def main() -> int:
     chromium_parser = subparsers.add_parser("chromium")
     chromium_parser.add_argument("port", type=int)
     chromium_parser.add_argument("screenshot")
-    subparsers.add_parser("rfb")
+    rfb_parser = subparsers.add_parser("rfb")
+    rfb_parser.add_argument("--width", type=int, default=800)
+    rfb_parser.add_argument("--height", type=int, default=600)
+    rfb_parser.add_argument("--skip-framebuffer-proof", action="store_true")
+    rfb_parser.add_argument("--ready-file")
+    rfb_parser.add_argument("--continue-file")
+    rfb_parser.add_argument("--observe-seconds", type=float, default=0.0)
+    rfb_parser.add_argument("--forbidden-server-bytes-file")
+    rfb_parser.add_argument("--resize-ready-file")
+    rfb_parser.add_argument("--resize-continue-file")
     arguments = parser.parse_args()
     if arguments.command == "wait-port":
         wait_port(arguments.host, arguments.port, arguments.timeout)
@@ -493,7 +705,22 @@ def main() -> int:
             )
         )
     else:
-        print(json.dumps(run_rfb_probe(), sort_keys=True))
+        print(
+            json.dumps(
+                run_rfb_probe(
+                    arguments.width,
+                    arguments.height,
+                    not arguments.skip_framebuffer_proof,
+                    arguments.ready_file,
+                    arguments.continue_file,
+                    arguments.observe_seconds,
+                    arguments.forbidden_server_bytes_file,
+                    arguments.resize_ready_file,
+                    arguments.resize_continue_file,
+                ),
+                sort_keys=True,
+            )
+        )
     return 0
 
 

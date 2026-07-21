@@ -1,0 +1,11 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+s6-setuidgid xenoteer xset s off
+s6-setuidgid xenoteer xset s noblank
+if s6-setuidgid xenoteer xset q | grep -Fq 'DPMS is Enabled'; then
+  s6-setuidgid xenoteer xset -dpms
+fi
+exec s6-notifyoncheck -d -s 100 -T 45000 -t 4000 -w 200 -n 225 \
+  s6-setuidgid xenoteer xfce4-session --disable-tcp

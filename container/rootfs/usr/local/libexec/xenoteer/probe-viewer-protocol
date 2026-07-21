@@ -1,0 +1,173 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+# Prove the complete viewer data path: RFC 6455 HTTP upgrade, negotiated binary
+# WebSocket framing, websockify's connection to X0tigervnc, and a complete
+# read-only RFB 3.8 None-security handshake through ServerInit. Completing the
+# handshake is important: TigerVNC blacklists peers that repeatedly disconnect
+# after only reading its banner. This probe never sends an RFB input message.
+exec env PYTHONDONTWRITEBYTECODE=1 python3 -c '
+import base64
+import hashlib
+import os
+import socket
+import struct
+
+HOST = "127.0.0.1"
+PORT = 6080
+# RFC 6455 requires a base64-encoded 16-byte nonce.
+KEY = "eGVub3RlZXItdmlld2VyIQ=="
+MAX_HTTP_BYTES = 16_384
+MAX_FRAME_BYTES = 4_096
+MAX_RFB_NAME_BYTES = 4_096
+
+
+def receive_into(connection, buffered, length):
+    while len(buffered) < length:
+        chunk = connection.recv(min(4_096, length - len(buffered)))
+        if not chunk:
+            raise RuntimeError("viewer connection closed early")
+        buffered.extend(chunk)
+    value = bytes(buffered[:length])
+    del buffered[:length]
+    return value
+
+
+def send_frame(connection, opcode, payload):
+    if len(payload) > MAX_FRAME_BYTES:
+        raise RuntimeError("viewer client frame exceeded its bound")
+    mask = os.urandom(4)
+    length = len(payload)
+    if length < 126:
+        header = bytes((0x80 | opcode, 0x80 | length))
+    elif length <= 65_535:
+        header = bytes((0x80 | opcode, 0xFE)) + struct.pack(">H", length)
+    else:
+        header = bytes((0x80 | opcode, 0xFF)) + struct.pack(">Q", length)
+    masked = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+    connection.sendall(header + mask + masked)
+
+
+with socket.create_connection((HOST, PORT), timeout=2.0) as connection:
+    connection.settimeout(2.0)
+    request = (
+        "GET /websockify HTTP/1.1\r\n"
+        "Host: 127.0.0.1:6080\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {KEY}\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "Sec-WebSocket-Protocol: binary\r\n"
+        "Origin: http://127.0.0.1:6080\r\n\r\n"
+    ).encode("ascii")
+    connection.sendall(request)
+
+    response = bytearray()
+    while b"\r\n\r\n" not in response:
+        chunk = connection.recv(4_096)
+        if not chunk:
+            raise RuntimeError("viewer upgrade closed early")
+        response.extend(chunk)
+        if len(response) > MAX_HTTP_BYTES:
+            raise RuntimeError("viewer upgrade response exceeded its bound")
+    raw_header, remainder = bytes(response).split(b"\r\n\r\n", 1)
+    lines = raw_header.decode("ascii").split("\r\n")
+    if not lines or not lines[0].startswith("HTTP/1.1 101 "):
+        raise RuntimeError("viewer did not return HTTP 101")
+    headers = {}
+    for line in lines[1:]:
+        name, separator, value = line.partition(":")
+        if not separator:
+            raise RuntimeError("viewer returned a malformed HTTP header")
+        headers[name.lower()] = value.strip()
+    expected_accept = base64.b64encode(
+        hashlib.sha1(
+            (KEY + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
+        ).digest()
+    ).decode("ascii")
+    if headers.get("upgrade", "").lower() != "websocket":
+        raise RuntimeError("viewer omitted the WebSocket upgrade header")
+    if "upgrade" not in {
+        token.strip().lower() for token in headers.get("connection", "").split(",")
+    }:
+        raise RuntimeError("viewer omitted Connection: Upgrade")
+    if headers.get("sec-websocket-accept") != expected_accept:
+        raise RuntimeError("viewer returned an invalid WebSocket accept value")
+    if headers.get("sec-websocket-protocol") != "binary":
+        raise RuntimeError("viewer did not negotiate binary framing")
+
+    network = bytearray(remainder)
+    rfb = bytearray()
+    fragmented = False
+
+    def receive_rfb(length):
+        global fragmented
+        while len(rfb) < length:
+            first, second = receive_into(connection, network, 2)
+            if first & 0x70:
+                raise RuntimeError("viewer set reserved WebSocket bits")
+            final = bool(first & 0x80)
+            opcode = first & 0x0F
+            if second & 0x80:
+                raise RuntimeError("viewer masked a server WebSocket frame")
+            frame_length = second & 0x7F
+            if frame_length == 126:
+                frame_length = struct.unpack(
+                    ">H", receive_into(connection, network, 2)
+                )[0]
+            elif frame_length == 127:
+                frame_length = struct.unpack(
+                    ">Q", receive_into(connection, network, 8)
+                )[0]
+            if frame_length > MAX_FRAME_BYTES:
+                raise RuntimeError("viewer WebSocket frame exceeded its bound")
+            payload = receive_into(connection, network, frame_length)
+            if opcode == 0x9:
+                send_frame(connection, 0xA, payload)
+                continue
+            if opcode == 0xA:
+                continue
+            if opcode == 0x8:
+                raise RuntimeError("viewer closed during the RFB handshake")
+            if fragmented:
+                if opcode != 0x0:
+                    raise RuntimeError("viewer sent an invalid continuation frame")
+            elif opcode != 0x2:
+                raise RuntimeError("viewer sent a non-binary RFB frame")
+            rfb.extend(payload)
+            fragmented = not final
+            if len(rfb) > MAX_FRAME_BYTES:
+                raise RuntimeError("viewer RFB stream exceeded its bound")
+        value = bytes(rfb[:length])
+        del rfb[:length]
+        return value
+
+    version = receive_rfb(12)
+    if version != b"RFB 003.008\n":
+        raise RuntimeError("viewer returned an unexpected RFB banner")
+    send_frame(connection, 0x2, b"RFB 003.008\n")
+    security_count = receive_rfb(1)[0]
+    if security_count == 0:
+        reason_length = struct.unpack(">I", receive_rfb(4))[0]
+        if reason_length > MAX_RFB_NAME_BYTES:
+            raise RuntimeError("viewer rejection reason exceeded its bound")
+        receive_rfb(reason_length)
+        raise RuntimeError("viewer rejected the RFB security negotiation")
+    security_types = receive_rfb(security_count)
+    if 1 not in security_types:
+        raise RuntimeError("viewer did not offer RFB None security on loopback")
+    send_frame(connection, 0x2, b"\x01")
+    if struct.unpack(">I", receive_rfb(4))[0] != 0:
+        raise RuntimeError("viewer RFB security negotiation failed")
+    send_frame(connection, 0x2, b"\x01")
+    server_init = receive_rfb(24)
+    width, height = struct.unpack(">HH", server_init[:4])
+    if (width, height) != (1920, 1080):
+        raise RuntimeError("viewer returned unexpected RFB geometry")
+    name_length = struct.unpack(">I", server_init[20:24])[0]
+    if name_length > MAX_RFB_NAME_BYTES:
+        raise RuntimeError("viewer desktop name exceeded its bound")
+    receive_rfb(name_length)
+    send_frame(connection, 0x8, struct.pack(">H", 1000))
+'

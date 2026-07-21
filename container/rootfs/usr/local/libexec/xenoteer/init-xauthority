@@ -3,13 +3,22 @@
 set -eu
 
 root=${CONTAINER_TEST_ROOT:-}
+runtime_uid=1000
+runtime_gid=1000
+if [ -n "$root" ]; then
+  runtime_uid=${CONTAINER_TEST_UID:-1000}
+  runtime_gid=${CONTAINER_TEST_GID:-1000}
+fi
+case "$runtime_uid:$runtime_gid" in
+  *[!0-9:]*|:*|*:) echo 'invalid test runtime identity' >&2; exit 64 ;;
+esac
 env_dir="$root/run/xenoteer/env"
 display=$(cat "$env_dir/DISPLAY")
 auth_file=$(cat "$env_dir/XAUTHORITY")
 cookie=$(mcookie)
 
 rm -f -- "$auth_file"
-install -m 0600 -o 1000 -g 1000 /dev/null "$auth_file"
+install -m 0600 -o "$runtime_uid" -g "$runtime_gid" /dev/null "$auth_file"
 xauth -f "$auth_file" add "$display" MIT-MAGIC-COOKIE-1 "$cookie"
-chown 1000:1000 "$auth_file"
+chown "$runtime_uid:$runtime_gid" "$auth_file"
 chmod 0600 "$auth_file"

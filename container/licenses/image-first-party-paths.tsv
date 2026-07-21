@@ -3,7 +3,9 @@
 /etc/xenoteer/*	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE
 /usr/local/bin/xenoteerd	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE
 /usr/local/libexec/xenoteer/*	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE
+/usr/share/novnc/mandatory.json	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE
 /usr/share/doc/xenoteer/LICENSE	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE
 /usr/share/doc/xenoteer/NOTICE	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE
+/usr/share/doc/xenoteer/release.lock	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE
 /usr/share/doc/xenoteer/sources.lock	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE
 /usr/share/xenoteer/*	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE

@@ -1,0 +1,8 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+fixture_root=/usr/share/xenoteer/fixtures/desktop-apps
+"$fixture_root/browser-runtime-doctor"
+export QTWEBENGINE_CHROMIUM_FLAGS='--disable-gpu --force-renderer-accessibility=complete'
+exec "$fixture_root/qtwebengine-fixture.py"

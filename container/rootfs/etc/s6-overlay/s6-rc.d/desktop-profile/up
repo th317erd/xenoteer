@@ -1,0 +1,3 @@
+#!/command/execlineb -P
+s6-envdir -f -L /run/xenoteer/env
+/usr/local/libexec/xenoteer/materialize-desktop-profile

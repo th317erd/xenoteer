@@ -1,0 +1,28 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+case "${VIEWER_ENABLED:?viewer enabled setting is missing}" in
+  0) exec s6-setuidgid xenoteer s6-pause ;;
+  1) ;;
+  *) exit 64 ;;
+esac
+
+exec s6-setuidgid xenoteer X0tigervnc \
+  -display "$DISPLAY" \
+  -rfbport 5900 \
+  -interface 127.0.0.1 \
+  -localhost=1 \
+  -UseIPv4=1 \
+  -UseIPv6=0 \
+  -SecurityTypes=None \
+  -AlwaysShared=1 \
+  -DisconnectClients=0 \
+  -AcceptKeyEvents=0 \
+  -AcceptPointerEvents=0 \
+  -AcceptSetDesktopSize=0 \
+  -AcceptCutText=0 \
+  -SendCutText=0 \
+  -SetPrimary=0 \
+  -SendPrimary=0 \
+  -MaxCutText=1024

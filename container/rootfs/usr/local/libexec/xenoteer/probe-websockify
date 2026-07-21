@@ -1,0 +1,7 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+[ "${VIEWER_ENABLED:?viewer enabled setting is missing}" = 1 ]
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+exec "$script_dir/probe-viewer-protocol"

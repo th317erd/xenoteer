@@ -7,22 +7,39 @@ if [ -z "$root" ] && [ "$(id -u)" -ne 0 ]; then
   echo 'runtime initialization must run as root' >&2
   exit 1
 fi
+runtime_uid=1000
+runtime_gid=1000
+if [ -n "$root" ]; then
+  runtime_uid=${CONTAINER_TEST_UID:-1000}
+  runtime_gid=${CONTAINER_TEST_GID:-1000}
+fi
+case "$runtime_uid:$runtime_gid" in
+  *[!0-9:]*|:*|*:) echo 'invalid test runtime identity' >&2; exit 64 ;;
+esac
 
 display=${DISPLAY:-:99}
 width=${XVFB_SCREEN_WIDTH-1920}
 height=${XVFB_SCREEN_HEIGHT-1080}
 depth=${XVFB_SCREEN_DEPTH-24}
 profile=${DESKTOP_PROFILE:-bare}
+viewer_enabled=${VIEWER_ENABLED:-1}
+viewer_required=${VIEWER_REQUIRED:-0}
 http_addr=${XENOTEER__SERVER__LISTEN-0.0.0.0:8080}
 token_file=${XENOTEER__AUTH__TOKEN_FILE-/run/secrets/xenoteer_api_token}
 
 case "$display" in :[0-9]*) ;; *) echo "invalid DISPLAY: $display" >&2; exit 64 ;; esac
 case "${display#:}" in *[!0-9]*|'') echo "invalid DISPLAY: $display" >&2; exit 64 ;; esac
 if [ "$width" != 1920 ] || [ "$height" != 1080 ] || [ "$depth" != 24 ]; then
-  echo 'Phase 0 requires fixed Xvfb geometry 1920x1080x24 at 96 DPI' >&2
+  echo 'Phase 2 requires fixed Xvfb geometry 1920x1080x24 at 96 DPI' >&2
   exit 64
 fi
 case "$profile" in bare|standard) ;; *) echo "invalid desktop profile: $profile" >&2; exit 64 ;; esac
+case "$viewer_enabled" in 0|1) ;; *) echo 'invalid viewer enabled setting' >&2; exit 64 ;; esac
+case "$viewer_required" in 0|1) ;; *) echo 'invalid viewer required setting' >&2; exit 64 ;; esac
+if [ "$viewer_required" = 1 ] && [ "$viewer_enabled" != 1 ]; then
+  echo 'a required viewer cannot be disabled' >&2
+  exit 64
+fi
 printf '%s' "$http_addr" | grep -Eq '^(127\.0\.0\.1|0\.0\.0\.0):[1-9][0-9]{0,4}$' || {
   echo "invalid XENOTEER__SERVER__LISTEN: $http_addr" >&2
   exit 64
@@ -32,11 +49,11 @@ http_port=${http_addr##*:}
 case "$token_file" in /*) ;; *) echo 'XENOTEER__AUTH__TOKEN_FILE must be absolute' >&2; exit 64 ;; esac
 case "$token_file" in *..*) echo 'XENOTEER__AUTH__TOKEN_FILE may not contain ..' >&2; exit 64 ;; esac
 token_path="$root$token_file"
-[ -f "$token_path" ] || { echo "authentication token file is missing: $token_file" >&2; exit 78; }
+[ -f "$token_path" ] || { echo 'authentication token file is missing' >&2; exit 78; }
 token_owner=$(stat -c '%u' "$token_path")
 token_mode=$(stat -c '%a' "$token_path")
 token_bytes=$(wc -c <"$token_path")
-[ "$token_owner" -eq 1000 ] || { echo 'authentication token file must be owned by UID 1000' >&2; exit 78; }
+[ "$token_owner" -eq "$runtime_uid" ] || { echo 'authentication token file must be owned by UID 1000' >&2; exit 78; }
 case "$token_mode" in 400|600) ;; *) echo "authentication token file must have mode 0400 or 0600 (observed $token_mode)" >&2; exit 78 ;; esac
 [ "$token_bytes" -ge 32 ] || { echo 'authentication token must contain at least 256 bits' >&2; exit 78; }
 
@@ -51,10 +68,21 @@ shm_mode=$(stat -c '%a' "$shm_path")
 
 umask 077
 install -d -m 0755 "$root/run/xenoteer"
-install -d -m 0700 -o 1000 -g 1000 "$root/run/user/1000"
-install -d -m 0700 -o 1000 -g 1000 "$root/home/xenoteer"
+install -d -m 0700 -o "$runtime_uid" -g "$runtime_gid" "$root/run/user/1000"
+install -d -m 0700 -o "$runtime_uid" -g "$runtime_gid" "$root/run/user/1000/at-spi"
+install -d -m 0700 -o "$runtime_uid" -g "$runtime_gid" "$root/run/user/1000/xdg"
+install -d -m 0700 -o "$runtime_uid" -g "$runtime_gid" "$root/run/user/1000/xdg/config"
+install -d -m 0700 -o "$runtime_uid" -g "$runtime_gid" "$root/run/user/1000/xdg/cache"
+install -d -m 0700 -o "$runtime_uid" -g "$runtime_gid" "$root/run/user/1000/xdg/data"
+install -d -m 0700 -o "$runtime_uid" -g "$runtime_gid" "$root/home/xenoteer"
 install -d -m 0755 "$root/run/xenoteer/env"
+install -d -m 0755 "$root/run/xenoteer/viewer"
 install -d -m 1777 "$root/tmp/.X11-unix"
+install -d -m 1777 "$root/tmp/.ICE-unix"
+if [ "$(id -u)" -eq 0 ]; then
+  chown 0:0 "$root/tmp/.X11-unix" "$root/tmp/.ICE-unix"
+fi
+install -m 0600 -o "$runtime_uid" -g "$runtime_gid" /dev/null "$root/run/user/1000/ICEauthority"
 
 write_env() {
   name=$1
@@ -65,8 +93,16 @@ write_env() {
 
 write_env DISPLAY "$display"
 write_env XAUTHORITY "$root/run/user/1000/Xauthority"
+write_env ICEAUTHORITY "$root/run/user/1000/ICEauthority"
+write_env HOME "$root/home/xenoteer"
 write_env XDG_RUNTIME_DIR "$root/run/user/1000"
+write_env XDG_CONFIG_HOME "$root/run/user/1000/xdg/config"
+write_env XDG_CACHE_HOME "$root/run/user/1000/xdg/cache"
+write_env XDG_DATA_HOME "$root/run/user/1000/xdg/data"
+write_env XDG_CONFIG_DIRS "$root/etc/xdg"
+write_env XDG_DATA_DIRS "$root/usr/local/share:$root/usr/share"
 write_env DBUS_SESSION_BUS_ADDRESS "unix:path=$root/run/user/1000/bus"
+write_env AT_SPI_BUS_ADDRESS "unix:path=$root/run/user/1000/at-spi/bus_${display#:}"
 write_env XDG_CURRENT_DESKTOP XFCE
 write_env XDG_SESSION_DESKTOP xfce
 write_env XDG_SESSION_TYPE x11
@@ -75,10 +111,19 @@ write_env LANG en_US.UTF-8
 write_env LC_ALL en_US.UTF-8
 write_env TZ UTC
 write_env NO_AT_BRIDGE 0
+write_env GTK_OVERLAY_SCROLLING 0
+write_env GDK_SCALE 1
+write_env GDK_DPI_SCALE 1
 write_env QT_LINUX_ACCESSIBILITY_ALWAYS_ON 1
+write_env QT_AUTO_SCREEN_SCALE_FACTOR 0
+write_env QT_SCALE_FACTOR 1
+write_env QT_FONT_DPI 96
+write_env QT_STYLE_OVERRIDE Fusion
 write_env XENOTEER__SERVER__LISTEN "$http_addr"
 write_env XENOTEER__AUTH__TOKEN_FILE "$token_file"
 write_env DESKTOP_PROFILE "$profile"
+write_env VIEWER_ENABLED "$viewer_enabled"
+write_env VIEWER_REQUIRED "$viewer_required"
 write_env XVFB_SCREEN_WIDTH "$width"
 write_env XVFB_SCREEN_HEIGHT "$height"
 write_env XVFB_SCREEN_DEPTH "$depth"

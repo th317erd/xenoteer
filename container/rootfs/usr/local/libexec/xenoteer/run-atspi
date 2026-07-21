@@ -1,0 +1,9 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+exec s6-notifyoncheck -d -s 100 -T 20000 -t 3000 -w 100 -n 200 \
+  s6-setuidgid xenoteer \
+    env ATSPI_DBUS_IMPLEMENTATION=dbus-daemon \
+      /usr/libexec/at-spi-bus-launcher \
+        --launch-immediately --a11y=1 --screen-reader=1

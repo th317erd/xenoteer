@@ -1,0 +1,3 @@
+This directory is the writable, per-boot QtWebEngine profile root. The
+acceptance launcher supplies it through QWebEngineProfile and keeps Chromium's
+sandbox enabled.

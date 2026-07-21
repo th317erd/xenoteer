@@ -21,10 +21,10 @@ pub(crate) async fn livez() -> impl IntoResponse {
 
 pub(crate) async fn readyz(State(readiness): State<ReadinessHandle>) -> impl IntoResponse {
     let snapshot = readiness.snapshot();
-    let (status, label) = if snapshot.is_ready() {
-        (StatusCode::OK, "ready")
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, "not_ready")
+    let (status, label) = match snapshot.state {
+        crate::DesktopReadiness::Ready => (StatusCode::OK, "ready"),
+        crate::DesktopReadiness::Degraded => (StatusCode::OK, "degraded"),
+        _ => (StatusCode::SERVICE_UNAVAILABLE, "not_ready"),
     };
     (status, Json(ReadinessResponse { status: label }))
 }
@@ -96,6 +96,21 @@ mod tests {
         let available_body = to_bytes(available.into_body(), 1024).await?;
         let available_json: serde_json::Value = serde_json::from_slice(&available_body)?;
         assert_eq!(available_json, serde_json::json!({"status": "ready"}));
+
+        let degraded = ReadinessHandle::new(ReadinessSnapshot::new(
+            DesktopReadiness::Degraded,
+            Some(xenoteer_protocol::DesktopGeneration::new()),
+            Some("optional_viewer_unavailable"),
+        ));
+        let response = router(degraded)
+            .oneshot(Request::get("/readyz").body(Body::empty())?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024).await?;
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body)?,
+            serde_json::json!({"status": "degraded"})
+        );
         Ok(())
     }
 }

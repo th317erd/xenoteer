@@ -1,0 +1,5 @@
+# Official Electron release artifact used only by the derived acceptance image.
+# Source checksum: https://github.com/electron/electron/releases/download/v43.1.1/SHASUMS256.txt
+ELECTRON_VERSION=43.1.1
+ELECTRON_LINUX_X64_URL=https://github.com/electron/electron/releases/download/v43.1.1/electron-v43.1.1-linux-x64.zip
+ELECTRON_LINUX_X64_SHA256=c1f479c52747caf1510e17500e1c8a556d0e40802837bd48c5647a84688a3880

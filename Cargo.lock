@@ -1933,10 +1933,15 @@ dependencies = [
  "clap",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+ "xenoteer-atspi",
  "xenoteer-core",
+ "xenoteer-protocol",
  "xenoteer-server",
+ "xenoteer-x11",
 ]
 
 [[package]]

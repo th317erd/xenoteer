@@ -1,0 +1,56 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+service=${1-}
+case "$service" in
+  websockify|x0tigervnc) ;;
+  *) echo 'viewer finish invoked for an invalid service' >&2; exit 125 ;;
+esac
+
+required=$(cat /run/xenoteer/env/VIEWER_REQUIRED 2>/dev/null || printf invalid)
+case "$required" in
+  1) exec /usr/local/libexec/xenoteer/finish-critical "$@" ;;
+  0) ;;
+  *) exec /usr/local/libexec/xenoteer/finish-critical "$@" ;;
+esac
+
+wanted_up=$(/command/s6-svstat -o wantedup . 2>/dev/null) || wanted_up=invalid
+case "$wanted_up" in
+  false) exit 125 ;;
+  true) ;;
+  *) echo 'unable to read optional viewer supervision intent' >&2; exit 125 ;;
+esac
+
+state=/run/xenoteer/viewer/$service-restarts
+now=$(date +%s)
+last=0
+count=0
+if [ -r "$state" ]; then
+  read -r last count _status <"$state" || { last=0; count=0; }
+fi
+case "$last:$count" in
+  *[!0-9:]*|:*) last=0; count=0 ;;
+esac
+if [ $((now - last)) -gt 60 ]; then
+  count=0
+fi
+count=$((count + 1))
+case "$count" in
+  1) delay=1 ;;
+  2) delay=2 ;;
+  3) delay=4 ;;
+  4) delay=8 ;;
+  *)
+    printf '%s %s degraded\n' "$now" "$count" >"$state"
+    chmod 0644 "$state"
+    printf 'optional viewer service %s reached its restart ceiling; waiting for explicit operator recovery\n' \
+      "$service" >&2
+    exit 125
+    ;;
+esac
+printf '%s %s retrying\n' "$now" "$count" >"$state"
+chmod 0644 "$state"
+printf 'optional viewer service %s exited unexpectedly; retrying after %s seconds\n' \
+  "$service" "$delay" >&2
+sleep "$delay"
