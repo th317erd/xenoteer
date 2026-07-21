@@ -278,14 +278,33 @@ for label, pid, starttime in sorted(identities):
 PY
 }
 
-baseline_identities=$(service_identities)
+# Docker runs the image HEALTHCHECK independently of this soak loop. Its
+# short-lived UID-1000 probe-xfce process (and children such as pgrep) can
+# legitimately overlap a /proc snapshot. Require a clean, exact identity graph
+# within a bounded window instead of weakening the persistent-process
+# allowlist. A real extra, missing, or restarted service remains present and
+# still fails after the retry window.
+stable_service_identities() {
+  local output
+  for _ in {1..100}; do
+    if output=$(service_identities 2>&1); then
+      printf '%s\n' "$output"
+      return 0
+    fi
+    sleep 0.1
+  done
+  printf '%s\n' "$output" >&2
+  return 1
+}
+
+baseline_identities=$(stable_service_identities)
 started=$(date +%s)
 deadline=$((started + duration))
 samples=0
 while (( $(date +%s) < deadline )); do
   "$repo_root/scripts/container/assert-idle-runtime.sh" \
     "$name" "$profile" "$viewer_enabled"
-  current_identities=$(service_identities)
+  current_identities=$(stable_service_identities)
   if [[ $current_identities != "$baseline_identities" ]]; then
     printf 'idle service (PID,/proc starttime) graph changed during soak\n' >&2
     diff -u <(printf '%s\n' "$baseline_identities") \
@@ -302,7 +321,7 @@ done
 
 "$repo_root/scripts/container/assert-idle-runtime.sh" \
   "$name" "$profile" "$viewer_enabled"
-test "$(service_identities)" = "$baseline_identities"
+test "$(stable_service_identities)" = "$baseline_identities"
 docker stop --time 35 "$name" >/dev/null
 test "$(docker inspect "$name" --format '{{.State.ExitCode}}')" -eq 0
 if docker logs "$name" 2>&1 | grep -Fq 'exited unexpectedly'; then
