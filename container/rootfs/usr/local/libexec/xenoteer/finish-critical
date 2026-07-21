@@ -8,7 +8,7 @@ child_signal=${3-0}
 service_dir_argument=${4-}
 
 case "$service" in
-  atspi|session-dbus|websockify|x0tigervnc|xenoteerd|xfce|xvfb) ;;
+  atspi|critical-shutdown-coordinator|session-dbus|websockify|x0tigervnc|xenoteerd|xfce|xvfb) ;;
   *)
     echo 'critical finish invoked for an invalid service' >&2
     exit 125
@@ -59,6 +59,19 @@ esac
 
 result_dir=/run/s6-linux-init-container-results
 result_file=$result_dir/exitcode
+claim_dir=/run/xenoteer/critical-shutdown-claimed
+
+# Several critical services can fail as fallout from the same X11 or D-Bus
+# loss. Preserve the first failure as the container result and send exactly one
+# shutdown request. A directory creation is the only portable atomic primitive
+# needed here and /run is private to this container lifetime.
+if ! mkdir -- "$claim_dir" 2>/dev/null; then
+  if [ -d "$claim_dir" ]; then
+    exit 125
+  fi
+  echo 'unable to claim critical container shutdown; failing closed' >&2
+fi
+
 temporary="$result_dir/.xenoteer-exitcode.$$"
 trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
 umask 022
@@ -75,8 +88,35 @@ fi
 
 printf 'critical service %s exited unexpectedly; container exit result %s\n' \
   "$service" "$result" >&2
-/run/s6/basedir/bin/halt
+
+# The coordinator cannot process its own failure. Its unexpected exit is the
+# one exceptional path that terminates the supervision tree directly after the
+# result has been recorded.
+if [ "$service" = critical-shutdown-coordinator ]; then
+  if ! /command/s6-svscanctl -t /run/service; then
+    echo 'failed to terminate supervision tree after shutdown coordinator exit' >&2
+  fi
+  exit 125
+fi
+
+# Publish one root-owned request only after the exit result is durable. The
+# dedicated supervised coordinator remains alive independently of this finish
+# process and waits for the claimant's definitive D event before requesting the
+# asynchronous overlay halt.
+request_file=/run/xenoteer/critical-shutdown-request
+request_temporary="/run/xenoteer/.critical-shutdown-request.$$"
+trap 'rm -f -- "$request_temporary"' EXIT HUP INT TERM
+if printf '%s\n' "$service" >"$request_temporary" \
+  && chmod 0600 "$request_temporary" \
+  && mv -f -- "$request_temporary" "$request_file"; then
+  trap - EXIT HUP INT TERM
+else
+  echo 'failed to publish critical shutdown request; terminating supervision tree' >&2
+  rm -f -- "$request_temporary"
+  trap - EXIT HUP INT TERM
+  /command/s6-svscanctl -t /run/service 2>/dev/null || :
+fi
 
 # s6-supervise reserves 125 for permanent failure. Never allow the longrun to
-# respawn while the asynchronous overlay halt request is in flight.
+# respawn while the supervised coordinator handles the request.
 exit 125

@@ -46,6 +46,7 @@ start_container() {
   shift
   docker run --detach \
     --name "$name" \
+    --cpus 2 \
     --shm-size=4g \
     --volume "$token_file:/run/secrets/xenoteer_api_token:ro" \
     "$@" \
@@ -72,8 +73,9 @@ wait_running_probe() {
 
 wait_stopped() {
   local name=$1
-  # The critical finish hook requests an overlay halt and exits 125 to prevent a
-  # respawn race. Keep a bounded margin for the outer s6-rc shutdown transaction.
+  # The critical finish hook exits 125 while its coordinator requests overlay
+  # halt. Keep a bounded margin for the outer s6-rc shutdown transaction and its
+  # five-second no-progress fallback.
   for _ in {1..50}; do
     [[ $(docker inspect "$name" --format '{{.State.Running}}') == false ]] && return 0
     sleep 1
@@ -95,6 +97,63 @@ logs_contain() {
   local name=$1 expected=$2 output
   output=$(docker logs "$name" 2>&1)
   grep -Fq -- "$expected" <<<"$output"
+}
+
+assert_logs_contain() {
+  local name=$1 expected=$2 description=$3
+  if logs_contain "$name" "$expected"; then
+    return 0
+  fi
+  docker logs "$name" >&2
+  printf '%s logs did not contain %s\n' "$name" "$description" >&2
+  return 1
+}
+
+allowed_critical_claimants() {
+  case "$1" in
+    xvfb) printf '%s\n' 'xvfb session-dbus atspi xfce xenoteerd' ;;
+    session-dbus) printf '%s\n' 'session-dbus atspi xfce xenoteerd' ;;
+    atspi) printf '%s\n' 'atspi xfce xenoteerd' ;;
+    xfce) printf '%s\n' 'xfce xenoteerd' ;;
+    xenoteerd) printf '%s\n' 'xenoteerd' ;;
+    x0tigervnc) printf '%s\n' 'x0tigervnc websockify' ;;
+    websockify) printf '%s\n' 'websockify' ;;
+    *) printf 'unknown critical trigger: %s\n' "$1" >&2; return 1 ;;
+  esac
+}
+
+assert_critical_shutdown() {
+  local name=$1 trigger=$2 profile=$3 logs claimants claimant claimant_count allowed accepted
+  logs=$(docker logs "$name" 2>&1)
+  claimants=$(sed -n \
+    's/^critical service \([a-z0-9-]*\) exited unexpectedly; container exit result .*/\1/p' \
+    <<<"$logs")
+  claimant_count=$(awk 'NF { count++ } END { print count + 0 }' <<<"$claimants")
+  if [[ $claimant_count -ne 1 ]]; then
+    printf '%s\n' "$logs" >&2
+    printf '%s %s trigger produced %s critical shutdown claimants, expected one\n' \
+      "$name" "$profile" "$claimant_count" >&2
+    return 1
+  fi
+  claimant=$claimants
+  allowed=$(allowed_critical_claimants "$trigger")
+  case " $allowed " in
+    *" $claimant "*) ;;
+    *)
+      printf '%s\n' "$logs" >&2
+      printf '%s %s trigger was claimed by impossible service %s; allowed: %s\n' \
+        "$trigger" "$profile" "$claimant" "$allowed" >&2
+      return 1
+      ;;
+  esac
+  accepted=$(grep -Fc 'critical container shutdown request accepted on attempt' \
+    <<<"$logs" || true)
+  if [[ $accepted -ne 1 ]]; then
+    printf '%s\n' "$logs" >&2
+    printf '%s %s trigger produced %s accepted shutdown requests, expected one\n' \
+      "$trigger" "$profile" "$accepted" >&2
+    return 1
+  fi
 }
 
 assert_loopback_listener() {
@@ -222,6 +281,56 @@ if logs_contain "$startup_stop" 'exited unexpectedly'; then
   printf 'immediate startup stop was classified as a critical crash\n' >&2
   exit 1
 fi
+
+# Crash XFCE while the upward s6-rc transaction still owns its lock. The
+# shutdown daemon accepts the orderly request, but rc.shutdown cannot acquire
+# that lock because daemon readiness can no longer complete. The coordinator's
+# progress watchdog must terminate the tree well before the 65-second startup
+# timeout, retain a nonzero result, and prevent a respawn.
+startup_crash="${container_name}-startup-crash"
+start_container "$startup_crash"
+startup_crash_window=0
+startup_transition_pid=
+for _ in {1..400}; do
+  startup_transition_pid=$(docker exec "$startup_crash" \
+    pgrep -f '^s6-rc .* -u .* -- change top$' 2>/dev/null || true)
+  if [[ -n $startup_transition_pid ]] \
+    && docker exec "$startup_crash" pgrep -x xenoteerd >/dev/null 2>&1; then
+    startup_crash_window=1
+    break
+  fi
+  sleep 0.05
+done
+test "$startup_crash_window" -eq 1
+
+# Hold the exact upward transaction after it has launched the daemon, then wait
+# for all functional probes to pass. Docker health must remain false solely
+# because the transaction still owns the s6-rc lock.
+docker exec "$startup_crash" kill -STOP "$startup_transition_pid"
+startup_functional=0
+for _ in {1..100}; do
+  if docker exec "$startup_crash" /command/s6-envdir -f -L \
+    /run/xenoteer/env /command/s6-setuidgid xenoteer \
+    /usr/local/libexec/xenoteer/probe-daemon >/dev/null 2>&1; then
+    startup_functional=1
+    break
+  fi
+  sleep 0.1
+done
+test "$startup_functional" -eq 1
+if docker exec "$startup_crash" /usr/local/libexec/xenoteer/healthcheck \
+  >/dev/null 2>&1; then
+  printf 'Docker health became ready while the upward s6-rc lock was held\n' >&2
+  exit 1
+fi
+kill_service_payload "$startup_crash" xfce
+wait_stopped "$startup_crash"
+test "$(docker inspect "$startup_crash" --format '{{.State.ExitCode}}')" -ne 0
+assert_critical_shutdown "$startup_crash" xfce startup
+assert_logs_contain "$startup_crash" \
+  'orderly critical shutdown was accepted but made no unlocked s6-rc progress after 5 seconds' \
+  'the upward-transaction shutdown fallback diagnostic'
+assert_logs_exclude "$startup_crash" "$token_canary" 'authentication token contents'
 
 start_container "$container_name"
 wait_running_probe "$container_name"
@@ -372,7 +481,6 @@ hardened_args=(
   --security-opt no-new-privileges:true
   --pids-limit 512
   --memory 6g
-  --cpus 2
   --tmpfs '/run:rw,nosuid,nodev,exec,size=64m,mode=0755'
   --tmpfs '/tmp:rw,nosuid,nodev,noexec,size=1g,mode=1777'
   --volume /home/xenoteer
@@ -523,8 +631,9 @@ for failure in 1 2 3 4; do
   test "$new_viewer_pid" != "$old_viewer_pid"
   old_viewer_pid=$new_viewer_pid
   expected_delay=$((1 << (failure - 1)))
-  logs_contain "$viewer_optional" \
-    "optional viewer service x0tigervnc exited unexpectedly; retrying after $expected_delay seconds"
+  assert_logs_contain "$viewer_optional" \
+    "optional viewer service x0tigervnc exited unexpectedly; retrying after $expected_delay seconds" \
+    "optional viewer retry $failure with delay $expected_delay"
 done
 
 # The fifth close failure reaches the bounded ceiling. The optional viewer is
@@ -562,8 +671,9 @@ test "$degraded_observed" -eq 1
 test "$(docker inspect "$viewer_optional" --format '{{.State.Running}}')" = true
 docker exec "$viewer_optional" curl --fail --silent --show-error \
   http://127.0.0.1:8080/livez >/dev/null
-logs_contain "$viewer_optional" \
-  'optional viewer service x0tigervnc reached its restart ceiling; waiting for explicit operator recovery'
+assert_logs_contain "$viewer_optional" \
+  'optional viewer service x0tigervnc reached its restart ceiling; waiting for explicit operator recovery' \
+  'the optional viewer restart-ceiling diagnostic'
 
 # Explicit operator recovery resets the bounded restart budget before bringing
 # the optional service up. Monitoring must restore Ready without replacing core
@@ -620,8 +730,11 @@ for critical in xvfb xenoteerd session-dbus atspi xfce; do
   kill_service_payload "$name" "$critical"
   wait_stopped "$name"
   test "$(docker inspect "$name" --format '{{.State.ExitCode}}')" -ne 0
-  logs_contain "$name" \
-    "critical service $critical exited unexpectedly; container exit result"
+  # An upstream X11 or D-Bus death can synchronously kill a downstream service
+  # before the deliberately signalled supervisor reaches its finish hook. The
+  # atomic claimant must therefore be unique and causally downstream, not
+  # necessarily the process that the harness signalled first.
+  assert_critical_shutdown "$name" "$critical" normal
   assert_logs_exclude "$name" "$token_canary" 'authentication token contents'
 done
 
@@ -632,8 +745,7 @@ for critical in xvfb xenoteerd session-dbus atspi xfce; do
   kill_service_payload "$name" "$critical"
   wait_stopped "$name"
   test "$(docker inspect "$name" --format '{{.State.ExitCode}}')" -ne 0
-  logs_contain "$name" \
-    "critical service $critical exited unexpectedly; container exit result"
+  assert_critical_shutdown "$name" "$critical" hardened
   assert_logs_exclude "$name" "$token_canary" 'authentication token contents'
 done
 
@@ -644,8 +756,7 @@ for critical in x0tigervnc websockify; do
   kill_service_payload "$name" "$critical"
   wait_stopped "$name"
   test "$(docker inspect "$name" --format '{{.State.ExitCode}}')" -ne 0
-  logs_contain "$name" \
-    "critical service $critical exited unexpectedly; container exit result"
+  assert_critical_shutdown "$name" "$critical" viewer-required
   assert_logs_exclude "$name" "$token_canary" 'authentication token contents'
 done
 
@@ -653,11 +764,12 @@ viewer_invalid="${container_name}-viewer-required-disabled"
 start_container "$viewer_invalid" --env VIEWER_REQUIRED=1 --env VIEWER_ENABLED=0
 wait_stopped "$viewer_invalid"
 test "$(docker inspect "$viewer_invalid" --format '{{.State.ExitCode}}')" -ne 0
-logs_contain "$viewer_invalid" 'a required viewer cannot be disabled'
+assert_logs_contain "$viewer_invalid" 'a required viewer cannot be disabled' \
+  'the required-viewer configuration diagnostic'
 assert_logs_exclude "$viewer_invalid" "$token_canary" 'authentication token contents'
 
 no_secret="${container_name}-no-secret"
-docker run --detach --name "$no_secret" --shm-size=4g "$image" >/dev/null
+docker run --detach --name "$no_secret" --cpus 2 --shm-size=4g "$image" >/dev/null
 created+=("$no_secret")
 wait_stopped "$no_secret"
 test "$(docker inspect "$no_secret" --format '{{.State.ExitCode}}')" -ne 0

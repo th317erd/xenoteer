@@ -1,0 +1,2 @@
+#!/command/execlineb -P
+/command/s6-svwait -U -t 10000 /run/service/s6-linux-init-shutdownd

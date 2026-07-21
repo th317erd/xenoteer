@@ -12,6 +12,16 @@ case "$http_addr" in
   127.0.0.1:*) probe_addr=$http_addr ;;
   *) exit 1 ;;
 esac
+
+# Do not advertise Docker-level readiness while s6-rc still owns the upward
+# transition lock. A critical failure in that window can otherwise enqueue a
+# valid shutdown transaction behind a readiness operation that can no longer
+# complete. The supervised daemon must also have emitted its readiness event.
+test "$(/command/s6-svstat -o ready /run/service/xenoteerd 2>/dev/null)" = true
+if pgrep -f '^s6-rc .* -u .* -- change top$' >/dev/null 2>&1; then
+  exit 1
+fi
+
 /command/s6-envdir -f -L "$env_dir" \
   /command/s6-setuidgid xenoteer /usr/local/libexec/xenoteer/probe-xfce
 case "$viewer_required" in

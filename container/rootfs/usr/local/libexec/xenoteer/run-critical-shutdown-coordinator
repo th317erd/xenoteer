@@ -1,0 +1,32 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -eu
+
+request_file=/run/xenoteer/critical-shutdown-request
+
+# Native readiness proves the independently supervised coordinator is running
+# before any critical X11 service can start.
+printf '\n' >&3
+exec 3>&-
+
+while [ ! -s "$request_file" ]; do
+  sleep 0.1
+done
+
+IFS= read -r service <"$request_file"
+case "$service" in
+  atspi|session-dbus|websockify|x0tigervnc|xenoteerd|xfce|xvfb) ;;
+  *)
+    echo 'critical shutdown request file contained an invalid service' >&2
+    exit 64
+    ;;
+esac
+
+if /usr/local/libexec/xenoteer/request-critical-shutdown "$service"; then
+  # The orderly transaction has begun. Remain up until reverse dependency
+  # teardown explicitly stops this coordinator; an early payload exit would be
+  # indistinguishable from loss of the shutdown control plane.
+  exec sleep infinity
+fi
+
+exit 1

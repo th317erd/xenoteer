@@ -135,7 +135,9 @@ runtime-directories -> desktop-profile --+
 
 Xvfb is ready only after an authenticated `xdpyinfo` round trip proves the fixed
 geometry, depth, 96 DPI, and XTEST extension. The daemon is ready to s6 only after
-`/livez` responds. Desktop readiness additionally proves the single session bus,
+`/readyz` and the desktop probe succeed. Docker-level readiness additionally
+waits for the daemon's s6 readiness event and completion of the upward s6-rc
+transaction, then proves the single session bus,
 AT-SPI registry, XFCE session/window manager, and live X11 desktop capability.
 The optional view-only chain starts only after XFCE and binds both RFB and viewer
 WebSocket listeners to loopback. Any critical daemon, Xvfb, or XFCE exit asks s6
@@ -212,11 +214,19 @@ Critical finish hooks query s6-supervise's live `wantedup` state from their
 guaranteed service-directory working directory. A requested operator/s6-rc stop
 sets `wantedup=false` before signalling the process, including while startup is
 still in progress, and therefore preserves graceful exit 0. An unsolicited
-critical death remains `wantedup=true`; its finish hook atomically records a
-nonzero child/signal result for s6-overlay, requests halt, and exits 125 so the
-service cannot respawn. Failure to read supervision intent fails closed. The
-built-image gate covers immediate startup stop, ready normal/hardened stops, and
-unexpected Xvfb/xenoteerd exits in both profiles.
+critical death remains `wantedup=true`. The first cascading critical finish hook
+atomically claims shutdown, records a nonzero child/signal result for s6-overlay,
+publishes a request to the dedicated supervised coordinator, and exits 125 so
+the service cannot respawn. The coordinator waits for the claimant's definitive
+down event before requesting halt, retries transient shutdown-daemon FIFO
+failures, and requires an unlocked downward s6-rc transaction within five
+seconds. If the orderly transaction cannot start, it
+terminates the supervision tree as a last-resort liveness path while preserving
+the recorded failure result. Critical services cannot start until the internal
+s6 shutdown daemon is ready. Failure to read supervision intent fails closed.
+The built-image gate covers immediate startup stop, ready normal/hardened stops,
+every critical desktop service in both profiles, and the required-viewer
+services.
 
 This is a candidate, not a blanket compatibility claim:
 

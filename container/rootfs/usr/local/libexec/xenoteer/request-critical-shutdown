@@ -1,0 +1,75 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+set -u
+
+service=${1-}
+case "$service" in
+  atspi|session-dbus|websockify|x0tigervnc|xenoteerd|xfce|xvfb) ;;
+  *)
+    echo 'critical shutdown coordinator received an invalid service' >&2
+    exit 64
+    ;;
+esac
+
+# Uppercase D waits until the longrun is down and its finish process has
+# completed. This is the causal barrier that keeps the asynchronous overlay
+# shutdown transaction from overlapping the finish hook that initiated it.
+if ! /command/s6-svwait -D -t 5000 "/run/service/$service"; then
+  printf 'critical shutdown coordinator timed out waiting for %s definitive down state\n' \
+    "$service" >&2
+fi
+
+# s6-linux-init-hpr talks to the shutdown daemon over a FIFO and returns before
+# the shutdown transaction completes. The daemon can have a small restart
+# window with no FIFO reader, so handle that transient explicitly.
+halt_status=111
+attempt=1
+while [ "$attempt" -le 20 ]; do
+  if /run/s6/basedir/bin/halt; then
+    printf 'critical container shutdown request accepted on attempt %s\n' \
+      "$attempt" >&2
+    break
+  else
+    halt_status=$?
+  fi
+  attempt=$((attempt + 1))
+  sleep 0.1
+done
+
+if [ "$attempt" -le 20 ]; then
+  # A successful FIFO write only proves acceptance. rc.shutdown can still block
+  # behind an upward s6-rc transaction. Require the downward transaction to
+  # exist after the upward lock holder has gone before considering the orderly
+  # handoff complete.
+  progress_attempt=1
+  while [ "$progress_attempt" -le 50 ]; do
+    upward=$(pgrep -f '^s6-rc .* -u .* -- change top$' 2>/dev/null || true)
+    downward=$(pgrep -f '^s6-rc .* -bda change$' 2>/dev/null || true)
+    if [ -z "$upward" ] && [ -n "$downward" ]; then
+      exit 0
+    fi
+    progress_attempt=$((progress_attempt + 1))
+    sleep 0.1
+  done
+  printf 'orderly critical shutdown was accepted but made no unlocked s6-rc progress after 5 seconds; terminating supervision tree\n' \
+    >&2
+else
+  printf 'orderly critical shutdown request failed after 20 attempts (status %s); terminating supervision tree\n' \
+    "$halt_status" >&2
+fi
+
+# This last-resort path is intentionally below the orderly s6-linux-init path.
+# It preserves liveness if the shutdown daemon itself cannot recover, while the
+# already-recorded result still makes the container failure visible.
+stalled_upward=$(pgrep -f '^s6-rc .* -u .* -- change top$' 2>/dev/null || true)
+if [ -n "$stalled_upward" ]; then
+  # A stopped lock holder cannot observe the service deaths requested below or
+  # release stage 2. SIGCONT is harmless when it is merely blocked in a wait.
+  # pgrep intentionally supplies one or more PIDs.
+  # shellcheck disable=SC2086
+  kill -CONT $stalled_upward 2>/dev/null || :
+fi
+if ! /command/s6-svscanctl -t /run/service; then
+  echo 'last-resort supervision-tree termination request also failed' >&2
+  exit 1
+fi

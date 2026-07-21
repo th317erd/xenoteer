@@ -27,11 +27,15 @@ required=(
   container/spikes/browser/licenses/playwright/LICENSE
   container/spikes/browser/licenses/playwright/NOTICE
   container/rootfs/etc/s6-overlay/s6-rc.d/user/contents.d/runtime-directories
+  container/rootfs/etc/s6-overlay/s6-rc.d/user/contents.d/critical-shutdown-coordinator
+  container/rootfs/etc/s6-overlay/s6-rc.d/user/contents.d/shutdown-daemon-ready
   container/rootfs/etc/s6-overlay/s6-rc.d/user/contents.d/machine-id
   container/rootfs/etc/s6-overlay/s6-rc.d/user/contents.d/xauthority
   container/rootfs/etc/s6-overlay/s6-rc.d/user/contents.d/xvfb
   container/rootfs/etc/s6-overlay/s6-rc.d/user/contents.d/xenoteerd
   container/rootfs/usr/local/libexec/xenoteer/finish-critical
+  container/rootfs/usr/local/libexec/xenoteer/request-critical-shutdown
+  container/rootfs/usr/local/libexec/xenoteer/run-critical-shutdown-coordinator
   container/rootfs/usr/local/libexec/xenoteer/probe-viewer-protocol
   scripts/container/assert-idle-runtime.sh
   scripts/container/test-idle-soak.sh
@@ -222,6 +226,10 @@ grep -Fq 'finish-critical xvfb "$@"' \
 grep -Fq '/run/s6-linux-init-container-results' \
   container/rootfs/usr/local/libexec/xenoteer/finish-critical
 grep -Fq '/run/s6/basedir/bin/halt' \
+  container/rootfs/usr/local/libexec/xenoteer/request-critical-shutdown
+grep -Fq '/command/s6-svscanctl -t /run/service' \
+  container/rootfs/usr/local/libexec/xenoteer/request-critical-shutdown
+grep -Fq 'critical-shutdown-claimed' \
   container/rootfs/usr/local/libexec/xenoteer/finish-critical
 grep -Eq '^exit 125$' \
   container/rootfs/usr/local/libexec/xenoteer/finish-critical

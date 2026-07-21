@@ -8,16 +8,18 @@ contents="$graph/user/contents.d"
 declare -A present visiting visited
 declare -A expected_dependencies=(
   [atspi]='session-dbus'
+  [critical-shutdown-coordinator]='runtime-directories'
   [desktop-profile]='runtime-directories'
   [machine-id]='runtime-directories'
-  [runtime-directories]=''
+  [runtime-directories]='shutdown-daemon-ready'
   [session-dbus]='xvfb'
+  [shutdown-daemon-ready]=''
   [websockify]='x0tigervnc'
   [x0tigervnc]='xfce'
   [xauthority]='runtime-directories'
   [xenoteerd]='xfce'
   [xfce]='atspi'
-  [xvfb]='desktop-profile machine-id xauthority'
+  [xvfb]='critical-shutdown-coordinator desktop-profile machine-id xauthority'
 )
 
 while IFS= read -r -d '' marker; do
@@ -69,6 +71,24 @@ for service in "${!present[@]}"; do
           }
           rg -q "finish-viewer $service" "$directory/finish" || {
             printf '%s does not use the optional/required viewer finish policy\n' "$service" >&2
+            exit 1
+          }
+          ;;
+        critical-shutdown-coordinator)
+          [[ -f $directory/notification-fd ]] || {
+            printf '%s has no readiness fd\n' "$service" >&2
+            exit 1
+          }
+          [[ $(<"$directory/notification-fd") == 3 ]] || {
+            printf '%s readiness fd must be 3\n' "$service" >&2
+            exit 1
+          }
+          [[ -f $directory/timeout-up && $(<"$directory/timeout-up") =~ ^[0-9]+$ ]] || {
+            printf '%s timeout-up must be numeric\n' "$service" >&2
+            exit 1
+          }
+          [[ ! -e $directory/data/check ]] || {
+            printf '%s uses native readiness and must not have a polling check\n' "$service" >&2
             exit 1
           }
           ;;
@@ -170,6 +190,8 @@ grep -Fq 'xfce4-session --disable-tcp' "$libexec/run-xfce"
 grep -Fq -- '-noreset' "$libexec/run-xvfb"
 grep -Fq '/readyz' "$libexec/probe-daemon"
 grep -Fq '/readyz' "$libexec/healthcheck"
+grep -Fq '/command/s6-svstat -o ready /run/service/xenoteerd' "$libexec/healthcheck"
+grep -Fq "pgrep -f '^s6-rc .* -u .* -- change top\$'" "$libexec/healthcheck"
 if rg -n '/livez' "$libexec/probe-daemon" "$libexec/healthcheck" >/dev/null; then
   printf 'readiness check incorrectly uses the liveness-only endpoint\n' >&2
   exit 1
@@ -192,10 +214,20 @@ grep -Fq 'probe-viewer-protocol' "$libexec/probe-websockify"
 grep -Fq 'RFB 003.008' "$libexec/probe-viewer-protocol"
 grep -Fq '/usr/local/libexec/xenoteer/probe-xfce' "$libexec/probe-daemon"
 grep -Fq '/usr/local/libexec/xenoteer/probe-xfce' "$libexec/healthcheck"
+grep -Fq '/command/s6-svwait -U -t 10000 /run/service/s6-linux-init-shutdownd' \
+  "$graph/shutdown-daemon-ready/up"
 if rg -n 'delay=(16|30)' "$libexec/finish-viewer" >/dev/null; then
   printf 'viewer retry delay exceeds the finish timeout budget\n' >&2
   exit 1
 fi
+grep -Fq 'critical-shutdown-request' "$libexec/finish-critical"
+grep -Fq "/usr/local/libexec/xenoteer/request-critical-shutdown \"\$service\"" \
+  "$libexec/run-critical-shutdown-coordinator"
+grep -Fq 'exec sleep infinity' "$libexec/run-critical-shutdown-coordinator"
+grep -Fq '/command/s6-svwait -D -t 5000' "$libexec/request-critical-shutdown"
+grep -Fq '/run/s6/basedir/bin/halt' "$libexec/request-critical-shutdown"
+grep -Fq 'made no unlocked s6-rc progress after 5 seconds' \
+  "$libexec/request-critical-shutdown"
 grep -Fq 'reached its restart ceiling; waiting for explicit operator recovery' \
   "$libexec/finish-viewer"
 for service in session-dbus atspi xfce xenoteerd; do
