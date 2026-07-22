@@ -11,12 +11,14 @@ publish = false
 
 [features]
 default = []
-live-atspi = ["dep:atspi", "dep:tokio"]
+live-atspi = ["dep:atspi-connection", "dep:atspi-proxies", "dep:tokio", "dep:zbus"]
 
 [dependencies]
-atspi = { version = "=0.30.0", default-features = false, features = ["connection", "proxies", "tokio"], optional = true }
+atspi-connection = { workspace = true, optional = true }
+atspi-proxies = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["time"], optional = true }
+zbus = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["time"] }

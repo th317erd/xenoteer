@@ -60,9 +60,9 @@ trap cleanup EXIT INT TERM
 printf '%064d' 0 >"$token_file"
 chmod 0400 "$token_file"
 if [[ $(id -u) -eq 0 ]]; then
-  chown 1000:1000 "$token_file"
-elif [[ $(id -u) -ne 1000 ]]; then
-  printf 'desktop app image test must run as root or UID 1000\n' >&2
+  chown 0:0 "$token_file"
+elif ! docker info --format '{{json .SecurityOptions}}' | grep -Fq 'name=rootless'; then
+  printf 'desktop app image test must run as root or use rootless Docker for a container-root-owned token\n' >&2
   exit 77
 fi
 for volume in "${volumes[@]}"; do

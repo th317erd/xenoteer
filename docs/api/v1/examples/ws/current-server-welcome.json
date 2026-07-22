@@ -1,0 +1,33 @@
+{
+  "type": "server.welcome",
+  "protocol": {
+    "major": 1,
+    "minor": 0
+  },
+  "connection_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0042",
+  "principal": {
+    "id": "local-operator",
+    "capabilities": [
+      "desktop:status",
+      "desktop:observe",
+      "input:control",
+      "application:launch",
+      "application:terminate"
+    ]
+  },
+  "desktop": {
+    "id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
+    "generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+    "state": "ready"
+  },
+  "limits": {
+    "max_message_bytes": 1048576,
+    "heartbeat_ms": 15000,
+    "normal_outbound_capacity": 1024,
+    "reserved_outbound_capacity": 32,
+    "max_command_watches": 256
+  },
+  "resume": {
+    "status": "not_requested"
+  }
+}

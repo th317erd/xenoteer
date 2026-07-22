@@ -4,7 +4,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{CommandId, ErrorCode, Problem, ProblemValidationError, Timestamp, TimestampError};
+use crate::{
+    CommandId, ErrorCode, Problem, ProblemValidationError, ProcessRef, ProcessState,
+    ProcessValidationError, ProcessView, Timestamp, TimestampError,
+};
 
 /// Maximum UTF-8 byte length of a warning code.
 pub const MAX_WARNING_CODE_BYTES: usize = 64;
@@ -55,12 +58,30 @@ pub enum EffectStage {
     None,
     /// The command was admitted but has not touched the target.
     Accepted,
+    /// Transport dispatch began, but the server cannot prove whether a target
+    /// effect occurred. Clients must not create fresh work automatically.
+    OutcomeUnknown,
+    /// A side effect occurred but the failing backend could not safely prove a
+    /// more specific stage. Clients must treat automatic retry as unsafe.
+    SideEffectObserved,
     /// The pointer moved.
     PointerMoved,
     /// A pointer button was pressed.
     ButtonPressed,
     /// A pointer button was released.
     ButtonReleased,
+    /// A physical key was pressed.
+    KeyPressed,
+    /// A physical key was released.
+    KeyReleased,
+    /// Xenoteer-owned pressed input was conservatively reset.
+    InputReset,
+    /// A managed application child was started.
+    ProcessStarted,
+    /// A managed process group received a termination signal.
+    ProcessSignalled,
+    /// A managed child was awaited and reaped.
+    ProcessExited,
     /// The requested postcondition was observed.
     PostconditionMet,
 }
@@ -82,8 +103,41 @@ pub enum CommandOutcome {
         /// Whether the probed capability was ready at execution time.
         ready: bool,
     },
+    /// A registered application profile launched successfully.
+    ApplicationLaunched {
+        /// PID-reuse-safe managed process identity.
+        process: ProcessRef,
+    },
+    /// Current managed process status.
+    ProcessStatus {
+        /// Validated process status snapshot.
+        process: ProcessView,
+    },
+    /// Managed termination completed and the child was reaped.
+    ProcessTerminated {
+        /// Terminal process status snapshot.
+        process: ProcessView,
+    },
     /// An operation completed without an additional payload.
     Acknowledged,
+}
+
+impl CommandOutcome {
+    /// Revalidates nested process references and state-dependent outcomes.
+    pub fn validate(&self) -> Result<(), ProcessValidationError> {
+        match self {
+            Self::Probe { .. } | Self::Acknowledged => Ok(()),
+            Self::ApplicationLaunched { process } => process.validate(),
+            Self::ProcessStatus { process } => process.validate(),
+            Self::ProcessTerminated { process } => {
+                process.validate()?;
+                if process.state != ProcessState::Exited {
+                    return Err(ProcessValidationError::ProcessView);
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 /// A bounded safe warning returned with a result.
@@ -299,6 +353,9 @@ impl CommandResult {
         if !valid_payload {
             return Err(ResultInvariantError::PayloadDoesNotMatchLifecycle);
         }
+        if let Some(outcome) = &self.outcome {
+            outcome.validate()?;
+        }
         let effect_matches_lifecycle = match self.lifecycle {
             CommandLifecycle::Accepted => self.effect_stage == EffectStage::Accepted,
             CommandLifecycle::CancelledBeforeEffect | CommandLifecycle::DeadlineBeforeEffect => {
@@ -442,6 +499,9 @@ pub enum ResultInvariantError {
     /// An embedded timestamp could not be interpreted.
     #[error(transparent)]
     InvalidTimestamp(#[from] TimestampError),
+    /// A nested managed-process outcome is malformed.
+    #[error(transparent)]
+    InvalidProcess(#[from] ProcessValidationError),
 }
 
 #[cfg(test)]

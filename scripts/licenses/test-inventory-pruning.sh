@@ -58,6 +58,7 @@ image_root="$fixture/image"
 mkdir -p \
   "$image_root/etc/s6-overlay/s6-rc.d" \
   "$image_root/etc/xenoteer/kept" \
+  "$image_root/usr/local/bin" \
   "$image_root/usr/local/libexec/xenoteer" \
   "$image_root/usr/share/doc/xenoteer" \
   "$image_root/usr/share/novnc" \
@@ -66,6 +67,8 @@ cp "$repo_root/LICENSE" "$image_root/usr/share/doc/xenoteer/LICENSE"
 printf 'fixture notice\n' >"$image_root/usr/share/doc/xenoteer/NOTICE"
 printf 'fixture release lock\n' >"$image_root/usr/share/doc/xenoteer/release.lock"
 printf 'fixture source lock\n' >"$image_root/usr/share/doc/xenoteer/sources.lock"
+printf 'daemon\n' >"$image_root/usr/local/bin/xenoteerd"
+printf 'broker\n' >"$image_root/usr/local/bin/xenoteer-processd"
 printf '{}\n' >"$image_root/usr/share/novnc/mandatory.json"
 printf 'kept\n' >"$image_root/etc/xenoteer/kept/runtime.txt"
 mkdir -p "$image_root/etc/s6-overlay/s6-rc.d/user2"
@@ -82,6 +85,8 @@ done
 printf '%s\t%s\t%s\n' \
   '/etc/xenoteer/*' 'BUSL-1.1' '/usr/share/doc/xenoteer/LICENSE' \
   '/etc/s6-overlay/s6-rc.d/*' 'BUSL-1.1' '/usr/share/doc/xenoteer/LICENSE' \
+  '/usr/local/bin/xenoteerd' 'BUSL-1.1' '/usr/share/doc/xenoteer/LICENSE' \
+  '/usr/local/bin/xenoteer-processd' 'BUSL-1.1' '/usr/share/doc/xenoteer/LICENSE' \
   '/usr/share/doc/xenoteer/*' 'BUSL-1.1' '/usr/share/doc/xenoteer/LICENSE' \
   '/usr/share/novnc/mandatory.json' 'BUSL-1.1' '/usr/share/doc/xenoteer/LICENSE' \
   '/usr/share/xenoteer/*' 'BUSL-1.1' '/usr/share/doc/xenoteer/LICENSE' \
@@ -96,6 +101,8 @@ image_inventory="$image_root/usr/share/doc/xenoteer/first-party-files.tsv"
 grep -Fq $'/etc/xenoteer/kept/runtime.txt\t' "$image_inventory"
 grep -Fq $'/usr/share/doc/xenoteer/release.lock\t' "$image_inventory"
 grep -Fq $'/usr/share/doc/xenoteer/sources.lock\t' "$image_inventory"
+grep -Fq $'/usr/local/bin/xenoteerd\t' "$image_inventory"
+grep -Fq $'/usr/local/bin/xenoteer-processd\t' "$image_inventory"
 if grep -Fq $'/etc/s6-overlay/s6-rc.d/user2/type\t' "$image_inventory"; then
   printf 'image first-party inventory duplicated an exact locked s6 path\n' >&2
   exit 1

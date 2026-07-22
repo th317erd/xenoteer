@@ -1,0 +1,6 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+unset XENOTEER__AUTH__TOKEN_FILE
+exec s6-envdir -f -L /run/xenoteer/env \
+  s6-notifyoncheck -d -s 100 -T 15000 -t 2000 -w 100 -n 150 \
+    /usr/local/bin/xenoteer-processd

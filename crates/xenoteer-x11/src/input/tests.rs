@@ -30,7 +30,7 @@ use super::keyboard_model::{
 use super::{
     ActionContext, ControlOutcome, InputCommand, InputFailureKind, InputOperation,
     InputOutcomeKind, KeyboardAction, KeyboardModelDiagnostics, KeyboardSequenceStep,
-    PhysicalTextMode,
+    PhysicalTextMode, PointerMoveRequest,
 };
 
 #[derive(Debug, Default)]
@@ -1285,6 +1285,65 @@ fn fifo_queue_does_not_interleave_actions() -> Result<(), Box<dyn std::error::Er
         BackendEvent::Motion { point: first, .. },
         BackendEvent::Motion { point: second, .. }
     ] if *first == middle && *second == end));
+    let shutdown = handle.shutdown();
+    assert!(matches!(
+        shutdown.blocking_recv()??,
+        ControlOutcome::Shutdown(_)
+    ));
+    assert_eq!(join.join(), InputActorExit::Stopped);
+    Ok(())
+}
+
+#[test]
+fn queued_pointer_move_intent_interpolates_from_execution_time_position()
+-> Result<(), Box<dyn std::error::Error>> {
+    let start = RootPoint::new(0, 0)?;
+    let middle = RootPoint::new(100, 100)?;
+    let end = RootPoint::new(200, 100)?;
+    let backend = MockBackend::new(start);
+    let (handle, join) = spawn_test_actor(4, {
+        let backend = backend.clone();
+        move || Ok(backend)
+    })?;
+
+    let first = handle.try_submit_pointer_move(
+        context(),
+        PointerMoveRequest::new(middle, MotionOptions::instant(false)),
+        CancellationToken::new(),
+    )?;
+    let second = handle.try_submit_pointer_move(
+        context(),
+        PointerMoveRequest::new(
+            end,
+            MotionOptions::new(
+                MotionCurve::Smooth,
+                Some(100),
+                MotionPolicy::default(),
+                false,
+            )?,
+        ),
+        CancellationToken::new(),
+    )?;
+
+    let _first = first.blocking_recv()??;
+    let _second = second.blocking_recv()??;
+    let points = backend
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            BackendEvent::Motion { point, .. } => Some(point),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(points.first(), Some(&middle));
+    assert_eq!(points.last(), Some(&end));
+    assert!(
+        points[1..points.len() - 1]
+            .iter()
+            .any(|point| *point != middle && *point != end),
+        "the second queued move must emit interpolated samples"
+    );
+
     let shutdown = handle.shutdown();
     assert!(matches!(
         shutdown.blocking_recv()??,

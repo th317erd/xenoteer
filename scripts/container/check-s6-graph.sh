@@ -17,7 +17,8 @@ declare -A expected_dependencies=(
   [websockify]='x0tigervnc'
   [x0tigervnc]='xfce'
   [xauthority]='runtime-directories'
-  [xenoteerd]='xfce'
+  [xenoteer-processd]='xfce'
+  [xenoteerd]='xenoteer-processd'
   [xfce]='atspi'
   [xvfb]='critical-shutdown-coordinator desktop-profile machine-id xauthority'
 )
@@ -181,11 +182,14 @@ done
 libexec="$repo_root/container/rootfs/usr/local/libexec/xenoteer"
 grep -Fq 'dbus-daemon --session --nofork --nopidfile --nosyslog' \
   "$libexec/run-session-dbus"
-grep -Fq -- '--address=unix:path=/run/user/1000/bus' \
+grep -Fq -- '--address=unix:path=/run/xenoteer/bus/session' \
   "$libexec/run-session-dbus"
 grep -Fq 'ATSPI_DBUS_IMPLEMENTATION=dbus-daemon' "$libexec/run-atspi"
+grep -Fq 'XDG_RUNTIME_DIR=/run/xenoteer/bus' "$libexec/run-atspi"
 grep -Fq '/usr/libexec/at-spi-bus-launcher' "$libexec/run-atspi"
 grep -Fq -- '--launch-immediately --a11y=1 --screen-reader=1' "$libexec/run-atspi"
+grep -Fq 'umask 0007' "$libexec/run-session-dbus"
+grep -Fq 'umask 0007' "$libexec/run-atspi"
 grep -Fq 'xfce4-session --disable-tcp' "$libexec/run-xfce"
 grep -Fq -- '-noreset' "$libexec/run-xvfb"
 grep -Fq '/readyz' "$libexec/probe-daemon"
@@ -214,6 +218,28 @@ grep -Fq 'probe-viewer-protocol' "$libexec/probe-websockify"
 grep -Fq 'RFB 003.008' "$libexec/probe-viewer-protocol"
 grep -Fq '/usr/local/libexec/xenoteer/probe-xfce' "$libexec/probe-daemon"
 grep -Fq '/usr/local/libexec/xenoteer/probe-xfce' "$libexec/healthcheck"
+# These are deliberately literal source assertions, not shell expansions.
+# shellcheck disable=SC2016
+grep -Fq 'exec 8<"$token_file"' "$libexec/run-daemon"
+# shellcheck disable=SC2016
+grep -Fq 'mkfifo -m 0400 "$token_pipe"' "$libexec/run-daemon"
+# shellcheck disable=SC2016
+grep -Fq 'chown 1001:1001 "$token_pipe"' "$libexec/run-daemon"
+# shellcheck disable=SC2016
+grep -Fq 'exec 9<"$token_pipe"' "$libexec/run-daemon"
+# shellcheck disable=SC2016
+grep -Fq 'wait "$token_writer"' "$libexec/run-daemon"
+grep -Fq 'exec 8<&-' "$libexec/run-daemon"
+# shellcheck disable=SC2016
+grep -Fq 'rm -f -- "$token_file"' "$libexec/run-daemon"
+grep -Fq 'ulimit -c 0' "$libexec/run-daemon"
+grep -Fq 'XENOTEER__AUTH__TOKEN_FILE=/proc/self/fd/9' "$libexec/run-daemon"
+grep -Fq 's6-setuidgid xenoteerd /usr/local/bin/xenoteerd' "$libexec/run-daemon"
+grep -Fq 'unset XENOTEER__AUTH__TOKEN_FILE' "$graph/xenoteer-processd/run"
+if rg -n 'exec 3<.*token|fd/3' "$libexec/run-daemon" >/dev/null; then
+  printf 'daemon token handoff conflicts with s6 readiness fd 3\n' >&2
+  exit 1
+fi
 grep -Fq '/command/s6-svwait -U -t 10000 /run/service/s6-linux-init-shutdownd' \
   "$graph/shutdown-daemon-ready/up"
 if rg -n 'delay=(16|30)' "$libexec/finish-viewer" >/dev/null; then
@@ -234,12 +260,20 @@ grep -Fq 'made no unlocked s6-rc progress after 5 seconds' \
   "$libexec/request-critical-shutdown"
 grep -Fq 'reached its restart ceiling; waiting for explicit operator recovery' \
   "$libexec/finish-viewer"
-for service in session-dbus atspi xfce xenoteerd; do
+for service in session-dbus atspi xfce; do
   grep -Fq 'exec s6-setuidgid xenoteer ' "$graph/$service/data/check" || {
     printf '%s readiness check must use the desktop identity\n' "$service" >&2
     exit 1
   }
 done
+grep -Fq 'exec s6-setuidgid xenoteerd ' "$graph/xenoteerd/data/check" || {
+  printf 'xenoteerd readiness check must use the daemon identity\n' >&2
+  exit 1
+}
+grep -Fq 'exec s6-setuidgid xenoteerd ' "$graph/xenoteer-processd/data/check" || {
+  printf 'process broker readiness check must use the daemon identity\n' >&2
+  exit 1
+}
 
 if rg -n '(^|[[:space:]/])(dbus-launch|dbus-run-session|startxfce4)([[:space:]]|$)|dbus-daemon[[:space:]]+--system' \
   "$repo_root/container/rootfs/etc/s6-overlay" "$libexec" >/dev/null; then

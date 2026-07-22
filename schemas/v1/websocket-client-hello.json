@@ -1,0 +1,134 @@
+{
+  "$defs": {
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "EventResumeRequest": {
+      "additionalProperties": false,
+      "description": "Resume cursor bound to one exact desktop lifetime.",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration",
+          "description": "Exact desktop lifetime that assigned `event_sequence`."
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId",
+          "description": "Desktop resource being resumed."
+        },
+        "event_sequence": {
+          "description": "Last globally assigned event sequence completely processed by the client.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "desktop_id",
+        "desktop_generation",
+        "event_sequence"
+      ],
+      "type": "object"
+    },
+    "RequestId": {
+      "description": "Correlates one transport request and response.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "VersionRange": {
+      "additionalProperties": false,
+      "description": "An inclusive range of client-supported minors within one major version.",
+      "properties": {
+        "major": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_minor": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_minor": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "min_minor",
+        "max_minor"
+      ],
+      "type": "object"
+    },
+    "WebSocketClientDescriptor": {
+      "additionalProperties": false,
+      "description": "Client implementation identity reported during the bounded handshake.",
+      "properties": {
+        "name": {
+          "description": "Stable client/package name.",
+          "type": "string"
+        },
+        "version": {
+          "description": "Client release version.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Required first WebSocket application message.",
+  "properties": {
+    "client": {
+      "$ref": "#/$defs/WebSocketClientDescriptor",
+      "description": "Bounded non-secret client identity."
+    },
+    "protocol": {
+      "$ref": "#/$defs/VersionRange",
+      "description": "Client-supported protocol range."
+    },
+    "request_id": {
+      "$ref": "#/$defs/RequestId",
+      "description": "Correlates welcome and any replay status."
+    },
+    "resume": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EventResumeRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional retained-event resume cursor."
+    },
+    "type": {
+      "description": "Must be exactly `client.hello`.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "type",
+    "request_id",
+    "protocol",
+    "client"
+  ],
+  "title": "ClientHello",
+  "type": "object"
+}

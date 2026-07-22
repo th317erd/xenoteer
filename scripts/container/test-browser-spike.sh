@@ -20,7 +20,7 @@ trap cleanup EXIT
 [[ $(id -u) -eq 0 ]] || { printf 'browser spike must run as root for deterministic secret ownership\n' >&2; exit 77; }
 openssl rand -hex 32 >"$token_file"
 chmod 0400 "$token_file"
-chown 1000:1000 "$token_file"
+chown 0:0 "$token_file"
 
 docker build \
   --build-arg "XENOTEER_RUNTIME_IMAGE=$runtime_image" \

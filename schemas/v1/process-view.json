@@ -1,0 +1,134 @@
+{
+  "$defs": {
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "LaunchId": {
+      "description": "Identifies one managed application launch.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ProcessExit": {
+      "additionalProperties": false,
+      "description": "Reaped Unix child status without unbounded output.",
+      "properties": {
+        "code": {
+          "description": "Normal exit status, mutually exclusive with `signal`.",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "core_dumped": {
+          "description": "Whether the OS reported a core dump.",
+          "type": "boolean"
+        },
+        "signal": {
+          "description": "Terminating signal, mutually exclusive with `code`.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "core_dumped"
+      ],
+      "type": "object"
+    },
+    "ProcessRef": {
+      "additionalProperties": false,
+      "description": "A reference safe against desktop restart and Linux PID reuse.",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration",
+          "description": "Desktop lifetime that owns the child."
+        },
+        "launch_id": {
+          "$ref": "#/$defs/LaunchId",
+          "description": "Server-generated managed launch identity."
+        },
+        "pid": {
+          "description": "Positive Linux process identifier.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "proc_start_ticks": {
+          "description": "Field 22 from `/proc/{pid}/stat`, measured in boot clock ticks.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "desktop_generation",
+        "pid",
+        "proc_start_ticks",
+        "launch_id"
+      ],
+      "type": "object"
+    },
+    "ProcessState": {
+      "description": "Coarse managed child lifecycle.",
+      "oneOf": [
+        {
+          "const": "starting",
+          "description": "Spawn is admitted but exec identity is not yet published.",
+          "type": "string"
+        },
+        {
+          "const": "running",
+          "description": "The verified child/process group is running.",
+          "type": "string"
+        },
+        {
+          "const": "terminating",
+          "description": "SIGTERM/SIGKILL termination is in progress.",
+          "type": "string"
+        },
+        {
+          "const": "exited",
+          "description": "The child was awaited and reaped.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Current status of a managed application child.",
+  "properties": {
+    "exit": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProcessExit"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Exit details present exactly when `state` is `exited`."
+    },
+    "process": {
+      "$ref": "#/$defs/ProcessRef",
+      "description": "Exact process reference."
+    },
+    "state": {
+      "$ref": "#/$defs/ProcessState",
+      "description": "Current managed lifecycle."
+    }
+  },
+  "required": [
+    "process",
+    "state"
+  ],
+  "title": "ProcessView",
+  "type": "object"
+}

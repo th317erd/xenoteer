@@ -53,6 +53,9 @@ pub enum ErrorCode {
     DeadlineExceededBeforeEffect,
     /// Work exceeded its deadline after a partial effect.
     DeadlineExceededAfterEffect,
+    /// A transport deadline elapsed after dispatch, so the request outcome
+    /// cannot be proven from the response channel.
+    RequestOutcomeUnknown,
     /// Work was cancelled before any effect.
     CancelledBeforeEffect,
     /// Work was cancelled after a partial effect.
@@ -81,6 +84,7 @@ impl ErrorCode {
             Self::UnsupportedByTarget => "unsupported_by_target",
             Self::DeadlineExceededBeforeEffect => "deadline_exceeded_before_effect",
             Self::DeadlineExceededAfterEffect => "deadline_exceeded_after_effect",
+            Self::RequestOutcomeUnknown => "request_outcome_unknown",
             Self::CancelledBeforeEffect => "cancelled_before_effect",
             Self::CancelledAfterEffect => "cancelled_after_effect",
             Self::BackendFailure => "backend_failure",

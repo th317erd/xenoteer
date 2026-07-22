@@ -2,5 +2,47 @@
 # SPDX-License-Identifier: BUSL-1.1
 set -eu
 
+token_file=/run/xenoteer/api-token
+token_pipe=/run/xenoteer/api-token-pipe
+[ "$(id -u)" -eq 0 ] || {
+  echo 'daemon launcher must run as root' >&2
+  exit 78
+}
+if [ ! -f "$token_file" ] || [ -L "$token_file" ]; then
+  echo 'staged authentication token is unavailable' >&2
+  exit 78
+fi
+[ "$(stat -c '%u:%a' "$token_file")" = 0:400 ] || {
+  echo 'staged authentication token has unsafe metadata' >&2
+  exit 78
+}
+
+# FD 3 belongs to the s6 readiness protocol. Root opens and unlinks the staged
+# inode, then transfers its bounded contents into a one-shot pipe on FD 9. The
+# daemon consumes the pipe queue once; it inherits no token-bearing regular-file
+# description and the loader closes the pipe descriptor after hashing.
+exec 8<"$token_file"
+rm -f -- "$token_file"
+rm -f -- "$token_pipe"
+mkfifo -m 0400 "$token_pipe"
+chown 1001:1001 "$token_pipe"
+cat <&8 >"$token_pipe" &
+token_writer=$!
+exec 9<"$token_pipe"
+rm -f -- "$token_pipe"
+wait "$token_writer"
+exec 8<&-
+# Linux dash and BusyBox ash both expose the core-size limit used by the image.
+# shellcheck disable=SC3045
+ulimit -c 0
+
+export HOME=/run/user/1001/home
+export XDG_RUNTIME_DIR=/run/user/1001
+export XDG_CONFIG_HOME=/run/user/1001/xdg/config
+export XDG_CACHE_HOME=/run/user/1001/xdg/cache
+export XDG_DATA_HOME=/run/user/1001/xdg/data
+export XAUTHORITY=/run/user/1001/Xauthority
+export XENOTEER__AUTH__TOKEN_FILE=/proc/self/fd/9
+
 exec s6-notifyoncheck -d -s 100 -T 60000 -t 3000 -w 250 -n 240 \
-  s6-setuidgid xenoteer /usr/local/bin/xenoteerd
+  s6-setuidgid xenoteerd /usr/local/bin/xenoteerd

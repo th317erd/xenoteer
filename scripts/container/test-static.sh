@@ -32,12 +32,17 @@ required=(
   container/rootfs/etc/s6-overlay/s6-rc.d/user/contents.d/machine-id
   container/rootfs/etc/s6-overlay/s6-rc.d/user/contents.d/xauthority
   container/rootfs/etc/s6-overlay/s6-rc.d/user/contents.d/xvfb
+  container/rootfs/etc/s6-overlay/s6-rc.d/user/contents.d/xenoteer-processd
   container/rootfs/etc/s6-overlay/s6-rc.d/user/contents.d/xenoteerd
+  container/rootfs/etc/at-spi2/accessibility.conf
+  container/rootfs/etc/dbus-1/session-local.conf
   container/rootfs/usr/local/libexec/xenoteer/finish-critical
   container/rootfs/usr/local/libexec/xenoteer/request-critical-shutdown
   container/rootfs/usr/local/libexec/xenoteer/run-critical-shutdown-coordinator
   container/rootfs/usr/local/libexec/xenoteer/probe-viewer-protocol
   scripts/container/assert-idle-runtime.sh
+  scripts/container/test-phase3-control-plane.sh
+  scripts/container/test-phase3-websocket.py
   scripts/container/test-idle-soak.sh
   scripts/container/test-viewer-denial.sh
   scripts/licenses/generate-debian-installed-manifest.sh
@@ -49,6 +54,49 @@ for path in "${required[@]}"; do
     exit 1
   fi
 done
+
+bash -n scripts/container/test-phase3-control-plane.sh
+grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
+  scripts/container/test-phase3-control-plane.sh
+python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/container/test-phase3-websocket.py").read_text())'
+grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
+  scripts/container/test-phase3-websocket.py
+grep -Fq 'for binary in xenoteerd xenoteer-processd; do' \
+  scripts/licenses/inventory-image-first-party.sh
+grep -Fq 'for config in /etc/at-spi2/accessibility.conf /etc/dbus-1/session-local.conf; do' \
+  scripts/licenses/inventory-image-first-party.sh
+grep -Fxq $'/usr/local/bin/xenoteer-processd\tBUSL-1.1\t/usr/share/doc/xenoteer/LICENSE' \
+  container/licenses/image-first-party-paths.tsv
+for bus_config in \
+  container/rootfs/etc/at-spi2/accessibility.conf \
+  container/rootfs/etc/dbus-1/session-local.conf; do
+  grep -Fq '<allow user="1001"/>' "$bus_config"
+  grep -Fq '<auth>EXTERNAL</auth>' "$bus_config" \
+    || [[ $bus_config == */session-local.conf ]]
+done
+phase3_err_trap_self_test=$(scripts/container/test-phase3-control-plane.sh \
+  --self-test-err-trap)
+grep -Fq 'Phase 3 control-plane ERR trap self-test passed' \
+  <<<"$phase3_err_trap_self_test"
+
+# The desktop and daemon deliberately have different UIDs. AT-SPI toolkit P2P
+# servers reject cross-UID EXTERNAL authentication, so the Rust adapter must use
+# the policy-controlled central accessibility bus for trees, actions, and events.
+atspi_features=$(cargo tree -p xenoteer-atspi --all-features -e features)
+for forbidden_feature in \
+  'atspi-connection feature "default"' \
+  'atspi-connection feature "p2p"' \
+  'zbus feature "p2p"'; do
+  if grep -Fq "$forbidden_feature" <<<"$atspi_features"; then
+    printf 'forbidden cross-UID AT-SPI P2P feature is active: %s\n' \
+      "$forbidden_feature" >&2
+    exit 1
+  fi
+done
+if grep -Eq '(^|[[:space:]])atspi v[0-9]' <<<"$atspi_features"; then
+  printf 'the atspi facade re-enabled default P2P features\n' >&2
+  exit 1
+fi
 
 assert_package_group() {
   local file=$1
@@ -221,6 +269,8 @@ if rg -n '\bxdotool\b' Dockerfile container/packages container/rootfs >/dev/null
 fi
 grep -Fq 'finish-critical xenoteerd "$@"' \
   container/rootfs/etc/s6-overlay/s6-rc.d/xenoteerd/finish
+grep -Fq 'finish-critical xenoteer-processd "$@"' \
+  container/rootfs/etc/s6-overlay/s6-rc.d/xenoteer-processd/finish
 grep -Fq 'finish-critical xvfb "$@"' \
   container/rootfs/etc/s6-overlay/s6-rc.d/xvfb/finish
 grep -Fq '/run/s6-linux-init-container-results' \

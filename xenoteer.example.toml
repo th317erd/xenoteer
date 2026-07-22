@@ -8,6 +8,13 @@ insecure_disable_auth = false
 
 [auth]
 token_file = "/run/xenoteer/api-token"
+grants = [
+  "desktop:status",
+  "desktop:observe",
+  "input:control",
+  "application:launch",
+  "application:terminate",
+]
 
 [desktop]
 display_width = 1920

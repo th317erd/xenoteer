@@ -1,0 +1,908 @@
+{
+  "$defs": {
+    "ApplicationArgument": {
+      "description": "A bounded, non-control application argument.",
+      "maxLength": 1024,
+      "type": "string"
+    },
+    "ApplicationId": {
+      "description": "A stable identifier for a configured application profile.",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$",
+      "type": "string"
+    },
+    "Command": {
+      "description": "A version-one command body.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Probe command used by the Phase-0 composition skeleton.",
+          "properties": {
+            "type": {
+              "const": "desktop_probe",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Move the global physical pointer.",
+          "properties": {
+            "curve": {
+              "$ref": "#/$defs/PointerCurve",
+              "description": "Interpolation curve."
+            },
+            "duration_ms": {
+              "description": "Requested whole-path duration. Omission selects the configured default.",
+              "format": "uint32",
+              "maximum": 10000,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "target": {
+              "$ref": "#/$defs/Point",
+              "description": "Target root-physical coordinate."
+            },
+            "type": {
+              "const": "pointer_move",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "target",
+            "curve"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Press one raw physical pointer button.",
+          "properties": {
+            "allow_redundant": {
+              "description": "Diagnostic opt-in for duplicate down or unowned up.",
+              "type": "boolean"
+            },
+            "button": {
+              "description": "Non-zero X11 physical button detail.",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "type": {
+              "const": "pointer_button_down",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "button",
+            "allow_redundant"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Release one raw physical pointer button.",
+          "properties": {
+            "allow_redundant": {
+              "description": "Diagnostic opt-in for duplicate down or unowned up.",
+              "type": "boolean"
+            },
+            "button": {
+              "description": "Non-zero X11 physical button detail.",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "type": {
+              "const": "pointer_button_up",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "button",
+            "allow_redundant"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Press one raw physical core-X11 keycode.",
+          "properties": {
+            "allow_redundant": {
+              "description": "Diagnostic opt-in for duplicate down or unowned up.",
+              "type": "boolean"
+            },
+            "keycode": {
+              "description": "Core keycode resolved by an advanced client for this desktop keymap.",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 8,
+              "type": "integer"
+            },
+            "type": {
+              "const": "keyboard_key_down",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "keycode",
+            "allow_redundant"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Release one raw physical core-X11 keycode.",
+          "properties": {
+            "allow_redundant": {
+              "description": "Diagnostic opt-in for duplicate down or unowned up.",
+              "type": "boolean"
+            },
+            "keycode": {
+              "description": "Core keycode resolved by an advanced client for this desktop keymap.",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 8,
+              "type": "integer"
+            },
+            "type": {
+              "const": "keyboard_key_up",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "keycode",
+            "allow_redundant"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Conservatively release only input owned by Xenoteer.",
+          "properties": {
+            "type": {
+              "const": "input_reset",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Launch a configured application profile without a shell.",
+          "properties": {
+            "application": {
+              "$ref": "#/$defs/ApplicationId",
+              "description": "Registered profile selected by stable ID."
+            },
+            "arguments": {
+              "description": "Profile-approved argv additions; never a shell command string.",
+              "items": {
+                "$ref": "#/$defs/ApplicationArgument"
+              },
+              "maxItems": 64,
+              "type": "array"
+            },
+            "type": {
+              "const": "application_launch",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "application",
+            "arguments"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Terminate a verified managed process group.",
+          "properties": {
+            "grace_ms": {
+              "description": "Optional SIGTERM grace before SIGKILL; omission selects profile policy.",
+              "format": "uint32",
+              "maximum": 30000,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "process": {
+              "$ref": "#/$defs/ProcessRef",
+              "description": "Exact managed process identity."
+            },
+            "type": {
+              "const": "process_terminate",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "process"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Read current status for an exact managed process reference.",
+          "properties": {
+            "process": {
+              "$ref": "#/$defs/ProcessRef",
+              "description": "Exact managed process identity."
+            },
+            "type": {
+              "const": "process_status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "process"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CommandEnvelope": {
+      "additionalProperties": false,
+      "description": "A complete command submission envelope.",
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/Command",
+          "description": "Typed operation."
+        },
+        "command_id": {
+          "$ref": "#/$defs/CommandId",
+          "description": "Caller-generated deduplication identifier."
+        },
+        "deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absolute UTC deadline."
+        },
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration",
+          "description": "Target desktop generation observed by the caller."
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId",
+          "description": "Target desktop."
+        },
+        "lease_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ControlLeaseId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Physical controller lease when required by the command."
+        },
+        "protocol_version": {
+          "$ref": "#/$defs/ProtocolVersion",
+          "description": "Requested protocol version."
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId",
+          "description": "Transport request correlation identifier."
+        },
+        "trace_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TracePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Requested trace detail."
+        }
+      },
+      "required": [
+        "protocol_version",
+        "request_id",
+        "command_id",
+        "desktop_id",
+        "desktop_generation",
+        "command"
+      ],
+      "type": "object"
+    },
+    "CommandId": {
+      "description": "Deduplicates one client-authored command.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ControlLeaseId": {
+      "description": "Identifies the current physical-input lease.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "EventTopic": {
+      "description": "A stable, bounded event topic assigned before subscriber filtering.",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+      "type": "string"
+    },
+    "LaunchId": {
+      "description": "Identifies one managed application launch.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "LeaseAcquireRequest": {
+      "additionalProperties": false,
+      "description": "A request to acquire exclusive physical-input control.",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration",
+          "description": "Target desktop lifetime observed by the caller."
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId",
+          "description": "Target desktop."
+        },
+        "protocol_version": {
+          "$ref": "#/$defs/ProtocolVersion",
+          "description": "Requested protocol version."
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId",
+          "description": "Transport request correlation identifier."
+        },
+        "ttl_ms": {
+          "description": "Requested TTL; omission selects server policy.",
+          "format": "uint32",
+          "maximum": 3600000,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "protocol_version",
+        "request_id",
+        "desktop_id",
+        "desktop_generation"
+      ],
+      "type": "object"
+    },
+    "LeaseReleaseRequest": {
+      "additionalProperties": false,
+      "description": "A request to release an existing controller lease.",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration",
+          "description": "Target desktop lifetime observed by the caller."
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId",
+          "description": "Target desktop."
+        },
+        "lease_id": {
+          "$ref": "#/$defs/ControlLeaseId",
+          "description": "Opaque lease capability being released."
+        },
+        "protocol_version": {
+          "$ref": "#/$defs/ProtocolVersion",
+          "description": "Requested protocol version."
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId",
+          "description": "Transport request correlation identifier."
+        }
+      },
+      "required": [
+        "protocol_version",
+        "request_id",
+        "desktop_id",
+        "desktop_generation",
+        "lease_id"
+      ],
+      "type": "object"
+    },
+    "LeaseRenewRequest": {
+      "additionalProperties": false,
+      "description": "A request to renew an existing controller lease.",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration",
+          "description": "Target desktop lifetime observed by the caller."
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId",
+          "description": "Target desktop."
+        },
+        "lease_id": {
+          "$ref": "#/$defs/ControlLeaseId",
+          "description": "Opaque lease capability being renewed."
+        },
+        "protocol_version": {
+          "$ref": "#/$defs/ProtocolVersion",
+          "description": "Requested protocol version."
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId",
+          "description": "Transport request correlation identifier."
+        },
+        "ttl_ms": {
+          "description": "Requested replacement TTL; omission selects server policy.",
+          "format": "uint32",
+          "maximum": 3600000,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "protocol_version",
+        "request_id",
+        "desktop_id",
+        "desktop_generation",
+        "lease_id"
+      ],
+      "type": "object"
+    },
+    "Point": {
+      "additionalProperties": false,
+      "description": "A signed two-dimensional point.",
+      "properties": {
+        "x": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "y": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "PointerCurve": {
+      "description": "Interpolation curve for a pointer movement.",
+      "oneOf": [
+        {
+          "const": "instant",
+          "description": "Move directly to the endpoint with no intermediate samples.",
+          "type": "string"
+        },
+        {
+          "const": "linear",
+          "description": "Use equally spaced samples.",
+          "type": "string"
+        },
+        {
+          "const": "smooth",
+          "description": "Use an ease-in/ease-out smoothstep curve.",
+          "type": "string"
+        }
+      ]
+    },
+    "ProcessRef": {
+      "additionalProperties": false,
+      "description": "A reference safe against desktop restart and Linux PID reuse.",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration",
+          "description": "Desktop lifetime that owns the child."
+        },
+        "launch_id": {
+          "$ref": "#/$defs/LaunchId",
+          "description": "Server-generated managed launch identity."
+        },
+        "pid": {
+          "description": "Positive Linux process identifier.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "proc_start_ticks": {
+          "description": "Field 22 from `/proc/{pid}/stat`, measured in boot clock ticks.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "desktop_generation",
+        "pid",
+        "proc_start_ticks",
+        "launch_id"
+      ],
+      "type": "object"
+    },
+    "ProtocolVersion": {
+      "additionalProperties": false,
+      "description": "A negotiated protocol major/minor pair.",
+      "properties": {
+        "major": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor"
+      ],
+      "type": "object"
+    },
+    "RequestId": {
+      "description": "Correlates one transport request and response.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Timestamp": {
+      "description": "A canonical RFC 3339 timestamp with an explicit UTC offset.",
+      "format": "date-time",
+      "type": "string"
+    },
+    "TracePolicy": {
+      "description": "The amount of trace detail requested by a client.",
+      "oneOf": [
+        {
+          "const": "normal",
+          "description": "Retain only normal audit metadata.",
+          "type": "string"
+        },
+        {
+          "const": "detailed",
+          "description": "Retain bounded diagnostic effect evidence.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Strict post-handshake client messages.",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "description": "Application-level heartbeat.",
+      "properties": {
+        "nonce": {
+          "type": "string"
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "type": {
+          "const": "client.ping",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "nonce"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Admit or idempotently retrieve a command.",
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/CommandEnvelope"
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "type": {
+          "const": "command.submit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "command"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Begin delivery of a known command lifecycle.",
+      "properties": {
+        "command_id": {
+          "$ref": "#/$defs/CommandId"
+        },
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration"
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId"
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "type": {
+          "const": "command.watch",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "desktop_id",
+        "desktop_generation",
+        "command_id"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Stop delivery of a command lifecycle.",
+      "properties": {
+        "command_id": {
+          "$ref": "#/$defs/CommandId"
+        },
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration"
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId"
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "type": {
+          "const": "command.unwatch",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "desktop_id",
+        "desktop_generation",
+        "command_id"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Request cooperative command cancellation.",
+      "properties": {
+        "command_id": {
+          "$ref": "#/$defs/CommandId"
+        },
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration"
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId"
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "type": {
+          "const": "command.cancel",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "desktop_id",
+        "desktop_generation",
+        "command_id"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Read caller-redacted lease state.",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration"
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId"
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "type": {
+          "const": "lease.get",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "desktop_id",
+        "desktop_generation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Acquire the input lease.",
+      "properties": {
+        "lease": {
+          "$ref": "#/$defs/LeaseAcquireRequest"
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "type": {
+          "const": "lease.acquire",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "lease"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Renew the input lease.",
+      "properties": {
+        "lease": {
+          "$ref": "#/$defs/LeaseRenewRequest"
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "type": {
+          "const": "lease.renew",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "lease"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Release the input lease and reset owned input.",
+      "properties": {
+        "lease": {
+          "$ref": "#/$defs/LeaseReleaseRequest"
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "type": {
+          "const": "lease.release",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "lease"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Replace the session's single bounded event subscription.",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration"
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId"
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "since_sequence": {
+          "description": "Exclusive replay lower bound; `None` starts at the current live edge.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "topics": {
+          "description": "Exact topics; empty means every topic authorized for the principal.",
+          "items": {
+            "$ref": "#/$defs/EventTopic"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "events.subscribe",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "desktop_id",
+        "desktop_generation",
+        "topics"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Stop the session's event subscription.",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration"
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId"
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "type": {
+          "const": "events.unsubscribe",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "desktop_id",
+        "desktop_generation"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "WebSocketClientMessage"
+}

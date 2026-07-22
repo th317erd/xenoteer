@@ -10,9 +10,9 @@ case "${DISPLAY:?display is required}" in
   *) exit 1 ;;
 esac
 case "$display_number" in *[!0-9]*|'') exit 1 ;; esac
-expected="unix:path=$root/run/user/1000/at-spi/bus_$display_number"
+expected="unix:path=$root/run/xenoteer/bus/at-spi/bus_$display_number"
 [ "$AT_SPI_BUS_ADDRESS" = "$expected" ]
-[ -S "$root/run/user/1000/at-spi/bus_$display_number" ] \
+[ -S "$root/run/xenoteer/bus/at-spi/bus_$display_number" ] \
   || [ -n "${CONTAINER_TEST_ALLOW_MISSING_SOCKET:-}" ]
 
 owner=$(gdbus call \

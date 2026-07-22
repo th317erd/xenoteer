@@ -1,0 +1,11 @@
+{
+  "type": "https://xenoteer.dev/problems/request-outcome-unknown",
+  "title": "Request outcome unknown",
+  "status": 504,
+  "code": "request_outcome_unknown",
+  "detail": "The response deadline elapsed after dispatch; the operation may still complete.",
+  "instance": "urn:xenoteer:request:018f3e58-78c0-7d8e-a701-3a6ca29a0031",
+  "retry": "same_command_id",
+  "effect_stage": "outcome_unknown",
+  "details": {}
+}

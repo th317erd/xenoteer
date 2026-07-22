@@ -4,7 +4,7 @@ set -u
 
 service=${1-}
 case "$service" in
-  atspi|session-dbus|websockify|x0tigervnc|xenoteerd|xfce|xvfb) ;;
+  atspi|session-dbus|websockify|x0tigervnc|xenoteer-processd|xenoteerd|xfce|xvfb) ;;
   *)
     echo 'critical shutdown coordinator received an invalid service' >&2
     exit 64

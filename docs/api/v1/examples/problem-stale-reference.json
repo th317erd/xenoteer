@@ -1,0 +1,12 @@
+{
+  "type": "https://xenoteer.dev/problems/stale-reference",
+  "title": "Stale reference",
+  "status": 409,
+  "code": "stale_reference",
+  "detail": "The request targets an earlier desktop generation.",
+  "instance": "urn:xenoteer:request:018f3e58-78c0-7d8e-a701-3a6ca29a0030",
+  "retry": "after_resync",
+  "effect_stage": "none",
+  "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+  "details": {}
+}

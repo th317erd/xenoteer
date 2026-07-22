@@ -74,6 +74,63 @@
         },
         {
           "additionalProperties": false,
+          "description": "A registered application profile launched successfully.",
+          "properties": {
+            "process": {
+              "$ref": "#/$defs/ProcessRef",
+              "description": "PID-reuse-safe managed process identity."
+            },
+            "type": {
+              "const": "application_launched",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "process"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Current managed process status.",
+          "properties": {
+            "process": {
+              "$ref": "#/$defs/ProcessView",
+              "description": "Validated process status snapshot."
+            },
+            "type": {
+              "const": "process_status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "process"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Managed termination completed and the child was reaped.",
+          "properties": {
+            "process": {
+              "$ref": "#/$defs/ProcessView",
+              "description": "Terminal process status snapshot."
+            },
+            "type": {
+              "const": "process_terminated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "process"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "An operation completed without an additional payload.",
           "properties": {
             "type": {
@@ -107,6 +164,16 @@
           "type": "string"
         },
         {
+          "const": "outcome_unknown",
+          "description": "Transport dispatch began, but the server cannot prove whether a target\neffect occurred. Clients must not create fresh work automatically.",
+          "type": "string"
+        },
+        {
+          "const": "side_effect_observed",
+          "description": "A side effect occurred but the failing backend could not safely prove a\nmore specific stage. Clients must treat automatic retry as unsafe.",
+          "type": "string"
+        },
+        {
           "const": "pointer_moved",
           "description": "The pointer moved.",
           "type": "string"
@@ -119,6 +186,36 @@
         {
           "const": "button_released",
           "description": "A pointer button was released.",
+          "type": "string"
+        },
+        {
+          "const": "key_pressed",
+          "description": "A physical key was pressed.",
+          "type": "string"
+        },
+        {
+          "const": "key_released",
+          "description": "A physical key was released.",
+          "type": "string"
+        },
+        {
+          "const": "input_reset",
+          "description": "Xenoteer-owned pressed input was conservatively reset.",
+          "type": "string"
+        },
+        {
+          "const": "process_started",
+          "description": "A managed application child was started.",
+          "type": "string"
+        },
+        {
+          "const": "process_signalled",
+          "description": "A managed process group received a termination signal.",
+          "type": "string"
+        },
+        {
+          "const": "process_exited",
+          "description": "A managed child was awaited and reaped.",
           "type": "string"
         },
         {
@@ -197,6 +294,11 @@
           "type": "string"
         },
         {
+          "const": "request_outcome_unknown",
+          "description": "A transport deadline elapsed after dispatch, so the request outcome\ncannot be proven from the response channel.",
+          "type": "string"
+        },
+        {
           "const": "cancelled_before_effect",
           "description": "Work was cancelled before any effect.",
           "type": "string"
@@ -217,6 +319,11 @@
           "type": "string"
         }
       ]
+    },
+    "LaunchId": {
+      "description": "Identifies one managed application launch.",
+      "format": "uuid",
+      "type": "string"
     },
     "Problem": {
       "description": "RFC 9457-shaped safe problem details.\n\nJSON Schema string lengths count Unicode code points; admission additionally\nenforces the exported UTF-8 byte ceilings.",
@@ -288,6 +395,126 @@
         "retry",
         "effect_stage",
         "details"
+      ],
+      "type": "object"
+    },
+    "ProcessExit": {
+      "additionalProperties": false,
+      "description": "Reaped Unix child status without unbounded output.",
+      "properties": {
+        "code": {
+          "description": "Normal exit status, mutually exclusive with `signal`.",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "core_dumped": {
+          "description": "Whether the OS reported a core dump.",
+          "type": "boolean"
+        },
+        "signal": {
+          "description": "Terminating signal, mutually exclusive with `code`.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "core_dumped"
+      ],
+      "type": "object"
+    },
+    "ProcessRef": {
+      "additionalProperties": false,
+      "description": "A reference safe against desktop restart and Linux PID reuse.",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration",
+          "description": "Desktop lifetime that owns the child."
+        },
+        "launch_id": {
+          "$ref": "#/$defs/LaunchId",
+          "description": "Server-generated managed launch identity."
+        },
+        "pid": {
+          "description": "Positive Linux process identifier.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "proc_start_ticks": {
+          "description": "Field 22 from `/proc/{pid}/stat`, measured in boot clock ticks.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "desktop_generation",
+        "pid",
+        "proc_start_ticks",
+        "launch_id"
+      ],
+      "type": "object"
+    },
+    "ProcessState": {
+      "description": "Coarse managed child lifecycle.",
+      "oneOf": [
+        {
+          "const": "starting",
+          "description": "Spawn is admitted but exec identity is not yet published.",
+          "type": "string"
+        },
+        {
+          "const": "running",
+          "description": "The verified child/process group is running.",
+          "type": "string"
+        },
+        {
+          "const": "terminating",
+          "description": "SIGTERM/SIGKILL termination is in progress.",
+          "type": "string"
+        },
+        {
+          "const": "exited",
+          "description": "The child was awaited and reaped.",
+          "type": "string"
+        }
+      ]
+    },
+    "ProcessView": {
+      "additionalProperties": false,
+      "description": "Current status of a managed application child.",
+      "properties": {
+        "exit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProcessExit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exit details present exactly when `state` is `exited`."
+        },
+        "process": {
+          "$ref": "#/$defs/ProcessRef",
+          "description": "Exact process reference."
+        },
+        "state": {
+          "$ref": "#/$defs/ProcessState",
+          "description": "Current managed lifecycle."
+        }
+      },
+      "required": [
+        "process",
+        "state"
       ],
       "type": "object"
     },

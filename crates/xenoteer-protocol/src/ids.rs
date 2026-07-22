@@ -79,6 +79,11 @@ id_type!(
     "Identifies the current physical-input lease."
 );
 id_type!(ArtifactId, "Identifies a bounded server-side artifact.");
+id_type!(LaunchId, "Identifies one managed application launch.");
+id_type!(
+    ConnectionId,
+    "Identifies one WebSocket connection lifetime."
+);
 
 #[cfg(test)]
 mod tests {

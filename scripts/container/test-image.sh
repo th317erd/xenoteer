@@ -35,9 +35,9 @@ trap cleanup EXIT
 printf '%s' "$token_canary" >"$token_file"
 chmod 0400 "$token_file"
 if [[ $(id -u) -eq 0 ]]; then
-  chown 1000:1000 "$token_file"
-elif [[ $(id -u) -ne 1000 ]]; then
-  printf 'test-image must run as root or UID 1000 so the secret owner is deterministic\n' >&2
+  chown 0:0 "$token_file"
+elif ! docker info --format '{{json .SecurityOptions}}' | grep -Fq 'name=rootless'; then
+  printf 'test-image must run as root or use rootless Docker so the secret maps to container UID 0\n' >&2
   exit 77
 fi
 
@@ -111,10 +111,11 @@ assert_logs_contain() {
 
 allowed_critical_claimants() {
   case "$1" in
-    xvfb) printf '%s\n' 'xvfb session-dbus atspi xfce xenoteerd' ;;
-    session-dbus) printf '%s\n' 'session-dbus atspi xfce xenoteerd' ;;
-    atspi) printf '%s\n' 'atspi xfce xenoteerd' ;;
-    xfce) printf '%s\n' 'xfce xenoteerd' ;;
+    xvfb) printf '%s\n' 'xvfb session-dbus atspi xfce xenoteer-processd xenoteerd' ;;
+    session-dbus) printf '%s\n' 'session-dbus atspi xfce xenoteer-processd xenoteerd' ;;
+    atspi) printf '%s\n' 'atspi xfce xenoteer-processd xenoteerd' ;;
+    xfce) printf '%s\n' 'xfce xenoteer-processd xenoteerd' ;;
+    xenoteer-processd) printf '%s\n' 'xenoteer-processd xenoteerd' ;;
     xenoteerd) printf '%s\n' 'xenoteerd' ;;
     x0tigervnc) printf '%s\n' 'x0tigervnc websockify' ;;
     websockify) printf '%s\n' 'websockify' ;;
@@ -207,9 +208,10 @@ kill_service_payload() {
   case "$service" in
     xvfb) docker exec "$name" pkill -TERM -x Xvfb ;;
     xenoteerd) docker exec "$name" pkill -TERM -x xenoteerd ;;
+    xenoteer-processd) docker exec "$name" pkill -TERM -x xenoteer-proces ;;
     session-dbus)
       docker exec "$name" sh -eu -c '
-        pid=$(pgrep -u 1000 -f "^dbus-daemon --session --nofork --nopidfile --nosyslog --address=unix:path=/run/user/1000/bus$")
+        pid=$(pgrep -u 1000 -f "^dbus-daemon --session --nofork --nopidfile --nosyslog --address=unix:path=/run/xenoteer/bus/session$")
         test "$(printf "%s\n" "$pid" | wc -l)" -eq 1
         kill -TERM "$pid"
       '
@@ -234,7 +236,7 @@ assert_zero_payload_capabilities() {
     for status in /proc/[0-9]*/status; do
       test -r "$status" || continue
       uid=$(awk '\''$1 == "Uid:" { print $2 }'\'' "$status")
-      test "$uid" = 1000 || continue
+      case "$uid" in 1000|1001) ;; *) continue ;; esac
       pid=${status#/proc/}
       pid=${pid%/status}
       process=$(cat "/proc/$pid/comm" 2>/dev/null || printf disappeared)
@@ -339,10 +341,35 @@ test "$(docker inspect "$container_name" --format '{{json .Config.Entrypoint}}')
 test "$(docker exec "$container_name" cat /proc/1/comm)" = s6-svscan
 docker exec "$container_name" sh -eu -c '
   test "$(stat -c %u /proc/$(pgrep -xo Xvfb))" = 1000
-  test "$(stat -c %u /proc/$(pgrep -xo xenoteerd))" = 1000
-  test "$(stat -c %a /run/user/1000)" = 700
-  test "$(stat -c %a /run/user/1000/Xauthority)" = 600
+  daemon_pid=$(pgrep -xo xenoteerd)
+  broker_pid=$(pgrep -xo xenoteer-proces)
+  test "$(stat -c %u /proc/$daemon_pid)" = 1001
+  test "$(stat -c %u:%g /proc/$broker_pid)" = 0:0
+  test "$(id -g xenoteerd)" = 1001
+  id -G xenoteerd | tr " " "\n" | grep -Fx 1000 >/dev/null
+  test "$(stat -c %a:%u:%g /run/secrets/xenoteer_api_token)" = 400:0:0
+  test ! -e /run/xenoteer/api-token
+  test ! -e /run/xenoteer/api-token-pipe
+  # Descriptor numbers are reusable. Prove the token FIFO description is gone
+  # without requiring its former slot 9 to remain permanently unallocated.
+  test -z "$(/command/s6-setuidgid xenoteerd find -L "/proc/$daemon_pid/fd" \
+    -mindepth 1 -maxdepth 1 ! -name 0 ! -name 1 ! -name 2 \
+    -type p -print -quit)"
+  grep -Eq "^Max core file size[[:space:]]+0[[:space:]]+0" "/proc/$daemon_pid/limits"
+  test "$(stat -c %a:%u:%g /run/user/1000)" = 700:1000:1000
+  test "$(stat -c %a:%u:%g /run/user/1000/at-spi)" = 710:1000:1000
+  test "$(stat -c %a:%u:%g /run/user/1000/Xauthority)" = 600:1000:1000
   test "$(stat -c %a /run/user/1000/ICEauthority)" = 600
+  test "$(stat -c %a:%u:%g /run/user/1001)" = 700:1001:1001
+  test "$(stat -c %a:%u:%g /run/user/1001/Xauthority)" = 600:1001:1001
+  test "$(stat -c %a:%u:%g /run/user/1001/home)" = 700:1001:1001
+  test "$(stat -c %a:%u:%g /run/user/1001/xdg/config)" = 700:1001:1001
+  test "$(stat -c %a:%u:%g /run/user/1001/xdg/cache)" = 700:1001:1001
+  test "$(stat -c %a:%u:%g /run/user/1001/xdg/data)" = 700:1001:1001
+  test "$(stat -c %a:%u:%g /run/xenoteer/processd)" = 750:0:1001
+  test "$(stat -c %a:%u:%g /run/xenoteer/processd/broker.sock)" = 660:0:1001
+  /command/s6-setuidgid xenoteerd /usr/local/bin/xenoteer-processd --probe
+  ! /command/s6-setuidgid xenoteer /usr/local/bin/xenoteer-processd --probe
   test "$(stat -c %a /tmp/.X11-unix)" = 1777
   test "$(stat -c %u:%g /tmp/.X11-unix)" = 0:0
   test "$(stat -c %a /tmp/.ICE-unix)" = 1777
@@ -364,7 +391,7 @@ docker exec "$container_name" sh -eu -c '
   curl --fail --silent --show-error http://127.0.0.1:8080/livez >/dev/null
   test "$(curl --silent --output /dev/null --write-out "%{http_code}" http://127.0.0.1:8080/readyz)" = 200
   test "$(pgrep -u 1000 -x Xvfb | wc -l)" -eq 1
-  test "$(pgrep -u 1000 -x xenoteerd | wc -l)" -eq 1
+  test "$(pgrep -u 1001 -x xenoteerd | wc -l)" -eq 1
   test "$(pgrep -u 1000 -x xfce4-session | wc -l)" -eq 1
   test "$(pgrep -u 1000 -x xfwm4 | wc -l)" -eq 1
   test "$(pgrep -u 1000 -x xfsettingsd | wc -l)" -eq 1
@@ -374,22 +401,66 @@ docker exec "$container_name" sh -eu -c '
   test "$(pgrep -u 1000 -f "^/usr/libexec/at-spi-bus-launcher --launch-immediately --a11y=1 --screen-reader=1$" | wc -l)" -eq 1
   test "$(pgrep -u 1000 -x at-spi2-registr | wc -l)" -eq 1
   test "$(pgrep -u 1000 -x dbus-daemon | wc -l)" -eq 2
-  test "$(pgrep -u 1000 -f "^dbus-daemon --session --nofork --nopidfile --nosyslog --address=unix:path=/run/user/1000/bus$" | wc -l)" -eq 1
-  test -S /run/user/1000/bus
-  test -S /run/user/1000/at-spi/bus_99
+  test "$(pgrep -u 1000 -f "^dbus-daemon --session --nofork --nopidfile --nosyslog --address=unix:path=/run/xenoteer/bus/session$" | wc -l)" -eq 1
+  test -S /run/xenoteer/bus/session
+  test -S /run/xenoteer/bus/at-spi/bus_99
+  test "$(stat -c %a:%u:%g /run/xenoteer/bus)" = 710:1000:1000
+  test "$(stat -c %a:%u:%g /run/xenoteer/bus/at-spi)" = 710:1000:1000
   test ! -S /run/dbus/system_bus_socket
   ! pgrep -u 1000 -x xfce4-panel >/dev/null
   ! pgrep -u 1000 -x Thunar >/dev/null
   ! pgrep -u 1000 -x s6-pause >/dev/null
   ! pgrep -f "(^|/)dbus-[l]aunch([[:space:]]|$)" >/dev/null
   ! pgrep -f "(^|/)star[t]xfce4([[:space:]]|$)" >/dev/null
-  /command/s6-setuidgid xenoteer gdbus call --address unix:path=/run/user/1000/bus \
+  /command/s6-setuidgid xenoteer gdbus call --address unix:path=/run/xenoteer/bus/session \
     --dest org.a11y.Bus --object-path /org/a11y/bus \
     --method org.freedesktop.DBus.Properties.Get org.a11y.Status IsEnabled \
     | grep -Fx "(<true>,)" >/dev/null
-  /command/s6-setuidgid xenoteer gdbus call --address unix:path=/run/user/1000/at-spi/bus_99 \
+  /command/s6-setuidgid xenoteer gdbus call --address unix:path=/run/xenoteer/bus/at-spi/bus_99 \
     --dest org.a11y.atspi.Registry --object-path /org/a11y/atspi/registry \
     --method org.a11y.atspi.Registry.GetRegisteredEvents >/dev/null
+  /command/s6-setuidgid xenoteerd env DISPLAY=:99 \
+    XAUTHORITY=/run/user/1001/Xauthority xdpyinfo \
+    | grep -F "dimensions:    1920x1080 pixels" >/dev/null
+  /command/s6-setuidgid xenoteerd gdbus call --address unix:path=/run/xenoteer/bus/session \
+    --dest org.a11y.Bus --object-path /org/a11y/bus \
+    --method org.freedesktop.DBus.Properties.Get org.a11y.Status IsEnabled \
+    | grep -Fx "(<true>,)" >/dev/null
+  /command/s6-setuidgid xenoteerd gdbus call --address unix:path=/run/xenoteer/bus/at-spi/bus_99 \
+    --dest org.a11y.atspi.Registry --object-path /org/a11y/atspi/registry \
+    --method org.a11y.atspi.Registry.GetRegisteredEvents >/dev/null
+  atspi_children=$(/command/s6-setuidgid xenoteerd gdbus call \
+    --address unix:path=/run/xenoteer/bus/at-spi/bus_99 \
+    --dest org.a11y.atspi.Registry \
+    --object-path /org/a11y/atspi/accessible/root \
+    --method org.a11y.atspi.Accessible.GetChildren)
+  first_atspi_app=$(printf "%s\n" "$atspi_children" \
+    | sed -n "s/.*\(:[0-9][0-9.]*\)[^,]*, objectpath.*/\1/p")
+  test -n "$first_atspi_app"
+  /command/s6-setuidgid xenoteerd gdbus call \
+    --address unix:path=/run/xenoteer/bus/at-spi/bus_99 \
+    --dest "$first_atspi_app" \
+    --object-path /org/a11y/atspi/accessible/root \
+    --method org.freedesktop.DBus.Properties.Get \
+    org.a11y.atspi.Accessible Name \
+    | grep -Eq "^\(<.{3,}>,\)$"
+  app_peer_address=$(/command/s6-setuidgid xenoteerd gdbus call \
+    --address unix:path=/run/xenoteer/bus/at-spi/bus_99 \
+    --dest "$first_atspi_app" \
+    --object-path /org/a11y/atspi/accessible/root \
+    --method org.a11y.atspi.Application.GetApplicationBusAddress \
+    | sed -n "s/.*\(unix:path=[^,]*\),.*/\1/p" \
+    | tr -d "\047")
+  case "$app_peer_address" in unix:path=/run/user/1000/at-spi2-*/socket) ;; *) exit 1 ;; esac
+  ! timeout 2 /command/s6-setuidgid xenoteerd gdbus introspect \
+    --address "$app_peer_address" \
+    --object-path /org/a11y/atspi/accessible/root >/dev/null 2>&1
+  ! gdbus call --address unix:path=/run/xenoteer/bus/session \
+    --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+    --method org.freedesktop.DBus.ListNames >/dev/null 2>&1
+  ! gdbus call --address unix:path=/run/xenoteer/bus/at-spi/bus_99 \
+    --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+    --method org.freedesktop.DBus.ListNames >/dev/null 2>&1
   tail -n +2 /usr/share/doc/xenoteer/package-manifest.tsv | LC_ALL=C sort -c
   test -s /usr/share/doc/xenoteer/first-party-files.tsv
   test -s /usr/share/doc/xenoteer/final-files.tsv
@@ -401,6 +472,16 @@ docker exec "$container_name" sh -eu -c '
     /usr/share/doc/xenoteer/final-files.tsv
   grep -Eq "^/usr/share/doc/xenoteer/cargo-components\\.tsv[[:space:]].*[[:space:]]generated-metadata[[:space:]]xenoteerd-cargo-closure[[:space:]]" \
     /usr/share/doc/xenoteer/final-files.tsv
+'
+docker exec "$container_name" /command/s6-setuidgid xenoteer sh -eu -c '
+  daemon_pid=$(pgrep -xo xenoteerd)
+  test ! -r /run/secrets/xenoteer_api_token
+  test ! -e /run/xenoteer/api-token
+  test ! -r "/proc/$daemon_pid/fd/9"
+  test ! -r "/proc/$daemon_pid/environ"
+  test ! -r "/proc/$daemon_pid/mem"
+  test ! -r /run/user/1001/Xauthority
+  test ! -x /run/user/1001
 '
 assert_loopback_listener "$container_name" 170C 'RFB'
 assert_loopback_listener "$container_name" 17C0 'WebSocket/noVNC'
@@ -449,6 +530,8 @@ docker exec "$container_name" cat /usr/share/doc/xenoteer/cargo-components.spdx.
   | jq -e '.spdxVersion == "SPDX-2.3" and ([.packages[].name] | index("xenoteerd") != null)' \
   >/dev/null
 assert_logs_exclude "$container_name" "$token_canary" 'authentication token contents'
+assert_logs_exclude "$container_name" 'Failed to create peer' \
+  'a forbidden cross-UID AT-SPI P2P attempt'
 
 for _ in {1..45}; do
   health=$(docker inspect "$container_name" --format '{{.State.Health.Status}}')
@@ -524,7 +607,7 @@ docker inspect "$without_kill" --format '{{json .HostConfig.CapAdd}}' \
   >/dev/null
 docker exec "$without_kill" sh -eu -c '
   test "$(stat -c %u /proc/$(pgrep -xo Xvfb))" = 1000
-  test "$(stat -c %u /proc/$(pgrep -xo xenoteerd))" = 1000
+  test "$(stat -c %u /proc/$(pgrep -xo xenoteerd))" = 1001
 '
 started_ms=$(date +%s%3N)
 docker stop --time 5 "$without_kill" >/dev/null
@@ -726,7 +809,7 @@ fi
 docker stop --time 35 "$viewer_optional" >/dev/null
 test "$(docker inspect "$viewer_optional" --format '{{.State.ExitCode}}')" -eq 0
 
-for critical in xvfb xenoteerd session-dbus atspi xfce; do
+for critical in xvfb xenoteer-processd xenoteerd session-dbus atspi xfce; do
   name="${container_name}-${critical}"
   start_container "$name"
   wait_running_probe "$name"
@@ -741,7 +824,7 @@ for critical in xvfb xenoteerd session-dbus atspi xfce; do
   assert_logs_exclude "$name" "$token_canary" 'authentication token contents'
 done
 
-for critical in xvfb xenoteerd session-dbus atspi xfce; do
+for critical in xvfb xenoteer-processd xenoteerd session-dbus atspi xfce; do
   name="${container_name}-hardened-${critical}"
   start_container "$name" "${hardened_args[@]}"
   wait_running_probe "$name"
@@ -774,7 +857,26 @@ assert_logs_exclude "$viewer_invalid" "$token_canary" 'authentication token cont
 no_secret="${container_name}-no-secret"
 docker run --detach --name "$no_secret" --cpus 2 --shm-size=4g "$image" >/dev/null
 created+=("$no_secret")
-wait_stopped "$no_secret"
-test "$(docker inspect "$no_secret" --format '{{.State.ExitCode}}')" -ne 0
+wait_running_probe "$no_secret"
+docker exec "$no_secret" sh -eu -c '
+  token=/run/xenoteer/generated-api-token
+  test "$(stat -c %a:%u:%g "$token")" = 400:0:0
+  test "$(wc -c <"$token")" -eq 64
+  grep -Eq "^[0-9a-f]{64}$" "$token"
+  {
+    printf "header = \"Authorization: Bearer "
+    cat "$token"
+    printf "\"\n"
+  } | curl --fail --silent --show-error --config - \
+    http://127.0.0.1:8080/v1/status >/dev/null
+'
+generated_token=$(docker exec "$no_secret" cat /run/xenoteer/generated-api-token)
+assert_logs_contain "$no_secret" \
+  'generated API bearer token is available to root at /run/xenoteer/generated-api-token' \
+  'the generated-token retrieval diagnostic'
+assert_logs_exclude "$no_secret" "$generated_token" \
+  'generated authentication token contents'
+docker stop --time 35 "$no_secret" >/dev/null
+test "$(docker inspect "$no_secret" --format '{{.State.ExitCode}}')" -eq 0
 
 printf 'container image tests passed: %s\n' "$image"

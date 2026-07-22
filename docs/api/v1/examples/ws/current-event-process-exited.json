@@ -1,0 +1,29 @@
+{
+  "type": "event",
+  "request_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0050",
+  "event": {
+    "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
+    "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+    "sequence": 1045,
+    "topic": "process.exited",
+    "payload": {
+      "application": "xmessage",
+      "process": {
+        "process": {
+          "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+          "pid": 4242,
+          "proc_start_ticks": 123456,
+          "launch_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0022"
+        },
+        "state": "exited",
+        "exit": {
+          "code": null,
+          "signal": 15,
+          "core_dumped": false
+        }
+      },
+      "termination_requested": true,
+      "forced_escalation": false
+    }
+  }
+}

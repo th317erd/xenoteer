@@ -10,6 +10,15 @@ license = "Apache-2.0"
 publish = false
 
 [dependencies]
+bytes.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
 xenoteer-protocol = { version = "=0.1.0", path = "../xenoteer-protocol" }
 
 [lints]

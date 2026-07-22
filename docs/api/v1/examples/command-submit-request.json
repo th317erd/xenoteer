@@ -1,0 +1,22 @@
+{
+  "protocol_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "request_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0020",
+  "command_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0021",
+  "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
+  "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+  "lease_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0003",
+  "deadline": "2026-07-21T20:00:10Z",
+  "trace_policy": "normal",
+  "command": {
+    "type": "pointer_move",
+    "target": {
+      "x": 960,
+      "y": 540
+    },
+    "duration_ms": 350,
+    "curve": "smooth"
+  }
+}

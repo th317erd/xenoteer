@@ -101,8 +101,8 @@ fn account_name_bytes(name: &str, aggregate: usize) -> Result<usize, AtspiProbeE
 mod live {
     use std::future::Future;
 
-    use atspi::AccessibilityConnection;
-    use atspi::proxy::accessible::ObjectRefExt as _;
+    use atspi_connection::AccessibilityConnection;
+    use atspi_proxies::accessible::ObjectRefExt as _;
     use tokio::time::{Instant, timeout_at};
 
     use crate::{AtspiProbeError, AtspiProbeReport, account_name_bytes, validate_root_count};

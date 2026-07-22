@@ -5,20 +5,29 @@ set -eu
 root=${CONTAINER_TEST_ROOT:-}
 runtime_uid=1000
 runtime_gid=1000
+daemon_uid=1001
+daemon_gid=1001
 if [ -n "$root" ]; then
   runtime_uid=${CONTAINER_TEST_UID:-1000}
   runtime_gid=${CONTAINER_TEST_GID:-1000}
+  daemon_uid=${CONTAINER_TEST_DAEMON_UID:-$runtime_uid}
+  daemon_gid=${CONTAINER_TEST_DAEMON_GID:-$runtime_gid}
 fi
-case "$runtime_uid:$runtime_gid" in
+case "$runtime_uid:$runtime_gid:$daemon_uid:$daemon_gid" in
   *[!0-9:]*|:*|*:) echo 'invalid test runtime identity' >&2; exit 64 ;;
 esac
 env_dir="$root/run/xenoteer/env"
 display=$(cat "$env_dir/DISPLAY")
 auth_file=$(cat "$env_dir/XAUTHORITY")
+daemon_auth_file="$root/run/user/1001/Xauthority"
 cookie=$(mcookie)
 
-rm -f -- "$auth_file"
+rm -f -- "$auth_file" "$daemon_auth_file"
 install -m 0600 -o "$runtime_uid" -g "$runtime_gid" /dev/null "$auth_file"
+install -m 0600 -o "$daemon_uid" -g "$daemon_gid" /dev/null "$daemon_auth_file"
 xauth -f "$auth_file" add "$display" MIT-MAGIC-COOKIE-1 "$cookie"
+xauth -f "$daemon_auth_file" add "$display" MIT-MAGIC-COOKIE-1 "$cookie"
 chown "$runtime_uid:$runtime_gid" "$auth_file"
+chown "$daemon_uid:$daemon_gid" "$daemon_auth_file"
 chmod 0600 "$auth_file"
+chmod 0600 "$daemon_auth_file"

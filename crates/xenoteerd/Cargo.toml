@@ -11,6 +11,9 @@ publish = false
 
 [dependencies]
 clap.workspace = true
+nix.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -20,8 +23,13 @@ uuid.workspace = true
 xenoteer-atspi = { version = "=0.1.0", path = "../xenoteer-atspi", features = ["live-atspi"] }
 xenoteer-core = { version = "=0.1.0", path = "../xenoteer-core" }
 xenoteer-protocol = { version = "=0.1.0", path = "../xenoteer-protocol" }
+xenoteer-processd = { version = "=0.1.0", path = "../xenoteer-processd" }
 xenoteer-server = { version = "=0.1.0", path = "../xenoteer-server" }
 xenoteer-x11 = { version = "=0.1.0", path = "../xenoteer-x11", features = ["native-xkbcommon"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tower.workspace = true

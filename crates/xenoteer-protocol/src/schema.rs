@@ -9,14 +9,28 @@ use std::{
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::{CapabilityReport, CommandEnvelope, CommandResult, Problem};
+use crate::{
+    CapabilityReport, ClientHello, CommandEnvelope, CommandResult, LeaseAcquireRequest,
+    LeaseReleaseRequest, LeaseRenewRequest, LeaseStateView, Problem, ProcessExitedEvent,
+    ProcessRef, ProcessView, WebSocketClientMessage, WebSocketServerMessage,
+};
 
 /// Checked-in schema filenames for protocol version one.
-pub const SCHEMA_FILENAMES: [&str; 4] = [
+pub const SCHEMA_FILENAMES: [&str; 14] = [
     "capabilities.json",
     "command-envelope.json",
     "command-result.json",
     "problem.json",
+    "lease-acquire-request.json",
+    "lease-renew-request.json",
+    "lease-release-request.json",
+    "lease-state.json",
+    "process-ref.json",
+    "process-view.json",
+    "process-exited-event.json",
+    "websocket-client-message.json",
+    "websocket-server-message.json",
+    "websocket-client-hello.json",
 ];
 
 /// Returns the repository's checked-in version-one schema directory.
@@ -43,6 +57,46 @@ pub fn generated_schemas() -> Result<Vec<(&'static str, String)>, SchemaError> {
         (
             SCHEMA_FILENAMES[3],
             serde_json::to_value(schemars::schema_for!(Problem))?,
+        ),
+        (
+            SCHEMA_FILENAMES[4],
+            serde_json::to_value(schemars::schema_for!(LeaseAcquireRequest))?,
+        ),
+        (
+            SCHEMA_FILENAMES[5],
+            serde_json::to_value(schemars::schema_for!(LeaseRenewRequest))?,
+        ),
+        (
+            SCHEMA_FILENAMES[6],
+            serde_json::to_value(schemars::schema_for!(LeaseReleaseRequest))?,
+        ),
+        (
+            SCHEMA_FILENAMES[7],
+            serde_json::to_value(schemars::schema_for!(LeaseStateView))?,
+        ),
+        (
+            SCHEMA_FILENAMES[8],
+            serde_json::to_value(schemars::schema_for!(ProcessRef))?,
+        ),
+        (
+            SCHEMA_FILENAMES[9],
+            serde_json::to_value(schemars::schema_for!(ProcessView))?,
+        ),
+        (
+            SCHEMA_FILENAMES[10],
+            serde_json::to_value(schemars::schema_for!(ProcessExitedEvent))?,
+        ),
+        (
+            SCHEMA_FILENAMES[11],
+            serde_json::to_value(schemars::schema_for!(WebSocketClientMessage))?,
+        ),
+        (
+            SCHEMA_FILENAMES[12],
+            serde_json::to_value(schemars::schema_for!(WebSocketServerMessage))?,
+        ),
+        (
+            SCHEMA_FILENAMES[13],
+            serde_json::to_value(schemars::schema_for!(ClientHello))?,
         ),
     ];
 

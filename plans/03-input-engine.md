@@ -73,9 +73,12 @@ Vacant
 - A second acquisition returns `lease_conflict` with redacted holder metadata.
 - Lease expiry stops admission, lets an atomic action reach its documented safe
   boundary, performs input reset, then emits `lease.released`.
-- WebSocket disconnect does not immediately revoke a lease; a reconnect grace
-  period prevents transient network loss from interrupting a drag. Commands
-  remain subject to deadline and the lease TTL.
+- WebSocket disconnect does not revoke or shorten a lease. The held lease
+  survives transport loss until its explicit TTL; a reconnect authenticated as
+  the same principal may resume using or renew that same lease during the
+  remaining TTL. The TTL is the grace boundary--there is no separate,
+  session-bound disconnect timer. Commands remain subject to their own
+  deadlines and to the lease TTL.
 - Human takeover follows the revocation sequence in the product plan; RFB input
   is never enabled merely because a WebSocket disconnected.
 

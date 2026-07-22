@@ -45,6 +45,11 @@ Protocol problem codes use `deadline_exceeded_before_effect` and
 `deadline_before_effect` and `deadline_after_effect` names because they describe
 terminal state rather than the error catalog.
 
+The implemented HTTP contract, WebSocket message inventory, least-privilege
+grant mapping, and complete wire examples are in
+[`docs/api/v1/`](docs/api/v1/README.md). Generated typed JSON Schemas remain in
+[`schemas/v1/`](schemas/v1/).
+
 `/livez` proves only that the HTTP process is alive. `/readyz` becomes `200`
 only after the Phase 2 supervisor proves the fixed authenticated X11 display,
 XFCE/EWMH lifecycle, native input actor, one-pixel capture, and AT-SPI registry.
@@ -74,7 +79,8 @@ documented in [`container/README.md`](container/README.md).
 ## License boundaries
 
 The server and runtime are licensed under the repository Business Source License.
-The public protocol crate, checked-in schemas, and Rust SDK are separately
-licensed under Apache-2.0; see
+The public protocol crate, checked-in schemas, API documentation/examples, and
+Rust SDK are separately licensed under Apache-2.0; see
 [`crates/xenoteer-protocol/NOTICE`](crates/xenoteer-protocol/NOTICE) and
-[`crates/xenoteer-sdk/NOTICE`](crates/xenoteer-sdk/NOTICE).
+[`crates/xenoteer-sdk/NOTICE`](crates/xenoteer-sdk/NOTICE), and
+[`docs/api/NOTICE`](docs/api/NOTICE).

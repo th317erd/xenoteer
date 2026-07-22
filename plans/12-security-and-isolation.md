@@ -45,7 +45,7 @@ add a VM/microVM boundary outside Xenoteer.
 ```text
 Internet -> TLS/auth gateway -> xenoteerd API
                                   |
-                      desktop user process boundary
+                      daemon UID 1001 / desktop UID 1000
                                   |
                   X11/D-Bus apps share one trust domain
                                   |
@@ -69,14 +69,26 @@ supports one trust domain per container.
 - `/livez` and `/readyz` expose booleans only; no version/config internals.
 - No UDP listener, discovery broadcast, mDNS, or remote D-Bus/X11.
 
+Request middleware cannot protect capacity consumed before HTTP headers finish
+parsing. The production listener therefore needs an outer global connection
+admission bound plus explicit header-count, header-byte, header-read-time,
+keep-alive-idle, and incomplete-request limits at the Hyper connection layer.
+Those permits must cover the whole accepted connection and leave reserved
+capacity for health/shutdown traffic. Slowloris, partial-header, many-idle-
+connection, and recovery-after-disconnect tests are release gates; a bounded
+request body or per-principal command limiter is not evidence for this earlier
+transport boundary.
+
 CI starts the image and scans `/proc/net`/`ss` plus an external network namespace
 to assert listeners/reachability. A package update that launches a daemon fails
 the test.
 
 ## 4. Authentication
 
-Release-one built-in provider: high-entropy bearer tokens read from 0600 files
-or generated into a runtime 0600 file. Requirements:
+Release-one built-in provider: high-entropy bearer tokens supplied as root-owned
+0400/0600 files. Root validates and opens the source, unlinks a tmpfs staging
+inode, transfers at most 4096 bytes through a one-shot inherited pipe, and the
+UID-1001 daemon closes that descriptor after hashing. Requirements:
 
 - at least 256 random bits;
 - token value never logged, put in URL, CLI argv, status, crash report, or image;
@@ -234,6 +246,14 @@ allow it. Even then:
 - process group, count/PID limits, output/timeout, and reaping enforced;
 - terminate only a managed, revalidated process group; no arbitrary PID kill.
 
+The network daemon never performs `spawn` or `kill` directly. A token-free,
+root-supervised process broker authenticates the daemon's fixed UID/GID 1001
+with Unix peer credentials on a root:xenoteerd 0660 socket, validates the
+compiled image registry, and drops children to desktop UID/GID 1000. The broker
+observes natural leader exit with `waitid(WNOWAIT)`, kills any still-reserved
+process group before reaping the leader, and never signals after releasing the
+PID/PGID identity fence.
+
 Generic shell/terminal APIs are not exposed by default. An automation user can
 interact with a visible terminal application physically, but that is distinct
 from remote command execution in the daemon.
@@ -257,8 +277,11 @@ external gateway and never be exposed to launched applications.
 
 ## 11. X11/D-Bus isolation
 
-- MIT-MAGIC-COOKIE Xauthority 0600 and `-nolisten tcp`; never `xhost +`/`-ac`.
-- D-Bus session/runtime directories 0700 and Unix socket.
+- Separate desktop/daemon Xauthority files, each owner-only 0600, carry the same
+  cookie; Xvfb uses `-nolisten tcp`, never `xhost +`/`-ac`.
+- Desktop bus directories are 0710 and sockets group-only; explicit D-Bus
+  `EXTERNAL` policies admit only desktop UID 1000 and daemon UID 1001. All
+  desktop XDG state and the complete daemon runtime tree remain owner-only 0700.
 - Do not expose system D-Bus host socket.
 - Applications share the desktop cookie/bus by design; treat them as same tenant.
 - X11 SECURITY extension is not relied upon as the primary isolation mechanism;

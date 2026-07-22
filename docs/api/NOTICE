@@ -1,0 +1,8 @@
+Xenoteer Public API Documentation
+Copyright 2026 AEOR Development
+
+The OpenAPI document, WebSocket wire documentation, and JSON examples below
+this directory are licensed under the Apache License, Version 2.0. The license
+text is in LICENSE. These artifacts describe a public
+interoperability boundary and do not license the separately implemented
+Xenoteer server.

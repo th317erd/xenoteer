@@ -25,12 +25,12 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-openssl rand -out "$token_file" 32
+openssl rand -hex 32 >"$token_file"
 chmod 0400 "$token_file"
 if [[ $(id -u) -eq 0 ]]; then
-  chown 1000:1000 "$token_file"
-elif [[ $(id -u) -ne 1000 ]]; then
-  printf 'idle soak must run as root or UID 1000\n' >&2
+  chown 0:0 "$token_file"
+elif ! docker info --format '{{json .SecurityOptions}}' | grep -Fq 'name=rootless'; then
+  printf 'idle soak must run as root or use rootless Docker for a container-root-owned token\n' >&2
   exit 77
 fi
 
@@ -98,13 +98,15 @@ def read_processes() -> dict[int, dict[str, object]]:
                 next(line for line in status.splitlines() if line.startswith("Uid:"))
                 .split()[1]
             )
-            if uid != 1000:
-                continue
             comm = (path / "comm").read_text().strip()
             argv = tuple(
                 argument.decode("utf-8", "strict")
                 for argument in (path / "cmdline").read_bytes().rstrip(b"\0").split(b"\0")
             )
+            if uid not in {1000, 1001} and not (
+                uid == 0 and argv == ("/usr/local/bin/xenoteer-processd",)
+            ):
+                continue
             stat_tail = (path / "stat").read_text().rsplit(")", 1)[1].split()
             starttime = int(stat_tail[19])
         except (FileNotFoundError, PermissionError, StopIteration, UnicodeDecodeError, ValueError):
@@ -114,6 +116,7 @@ def read_processes() -> dict[int, dict[str, object]]:
             "comm": comm,
             "argv": argv,
             "starttime": starttime,
+            "uid": uid,
         }
     return processes
 
@@ -128,11 +131,11 @@ def atspi_dbus(process: dict[str, object]) -> bool:
         isinstance(argv, tuple)
         and len(argv) == 6
         and argv[0] == "/usr/bin/dbus-daemon"
-        and argv[1] == "--config-file=/usr/share/defaults/at-spi2/accessibility.conf"
+        and argv[1] == "--config-file=/etc/at-spi2/accessibility.conf"
         and argv[2] == "--nofork"
         and argv[3] == "--print-address"
         and argv[4].isdigit()
-        and argv[5] == "--address=unix:path=/run/user/1000/at-spi/bus_99"
+        and argv[5] == "--address=unix:path=/run/xenoteer/bus/at-spi/bus_99"
     )
 
 
@@ -162,7 +165,7 @@ expected = [
             "--nofork",
             "--nopidfile",
             "--nosyslog",
-            "--address=unix:path=/run/user/1000/bus",
+            "--address=unix:path=/run/xenoteer/bus/session",
         ),
     ),
     (
@@ -189,6 +192,7 @@ expected = [
     ("dconf", exact_argv("/usr/libexec/dconf-service")),
     ("xfdesktop", exact_argv("xfdesktop")),
     ("xenoteerd", exact_argv("/usr/local/bin/xenoteerd")),
+    ("xenoteer-processd", exact_argv("/usr/local/bin/xenoteer-processd")),
 ]
 if profile == "standard":
     expected.append(("xfce-panel", exact_argv("xfce4-panel")))
@@ -244,6 +248,12 @@ for label, predicate in expected:
             f"persistent process {label!r} matched {len(matches)}, expected exactly one"
         )
     process = matches[0]
+    expected_uid = 0 if label == "xenoteer-processd" else (1001 if label == "xenoteerd" else 1000)
+    if process["uid"] != expected_uid:
+        raise SystemExit(
+            f"persistent process {label!r} ran as UID {process['uid']}, "
+            f"expected UID {expected_uid}"
+        )
     pid = int(process["pid"])
     identities.append((label, pid, int(process["starttime"])))
     del remaining[pid]
@@ -271,7 +281,9 @@ if remaining:
         f"pid={pid},comm={process['comm']!r},argv={process['argv']!r}"
         for pid, process in sorted(remaining.items())
     ]
-    raise SystemExit("unexpected persistent UID-1000 process identities: " + "; ".join(details))
+    raise SystemExit(
+        "unexpected persistent UID-1000/1001 process identities: " + "; ".join(details)
+    )
 
 for label, pid, starttime in sorted(identities):
     print(f"{label}\t{pid}\t{starttime}")

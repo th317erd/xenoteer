@@ -1,0 +1,4 @@
+#!/bin/sh
+# SPDX-License-Identifier: BUSL-1.1
+# Losing the broker invalidates all managed-process ownership and containment.
+exec /usr/local/libexec/xenoteer/finish-critical xenoteer-processd "$@"

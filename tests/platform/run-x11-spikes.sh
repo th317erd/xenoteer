@@ -81,8 +81,8 @@ fi
 
 export DISPLAY="$display"
 export XAUTHORITY="$auth_file"
-cargo test -p xenoteer-x11 --all-features --test x11_live -- --ignored --test-threads=1
-cargo build --manifest-path fixtures/x11/Cargo.toml
+cargo test -j 4 -p xenoteer-x11 --all-features --test x11_live -- --ignored --test-threads=1
+cargo build -j 4 --manifest-path fixtures/x11/Cargo.toml
 fixtures/x11/target/debug/x11-color-bars --exit-after-expose >"$test_dir/color-bars.jsonl"
 # Keep the recorder connection (and therefore its window) alive until the
 # independent driver has completed its QueryPointer assertion.  Letting the

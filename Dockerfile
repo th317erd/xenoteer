@@ -43,7 +43,8 @@ COPY .cargo/ .cargo/
 COPY crates/ crates/
 COPY scripts/licenses/generate-cargo-manifest.sh /usr/local/bin/generate-cargo-manifest
 RUN chmod 0755 /usr/local/bin/generate-cargo-manifest \
-    && nice -n 10 cargo build --locked --release --bin xenoteerd --jobs 4 \
+    && nice -n 10 cargo build --locked --release \
+      --bin xenoteerd --bin xenoteer-processd --jobs 4 \
     && /usr/local/bin/generate-cargo-manifest \
       /src \
       /src/target/release/xenoteerd \
@@ -233,7 +234,9 @@ RUN --mount=type=bind,source=scripts/container/verify-apt-metadata.sh,target=/us
     && sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen \
     && locale-gen \
     && groupadd --gid 1000 xenoteer \
+    && groupadd --gid 1001 xenoteerd \
     && useradd --uid 1000 --gid 1000 --home-dir /home/xenoteer --create-home --shell /usr/sbin/nologin xenoteer \
+    && useradd --uid 1001 --gid 1001 --groups 1000 --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin xenoteerd \
     && install -d -m 0700 -o 1000 -g 1000 /home/xenoteer \
     && install -d -m 0755 -o 1000 -g 1000 /workspace \
     && install -d -m 0755 /usr/share/doc/xenoteer /usr/share/xenoteer \
@@ -273,6 +276,7 @@ RUN --mount=type=bind,source=scripts/container/verify-apt-metadata.sh,target=/us
 
 COPY --from=s6-overlay /s6-root /
 COPY --from=rust-builder /src/target/release/xenoteerd /usr/local/bin/xenoteerd
+COPY --from=rust-builder /src/target/release/xenoteer-processd /usr/local/bin/xenoteer-processd
 COPY --from=rust-builder /src/target/release/cargo-components.tsv /usr/share/doc/xenoteer/cargo-components.tsv
 COPY --from=rust-builder /src/target/release/cargo-components.spdx.json /usr/share/doc/xenoteer/cargo-components.spdx.json
 COPY --from=s6-overlay /tmp/s6-overlay-files.tsv /usr/share/doc/xenoteer/s6-overlay-files.tsv
@@ -290,8 +294,8 @@ COPY container/licenses/image-first-party-paths.tsv /usr/share/xenoteer/image-fi
 COPY container/licenses/final-image-exceptions.tsv /usr/share/xenoteer/final-image-exceptions.tsv
 COPY scripts/licenses/inventory-image-first-party.sh /usr/local/libexec/xenoteer/inventory-image-first-party
 COPY scripts/licenses/inventory-final-image.sh /usr/local/libexec/xenoteer/inventory-final-image
-RUN chown root:root /usr/local/bin/xenoteerd \
-    && chmod 0755 /usr/local/bin/xenoteerd \
+RUN chown root:root /usr/local/bin/xenoteerd /usr/local/bin/xenoteer-processd \
+    && chmod 0755 /usr/local/bin/xenoteerd /usr/local/bin/xenoteer-processd \
     && find /etc/s6-overlay/s6-rc.d /usr/local/libexec/xenoteer -type f \
       \( -name run -o -name finish -o -name up -o -name down -o -name check -o -path '/usr/local/libexec/xenoteer/*' \) \
       -exec chmod 0755 {} + \
@@ -336,8 +340,7 @@ ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2 \
     XVFB_SCREEN_HEIGHT=1080 \
     XVFB_SCREEN_DEPTH=24 \
     DESKTOP_PROFILE=bare \
-    XENOTEER__SERVER__LISTEN=0.0.0.0:8080 \
-    XENOTEER__AUTH__TOKEN_FILE=/run/secrets/xenoteer_api_token
+    XENOTEER__SERVER__LISTEN=0.0.0.0:8080
 
 EXPOSE 8080
 STOPSIGNAL SIGTERM

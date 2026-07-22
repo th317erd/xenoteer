@@ -4,9 +4,9 @@ set -eu
 
 : "${DBUS_SESSION_BUS_ADDRESS:?session bus address is required}"
 root=${CONTAINER_TEST_ROOT:-}
-expected="unix:path=$root/run/user/1000/bus"
+expected="unix:path=$root/run/xenoteer/bus/session"
 [ "$DBUS_SESSION_BUS_ADDRESS" = "$expected" ]
-[ -S "$root/run/user/1000/bus" ] || [ -n "${CONTAINER_TEST_ALLOW_MISSING_SOCKET:-}" ]
+[ -S "$root/run/xenoteer/bus/session" ] || [ -n "${CONTAINER_TEST_ALLOW_MISSING_SOCKET:-}" ]
 
 owner=$(gdbus call \
   --address "$DBUS_SESSION_BUS_ADDRESS" \

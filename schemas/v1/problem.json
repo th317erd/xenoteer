@@ -19,6 +19,16 @@
           "type": "string"
         },
         {
+          "const": "outcome_unknown",
+          "description": "Transport dispatch began, but the server cannot prove whether a target\neffect occurred. Clients must not create fresh work automatically.",
+          "type": "string"
+        },
+        {
+          "const": "side_effect_observed",
+          "description": "A side effect occurred but the failing backend could not safely prove a\nmore specific stage. Clients must treat automatic retry as unsafe.",
+          "type": "string"
+        },
+        {
           "const": "pointer_moved",
           "description": "The pointer moved.",
           "type": "string"
@@ -31,6 +41,36 @@
         {
           "const": "button_released",
           "description": "A pointer button was released.",
+          "type": "string"
+        },
+        {
+          "const": "key_pressed",
+          "description": "A physical key was pressed.",
+          "type": "string"
+        },
+        {
+          "const": "key_released",
+          "description": "A physical key was released.",
+          "type": "string"
+        },
+        {
+          "const": "input_reset",
+          "description": "Xenoteer-owned pressed input was conservatively reset.",
+          "type": "string"
+        },
+        {
+          "const": "process_started",
+          "description": "A managed application child was started.",
+          "type": "string"
+        },
+        {
+          "const": "process_signalled",
+          "description": "A managed process group received a termination signal.",
+          "type": "string"
+        },
+        {
+          "const": "process_exited",
+          "description": "A managed child was awaited and reaped.",
           "type": "string"
         },
         {
@@ -106,6 +146,11 @@
         {
           "const": "deadline_exceeded_after_effect",
           "description": "Work exceeded its deadline after a partial effect.",
+          "type": "string"
+        },
+        {
+          "const": "request_outcome_unknown",
+          "description": "A transport deadline elapsed after dispatch, so the request outcome\ncannot be proven from the response channel.",
           "type": "string"
         },
         {

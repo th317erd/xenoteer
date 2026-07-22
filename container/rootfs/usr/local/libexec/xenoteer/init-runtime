@@ -9,11 +9,21 @@ if [ -z "$root" ] && [ "$(id -u)" -ne 0 ]; then
 fi
 runtime_uid=1000
 runtime_gid=1000
+daemon_uid=1001
+daemon_gid=1001
+broker_uid=0
+token_uid=0
+token_gid=0
 if [ -n "$root" ]; then
   runtime_uid=${CONTAINER_TEST_UID:-1000}
   runtime_gid=${CONTAINER_TEST_GID:-1000}
+  daemon_uid=${CONTAINER_TEST_DAEMON_UID:-$runtime_uid}
+  daemon_gid=${CONTAINER_TEST_DAEMON_GID:-$runtime_gid}
+  broker_uid=${CONTAINER_TEST_BROKER_UID:-$runtime_uid}
+  token_uid=${CONTAINER_TEST_TOKEN_UID:-$runtime_uid}
+  token_gid=${CONTAINER_TEST_TOKEN_GID:-$runtime_gid}
 fi
-case "$runtime_uid:$runtime_gid" in
+case "$runtime_uid:$runtime_gid:$daemon_uid:$daemon_gid:$broker_uid:$token_uid:$token_gid" in
   *[!0-9:]*|:*|*:) echo 'invalid test runtime identity' >&2; exit 64 ;;
 esac
 
@@ -25,7 +35,13 @@ profile=${DESKTOP_PROFILE:-bare}
 viewer_enabled=${VIEWER_ENABLED:-1}
 viewer_required=${VIEWER_REQUIRED:-0}
 http_addr=${XENOTEER__SERVER__LISTEN-0.0.0.0:8080}
-token_file=${XENOTEER__AUTH__TOKEN_FILE-/run/secrets/xenoteer_api_token}
+if [ "${XENOTEER__AUTH__TOKEN_FILE+x}" = x ]; then
+  token_file=$XENOTEER__AUTH__TOKEN_FILE
+  token_file_explicit=1
+else
+  token_file=/run/secrets/xenoteer_api_token
+  token_file_explicit=0
+fi
 
 case "$display" in :[0-9]*) ;; *) echo "invalid DISPLAY: $display" >&2; exit 64 ;; esac
 case "${display#:}" in *[!0-9]*|'') echo "invalid DISPLAY: $display" >&2; exit 64 ;; esac
@@ -48,14 +64,29 @@ http_port=${http_addr##*:}
 [ "$http_port" -le 65535 ] || { echo "invalid HTTP port: $http_port" >&2; exit 64; }
 case "$token_file" in /*) ;; *) echo 'XENOTEER__AUTH__TOKEN_FILE must be absolute' >&2; exit 64 ;; esac
 case "$token_file" in *..*) echo 'XENOTEER__AUTH__TOKEN_FILE may not contain ..' >&2; exit 64 ;; esac
+case "$token_file" in /run/xenoteer/api-token) echo 'authentication token source collides with its staging path' >&2; exit 64 ;; esac
 token_path="$root$token_file"
-[ -f "$token_path" ] || { echo 'authentication token file is missing' >&2; exit 78; }
+if [ ! -f "$token_path" ] && [ "$token_file_explicit" -eq 0 ]; then
+  token_file=/run/xenoteer/generated-api-token
+  token_path="$root$token_file"
+  if [ ! -f "$token_path" ]; then
+    install -d -m 0755 "$root/run/xenoteer"
+    umask 077
+    od -An -N32 -tx1 /dev/urandom | tr -d ' \n' >"$token_path"
+    chown "$token_uid:$token_gid" "$token_path"
+    chmod 0400 "$token_path"
+    echo "generated API bearer token is available to root at $token_file" >&2
+  fi
+fi
+[ -f "$token_path" ] || { echo 'explicit authentication token file is missing' >&2; exit 78; }
+[ ! -L "$token_path" ] || { echo 'authentication token file may not be a symbolic link' >&2; exit 78; }
 token_owner=$(stat -c '%u' "$token_path")
 token_mode=$(stat -c '%a' "$token_path")
 token_bytes=$(wc -c <"$token_path")
-[ "$token_owner" -eq "$runtime_uid" ] || { echo 'authentication token file must be owned by UID 1000' >&2; exit 78; }
+[ "$token_owner" -eq "$token_uid" ] || { echo 'authentication token file must be owned by root' >&2; exit 78; }
 case "$token_mode" in 400|600) ;; *) echo "authentication token file must have mode 0400 or 0600 (observed $token_mode)" >&2; exit 78 ;; esac
-[ "$token_bytes" -ge 32 ] || { echo 'authentication token must contain at least 256 bits' >&2; exit 78; }
+[ "$token_bytes" -ge 32 ] || { echo 'authentication token must contain at least 32 bytes of token material' >&2; exit 78; }
+[ "$token_bytes" -le 1026 ] || { echo 'authentication token file exceeds the 1026-byte handoff limit' >&2; exit 78; }
 
 shm_path=${SHM_PATH:-/dev/shm}
 shm_bytes=$(df -B1 --output=size "$shm_path" | awk 'NR == 2 { gsub(/ /, ""); print }')
@@ -68,12 +99,21 @@ shm_mode=$(stat -c '%a' "$shm_path")
 
 umask 077
 install -d -m 0755 "$root/run/xenoteer"
-install -d -m 0700 -o "$runtime_uid" -g "$runtime_gid" "$root/run/user/1000"
-install -d -m 0700 -o "$runtime_uid" -g "$runtime_gid" "$root/run/user/1000/at-spi"
+install -d -m 0710 -o "$runtime_uid" -g "$runtime_gid" "$root/run/xenoteer/bus"
+install -d -m 0710 -o "$runtime_uid" -g "$runtime_gid" "$root/run/xenoteer/bus/at-spi"
+install -d -m 0750 -o "$broker_uid" -g "$daemon_gid" "$root/run/xenoteer/processd"
+install -d -m 0710 -o "$runtime_uid" -g "$runtime_gid" "$root/run/user/1000"
+install -d -m 0710 -o "$runtime_uid" -g "$runtime_gid" "$root/run/user/1000/at-spi"
 install -d -m 0700 -o "$runtime_uid" -g "$runtime_gid" "$root/run/user/1000/xdg"
 install -d -m 0700 -o "$runtime_uid" -g "$runtime_gid" "$root/run/user/1000/xdg/config"
 install -d -m 0700 -o "$runtime_uid" -g "$runtime_gid" "$root/run/user/1000/xdg/cache"
 install -d -m 0700 -o "$runtime_uid" -g "$runtime_gid" "$root/run/user/1000/xdg/data"
+install -d -m 0700 -o "$daemon_uid" -g "$daemon_gid" "$root/run/user/1001"
+install -d -m 0700 -o "$daemon_uid" -g "$daemon_gid" "$root/run/user/1001/home"
+install -d -m 0700 -o "$daemon_uid" -g "$daemon_gid" "$root/run/user/1001/xdg"
+install -d -m 0700 -o "$daemon_uid" -g "$daemon_gid" "$root/run/user/1001/xdg/config"
+install -d -m 0700 -o "$daemon_uid" -g "$daemon_gid" "$root/run/user/1001/xdg/cache"
+install -d -m 0700 -o "$daemon_uid" -g "$daemon_gid" "$root/run/user/1001/xdg/data"
 install -d -m 0700 -o "$runtime_uid" -g "$runtime_gid" "$root/home/xenoteer"
 install -d -m 0755 "$root/run/xenoteer/env"
 install -d -m 0755 "$root/run/xenoteer/viewer"
@@ -83,6 +123,7 @@ if [ "$(id -u)" -eq 0 ]; then
   chown 0:0 "$root/tmp/.X11-unix" "$root/tmp/.ICE-unix"
 fi
 install -m 0600 -o "$runtime_uid" -g "$runtime_gid" /dev/null "$root/run/user/1000/ICEauthority"
+install -m 0400 -o "$token_uid" -g "$token_gid" "$token_path" "$root/run/xenoteer/api-token"
 
 write_env() {
   name=$1
@@ -101,8 +142,8 @@ write_env XDG_CACHE_HOME "$root/run/user/1000/xdg/cache"
 write_env XDG_DATA_HOME "$root/run/user/1000/xdg/data"
 write_env XDG_CONFIG_DIRS "$root/etc/xdg"
 write_env XDG_DATA_DIRS "$root/usr/local/share:$root/usr/share"
-write_env DBUS_SESSION_BUS_ADDRESS "unix:path=$root/run/user/1000/bus"
-write_env AT_SPI_BUS_ADDRESS "unix:path=$root/run/user/1000/at-spi/bus_${display#:}"
+write_env DBUS_SESSION_BUS_ADDRESS "unix:path=$root/run/xenoteer/bus/session"
+write_env AT_SPI_BUS_ADDRESS "unix:path=$root/run/xenoteer/bus/at-spi/bus_${display#:}"
 write_env XDG_CURRENT_DESKTOP XFCE
 write_env XDG_SESSION_DESKTOP xfce
 write_env XDG_SESSION_TYPE x11
@@ -120,7 +161,6 @@ write_env QT_SCALE_FACTOR 1
 write_env QT_FONT_DPI 96
 write_env QT_STYLE_OVERRIDE Fusion
 write_env XENOTEER__SERVER__LISTEN "$http_addr"
-write_env XENOTEER__AUTH__TOKEN_FILE "$token_file"
 write_env DESKTOP_PROFILE "$profile"
 write_env VIEWER_ENABLED "$viewer_enabled"
 write_env VIEWER_REQUIRED "$viewer_required"
@@ -157,6 +197,11 @@ awk -v output_dir="$root/run/xenoteer/env" '
     count = split(path, segments, /__/)
     if (count != 2 || !valid_segment(segments[1]) || !valid_segment(segments[2])) {
       invalid = 1
+      next
+    }
+    # The root launcher hands this secret to xenoteerd on a private inherited
+    # descriptor. Never materialize its external path in the shared envdir.
+    if (name == "XENOTEER__AUTH__TOKEN_FILE") {
       next
     }
     value = substr($0, equals + 1)

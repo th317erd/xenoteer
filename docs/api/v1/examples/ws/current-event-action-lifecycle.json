@@ -1,0 +1,17 @@
+{
+  "type": "event",
+  "request_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0050",
+  "event": {
+    "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
+    "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+    "sequence": 1044,
+    "topic": "action.lifecycle",
+    "payload": {
+      "command_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0021",
+      "command_lifecycle": "running",
+      "action_state": "started",
+      "updated_monotonic_ms": 2010,
+      "terminal": null
+    }
+  }
+}

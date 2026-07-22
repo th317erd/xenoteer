@@ -1,0 +1,63 @@
+{
+  "server_version": "0.1.0",
+  "protocol_min": {
+    "major": 1,
+    "minor": 0
+  },
+  "protocol_max": {
+    "major": 1,
+    "minor": 0
+  },
+  "desktop": {
+    "id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
+    "generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+    "state": "ready",
+    "reason_code": null
+  },
+  "capabilities": {
+    "capabilities": [
+      {
+        "id": "application.registered.launch",
+        "status": "available",
+        "reason_code": null,
+        "backend_version": null
+      },
+      {
+        "id": "input.keyboard.xtest",
+        "status": "available",
+        "reason_code": null,
+        "backend_version": null
+      },
+      {
+        "id": "input.pointer.smooth",
+        "status": "available",
+        "reason_code": null,
+        "backend_version": null
+      },
+      {
+        "id": "input.pointer.xtest",
+        "status": "available",
+        "reason_code": null,
+        "backend_version": null
+      },
+      {
+        "id": "input.reset.owned",
+        "status": "available",
+        "reason_code": null,
+        "backend_version": null
+      },
+      {
+        "id": "process.managed.status",
+        "status": "available",
+        "reason_code": null,
+        "backend_version": null
+      },
+      {
+        "id": "process.managed.terminate",
+        "status": "available",
+        "reason_code": null,
+        "backend_version": null
+      }
+    ]
+  }
+}

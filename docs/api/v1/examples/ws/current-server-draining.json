@@ -1,0 +1,6 @@
+{
+  "type": "server.draining",
+  "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
+  "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+  "reason_code": "shutdown_in_progress"
+}

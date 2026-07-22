@@ -1,7 +1,10 @@
 # absolute pattern	SPDX expression	license evidence
 /etc/s6-overlay/s6-rc.d/*	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE
+/etc/at-spi2/accessibility.conf	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE
+/etc/dbus-1/session-local.conf	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE
 /etc/xenoteer/*	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE
 /usr/local/bin/xenoteerd	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE
+/usr/local/bin/xenoteer-processd	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE
 /usr/local/libexec/xenoteer/*	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE
 /usr/share/novnc/mandatory.json	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE
 /usr/share/doc/xenoteer/LICENSE	BUSL-1.1	/usr/share/doc/xenoteer/LICENSE

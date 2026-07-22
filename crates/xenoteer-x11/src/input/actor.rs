@@ -18,7 +18,7 @@ use super::keyboard_model::unavailable_keyboard_model;
 use super::{
     ActionContext, ActorThreadState, ControlOutcome, InputCleanupEvidence, InputCommand,
     InputFailure, InputFailureKind, InputHealthSnapshot, InputOperation, InputOutcome,
-    KeyboardAction,
+    KeyboardAction, PointerMoveRequest,
 };
 use crate::{Result, X11Error};
 
@@ -147,6 +147,34 @@ pub struct InputActorHandle {
 }
 
 impl InputActorHandle {
+    /// Attempts immediate FIFO admission of an execution-time planned move.
+    pub fn try_submit_pointer_move(
+        &self,
+        context: ActionContext,
+        request: PointerMoveRequest,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<
+        oneshot::Receiver<std::result::Result<InputOutcome, InputFailure>>,
+        InputSubmitError,
+    > {
+        if !self.accepting.load(Ordering::Acquire) {
+            return Err(InputSubmitError::Closed);
+        }
+        let (reply, receiver) = oneshot::channel();
+        self.ordinary
+            .try_send(InputCommand {
+                context,
+                operation: InputOperation::PointerMove(request),
+                cancellation,
+                reply,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => InputSubmitError::QueueFull,
+                mpsc::error::TrySendError::Closed(_) => InputSubmitError::Closed,
+            })?;
+        Ok(receiver)
+    }
+
     /// Attempts immediate FIFO admission without waiting for queue capacity.
     pub fn try_submit(
         &self,

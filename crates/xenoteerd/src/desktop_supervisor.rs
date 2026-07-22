@@ -6,7 +6,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::oneshot,
+    sync::{oneshot, watch},
     task::JoinHandle,
     time::{Instant, interval_at, timeout},
 };
@@ -109,20 +109,39 @@ impl DesktopSupervisorHandle {
 pub(crate) fn spawn(
     readiness: ReadinessHandle,
     spec: DesktopProbeSpec,
-) -> (DesktopSupervisorHandle, oneshot::Receiver<()>) {
+    generation: DesktopGeneration,
+) -> (
+    DesktopSupervisorHandle,
+    oneshot::Receiver<()>,
+    watch::Receiver<Option<InputActorHandle>>,
+) {
     let cancellation = CancellationToken::new();
     let task_cancellation = cancellation.clone();
     let (fatal_tx, fatal_rx) = oneshot::channel();
-    let join =
-        tokio::spawn(
-            async move { run_supervisor(readiness, spec, task_cancellation, fatal_tx).await },
-        );
-    (DesktopSupervisorHandle { cancellation, join }, fatal_rx)
+    let (input_tx, input_rx) = watch::channel(None);
+    let join = tokio::spawn(async move {
+        run_supervisor(
+            readiness,
+            spec,
+            generation,
+            input_tx,
+            task_cancellation,
+            fatal_tx,
+        )
+        .await
+    });
+    (
+        DesktopSupervisorHandle { cancellation, join },
+        fatal_rx,
+        input_rx,
+    )
 }
 
 async fn run_supervisor(
     readiness: ReadinessHandle,
     spec: DesktopProbeSpec,
+    generation: DesktopGeneration,
+    input: watch::Sender<Option<InputActorHandle>>,
     cancellation: CancellationToken,
     fatal_tx: oneshot::Sender<()>,
 ) -> Result<(), DesktopSupervisorError> {
@@ -164,7 +183,7 @@ async fn run_supervisor(
         }
     };
 
-    let generation = DesktopGeneration::new();
+    input.send_replace(Some(runtime.input.clone()));
     publish_operational_readiness(
         &readiness,
         generation,
@@ -177,6 +196,7 @@ async fn run_supervisor(
     loop {
         tokio::select! {
             () = cancellation.cancelled() => {
+                input.send_replace(None);
                 runtime.shutdown().await?;
                 return Ok(());
             }
@@ -188,6 +208,7 @@ async fn run_supervisor(
                         Some(generation),
                         Some("desktop_capability_lost"),
                     ));
+                    input.send_replace(None);
                     let cleanup = runtime.shutdown().await;
                     let _ignored = fatal_tx.send(());
                     cleanup?;
@@ -202,6 +223,7 @@ async fn run_supervisor(
                         Some(generation),
                         Some("desktop_capability_lost"),
                     ));
+                    input.send_replace(None);
                     let cleanup = runtime.shutdown().await;
                     let _ignored = fatal_tx.send(());
                     cleanup?;
@@ -761,6 +783,7 @@ mod tests {
         net::TcpListener,
         time::Instant,
     };
+    use xenoteer_protocol::DesktopGeneration;
     use xenoteer_server::{DesktopReadiness, ReadinessHandle, ReadinessSnapshot};
 
     use super::{
@@ -958,7 +981,8 @@ Sec-WebSocket-Protocol: binary\r\n\r\n\
             viewer_enabled: false,
             viewer_required: false,
         };
-        let (handle, fatal) = spawn(readiness.clone(), spec);
+        let (handle, fatal, input) = spawn(readiness.clone(), spec, DesktopGeneration::new());
+        assert!(input.borrow().is_none());
         handle.cancellation().cancel();
         readiness.transition(ReadinessSnapshot::new(
             DesktopReadiness::Draining,

@@ -27,6 +27,14 @@ pub const MAX_RESULT_LEDGER_ENTRIES: usize = 10_000;
 pub const MAX_DEFAULT_ACTION_TIMEOUT_MS: u64 = 305_000;
 /// Hard ceiling for retaining recent in-memory command results.
 pub const MAX_RESULT_LEDGER_TTL_SECONDS: u64 = 900;
+/// Closed release-three authorization grant vocabulary.
+pub const AUTHORIZATION_GRANTS: [&str; 5] = [
+    "desktop:status",
+    "desktop:observe",
+    "input:control",
+    "application:launch",
+    "application:terminate",
+];
 
 /// Complete immutable daemon configuration.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -92,6 +100,24 @@ impl Config {
             issues.push(ValidationIssue::new(
                 "server.insecure_disable_auth",
                 "authentication may be disabled only on a loopback listener",
+            ));
+        }
+        if self.auth.grants.len() > AUTHORIZATION_GRANTS.len()
+            || self
+                .auth
+                .grants
+                .iter()
+                .any(|grant| !AUTHORIZATION_GRANTS.contains(&grant.as_str()))
+            || {
+                let mut unique = self.auth.grants.clone();
+                unique.sort();
+                unique.dedup();
+                unique.len() != self.auth.grants.len()
+            }
+        {
+            issues.push(ValidationIssue::new(
+                "auth.grants",
+                "authorization grants must be unique members of the closed release-three vocabulary",
             ));
         }
         if self.server.request_body_limit_bytes == 0
@@ -389,6 +415,7 @@ impl Default for ServerConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct AuthConfig {
     token_file: SecretFile,
+    grants: Vec<String>,
 }
 
 impl AuthConfig {
@@ -397,12 +424,19 @@ impl AuthConfig {
     pub const fn token_file(&self) -> &SecretFile {
         &self.token_file
     }
+
+    /// Returns the configured least-privilege grant set in declared order.
+    #[must_use]
+    pub fn grants(&self) -> &[String] {
+        &self.grants
+    }
 }
 
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
             token_file: SecretFile(PathBuf::from("/run/xenoteer/api-token")),
+            grants: AUTHORIZATION_GRANTS.map(str::to_owned).to_vec(),
         }
     }
 }
@@ -1179,7 +1213,30 @@ mod tests {
         assert_eq!(config.desktop().display_width(), 1920);
         assert_eq!(config.desktop().display_height(), 1080);
         assert_eq!(config.input().queue_capacity(), 256);
+        assert_eq!(
+            config.auth().grants(),
+            AUTHORIZATION_GRANTS.map(str::to_owned)
+        );
         assert!(config.viewer().view_only());
+        Ok(())
+    }
+
+    #[test]
+    fn authorization_grants_are_closed_unique_and_configurable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let restricted = Config::load(
+            Some("[auth]\ngrants = ['desktop:status']"),
+            std::iter::empty::<(&str, &str)>(),
+            &ConfigOverrides::default(),
+        )?;
+        assert_eq!(restricted.auth().grants(), ["desktop:status"]);
+
+        for document in [
+            "[auth]\ngrants = ['desktop:status', 'desktop:status']",
+            "[auth]\ngrants = ['desktop:administrator']",
+        ] {
+            assert_validation_path(document, "auth.grants")?;
+        }
         Ok(())
     }
 

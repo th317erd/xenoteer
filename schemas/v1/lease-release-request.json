@@ -1,0 +1,81 @@
+{
+  "$defs": {
+    "ControlLeaseId": {
+      "description": "Identifies the current physical-input lease.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ProtocolVersion": {
+      "additionalProperties": false,
+      "description": "A negotiated protocol major/minor pair.",
+      "properties": {
+        "major": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor"
+      ],
+      "type": "object"
+    },
+    "RequestId": {
+      "description": "Correlates one transport request and response.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A request to release an existing controller lease.",
+  "properties": {
+    "desktop_generation": {
+      "$ref": "#/$defs/DesktopGeneration",
+      "description": "Target desktop lifetime observed by the caller."
+    },
+    "desktop_id": {
+      "$ref": "#/$defs/DesktopId",
+      "description": "Target desktop."
+    },
+    "lease_id": {
+      "$ref": "#/$defs/ControlLeaseId",
+      "description": "Opaque lease capability being released."
+    },
+    "protocol_version": {
+      "$ref": "#/$defs/ProtocolVersion",
+      "description": "Requested protocol version."
+    },
+    "request_id": {
+      "$ref": "#/$defs/RequestId",
+      "description": "Transport request correlation identifier."
+    }
+  },
+  "required": [
+    "protocol_version",
+    "request_id",
+    "desktop_id",
+    "desktop_generation",
+    "lease_id"
+  ],
+  "title": "LeaseReleaseRequest",
+  "type": "object"
+}

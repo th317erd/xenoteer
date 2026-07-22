@@ -58,7 +58,12 @@ scopes=(
   /usr/share/novnc/mandatory.json
   /usr/share/xenoteer
 )
-[[ -e $root/usr/local/bin/xenoteerd ]] && scopes+=(/usr/local/bin/xenoteerd)
+for config in /etc/at-spi2/accessibility.conf /etc/dbus-1/session-local.conf; do
+  [[ -e $root$config ]] && scopes+=("$config")
+done
+for binary in xenoteerd xenoteer-processd; do
+  [[ -e $root/usr/local/bin/$binary ]] && scopes+=("/usr/local/bin/$binary")
+done
 
 for scope in "${scopes[@]}"; do
   [[ -e $root$scope ]] || { printf 'missing first-party image scope: %s\n' "$scope" >&2; exit 1; }

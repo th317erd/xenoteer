@@ -44,7 +44,7 @@ import time
 profile, viewer_enabled = sys.argv[1:]
 self_pid = os.getpid()
 
-expected_user = collections.Counter(
+expected_desktop = collections.Counter(
     {
         "Xvfb": 1,
         "at-spi-bus-laun": 1,
@@ -56,33 +56,39 @@ expected_user = collections.Counter(
         "xfdesktop": 1,
         "xfsettingsd": 1,
         "xfwm4": 1,
-        "xenoteerd": 1,
     }
 )
 if profile == "standard":
-    expected_user["xfce4-panel"] = 1
+    expected_desktop["xfce4-panel"] = 1
 if viewer_enabled == "1":
-    expected_user["X0tigervnc"] = 1
-    expected_user["websockify"] = 1
+    expected_desktop["X0tigervnc"] = 1
+    expected_desktop["websockify"] = 1
 else:
-    expected_user["s6-pause"] = 2
+    expected_desktop["s6-pause"] = 2
+
+expected_daemon = collections.Counter({"xenoteerd": 1})
 
 expected_root = collections.Counter(
     {
+        "xenoteer-proces": 1,
         "s6-ipcserverd": 1,
         "s6-linux-init-s": 1,
         "run-critical-sh": 1,
-        "s6-supervise": 11,
+        "s6-supervise": 12,
         "s6-svscan": 1,
     }
 )
 
 
 def process_inventory() -> tuple[
-    collections.Counter[str], collections.Counter[str], list[tuple[str, str]]
+    collections.Counter[str],
+    collections.Counter[str],
+    collections.Counter[str],
+    list[tuple[str, str]],
 ]:
     root: collections.Counter[str] = collections.Counter()
-    user: collections.Counter[str] = collections.Counter()
+    desktop: collections.Counter[str] = collections.Counter()
+    daemon: collections.Counter[str] = collections.Counter()
     unacceptable: list[tuple[str, str]] = []
     for process in pathlib.Path("/proc").glob("[0-9]*"):
         try:
@@ -106,21 +112,25 @@ def process_inventory() -> tuple[
         if uid == 0:
             root[comm] += 1
         elif uid == 1000:
-            user[comm] += 1
+            desktop[comm] += 1
+        elif uid == 1001:
+            daemon[comm] += 1
         else:
             raise SystemExit(f"idle runtime contains unexpected UID {uid}")
-    return root, user, unacceptable
+    return root, desktop, daemon, unacceptable
 
 
 last_root: collections.Counter[str] = collections.Counter()
-last_user: collections.Counter[str] = collections.Counter()
+last_desktop: collections.Counter[str] = collections.Counter()
+last_daemon: collections.Counter[str] = collections.Counter()
 last_unacceptable: list[tuple[str, str]] = []
 for _ in range(100):
-    last_root, last_user, last_unacceptable = process_inventory()
+    last_root, last_desktop, last_daemon, last_unacceptable = process_inventory()
     if (
         not last_unacceptable
         and last_root == expected_root
-        and last_user == expected_user
+        and last_desktop == expected_desktop
+        and last_daemon == expected_daemon
     ):
         break
     time.sleep(0.1)
@@ -128,7 +138,8 @@ else:
     raise SystemExit(
         "idle process allowlist differs: "
         f"root={dict(sorted(last_root.items()))!r}, "
-        f"user={dict(sorted(last_user.items()))!r}, "
+        f"desktop={dict(sorted(last_desktop.items()))!r}, "
+        f"daemon={dict(sorted(last_daemon.items()))!r}, "
         f"unacceptable_states={last_unacceptable!r}"
     )
 
@@ -175,7 +186,7 @@ for table in ("/proc/net/udp", "/proc/net/udp6"):
 if observed_udp:
     raise SystemExit(f"idle runtime contains UDP listeners: {sorted(observed_udp)!r}")
 
-for path in ("/run/user/1000/bus", "/run/user/1000/at-spi/bus_99"):
+for path in ("/run/xenoteer/bus/session", "/run/xenoteer/bus/at-spi/bus_99"):
     if not pathlib.Path(path).is_socket():
         raise SystemExit(f"required runtime socket is absent: {path}")
 if pathlib.Path("/run/dbus/system_bus_socket").exists():

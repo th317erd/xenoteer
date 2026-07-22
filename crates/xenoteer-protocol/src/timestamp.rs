@@ -30,6 +30,21 @@ impl Timestamp {
         Ok(Self(canonical))
     }
 
+    /// Builds a canonical UTC timestamp from Unix-epoch nanoseconds.
+    ///
+    /// Keeping this conversion in the protocol crate lets effectful adapters
+    /// project monotonic coordinator timestamps without constructing unchecked
+    /// wire strings.
+    pub fn from_unix_timestamp_nanos(value: i128) -> Result<Self, TimestampError> {
+        let parsed =
+            OffsetDateTime::from_unix_timestamp_nanos(value).map_err(|_| TimestampError)?;
+        let canonical = parsed
+            .to_offset(time::UtcOffset::UTC)
+            .format(&Rfc3339)
+            .map_err(|_| TimestampError)?;
+        Ok(Self(canonical))
+    }
+
     /// Returns the canonical timestamp text.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -109,6 +124,14 @@ mod tests {
     fn canonicalizes_offsets_to_utc() -> Result<(), TimestampError> {
         let value = Timestamp::parse("2026-07-20T10:00:00-07:00")?;
         assert_eq!(value.as_str(), "2026-07-20T17:00:00Z");
+        Ok(())
+    }
+
+    #[test]
+    fn unix_nanoseconds_round_trip_through_canonical_wire_form() -> Result<(), TimestampError> {
+        let timestamp = Timestamp::from_unix_timestamp_nanos(1_721_433_600_123_456_789)?;
+        assert_eq!(timestamp.unix_timestamp_nanos()?, 1_721_433_600_123_456_789);
+        assert!(timestamp.as_str().ends_with('Z'));
         Ok(())
     }
 

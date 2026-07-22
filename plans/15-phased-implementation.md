@@ -277,6 +277,51 @@ through HTTP/WebSocket; establish the coordinator/lease/ledger/event foundation.
 - Full raw workflow works black-box: boot, auth, lease, launch recorder, smooth
   input, observe command result, terminate, shutdown.
 
+Current implementation note: the production registry deliberately exposes only
+the shell-free `xmessage` profile. The image-level gate can prove its exact
+PID/start-time/argv identity and a unique mapped window correlated by `WM_CLASS`,
+exact `WM_COMMAND`, and `WM_CLIENT_MACHINE`, plus normal TERM/reap and a
+zombie-free process table. `xmessage` does not publish `_NET_WM_PID`; the gate
+treats that client-controlled property as optional but rejects a conflicting
+value when present. It cannot synthesize output flooding, TERM resistance, or
+descendants. Those cases are presently covered by process-manager unit tests.
+Moving them into the production black-box lane requires reviewed immutable
+fixture profiles (or a separate non-distributable fixture image), not arbitrary
+command launch. A public output-bound assertion additionally needs bounded broker
+evidence because the v1 `ProcessView` correctly omits captured output. This is a
+recorded Phase 3 exit-gate gap, not a reason to add a production test backdoor.
+
+The live WebSocket gate verifies reserved-path ordering for rate exhaustion
+(`error` before close 1008), terminal command delivery alongside lifecycle
+events, replay/resync, same-principal lease continuity across abrupt transport
+loss, refusal to negotiate an offered `permessage-deflate` extension, rejection
+of binary application messages, single-frame oversize handling, and draining
+before close 1001. It cannot deterministically saturate the 1,024-slot normal
+outbound queue in the production configuration: the independent 30-message
+session burst and shared command-submit limiter stop one loopback client well
+before that boundary, while kernel socket buffering is platform-dependent.
+Exact queue saturation, reserved-lane behavior under a full normal queue,
+outbound-backpressure resync, and global WebSocket-session admission remain
+bounded in-process tests. Fragmented reassembled oversize messages,
+hello/heartbeat timeout timing, and slow-reader/writer behavior remain outside
+the live lane and require separately bounded integration coverage. No
+production-only admission or queue-limit bypass is added for the black-box
+harness.
+
+The process broker independently deduplicates launch by the stable command ID
+and canonical launch content within the authenticated principal namespace. Its
+client performs one bounded internal replay only for ambiguous connect, timeout,
+or transport failures; a lost first reply therefore resolves to the same managed
+process without asking an API client to invent a new command. The daemon also
+rechecks the authenticated grant at the effect boundary after transport
+authorization. REST long polls have independent global and per-principal
+admission with RAII release, leaving at least one HTTP slot for ordinary control
+requests. Live acceptance subscribes before normal TERM, then correlates exactly
+one owner-visible `process.exited` event with the immutable termination result
+and proves an exact retry emits neither a second process nor a second exit event.
+Natural-exit event delivery remains bounded unit/in-process coverage until the
+image includes a reviewed immutable self-exiting fixture profile.
+
 ### Non-goals
 
 No stable window/element handles, screenshot artifacts, clipboard, or final SDK
@@ -449,6 +494,8 @@ artifacts, and release without hidden deployment questions.
 - Browser sandbox status on supported hosts; no `--no-sandbox` or
   `--disable-dev-shm-usage`; private `/dev/shm` is at least 4 GiB.
 - Listener/auth/origin/proxy/token rotation/object authorization tests.
+- Pre-request connection admission plus header count/bytes/read-time and idle
+  connection limits, with slow/incomplete-header exhaustion and recovery tests.
 - Path/process/output/regex/parser/DoS/redaction fault/fuzz matrix.
 - Secret canary scan and core dump/log/artifact policy.
 

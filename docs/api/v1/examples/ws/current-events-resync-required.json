@@ -1,0 +1,9 @@
+{
+  "type": "events.resync_required",
+  "request_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0050",
+  "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
+  "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+  "reason": "history_lost",
+  "dropped_through": 1042,
+  "latest_sequence": 1100
+}

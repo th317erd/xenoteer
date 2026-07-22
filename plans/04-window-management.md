@@ -70,7 +70,13 @@ run the selector again.
 `_NET_WM_PID` is optional, client-supplied, and not authentication. Pair it with
 PID namespace context and `/proc` start time when possible. It aids correlation
 but never authorizes operations. D-Bus-activated apps and multi-process browsers
-may have window PIDs different from the launcher PID.
+may have window PIDs different from the launcher PID, and ordinary clients such
+as `xmessage` may omit the property entirely. When it is absent, correlation must
+remain explicitly lower-confidence and combine independent evidence such as the
+managed process's exact argv/start time, `WM_CLASS`, `WM_COMMAND`, client machine,
+client leader, and uniqueness. If a supplied `_NET_WM_PID` conflicts with stronger
+same-namespace process evidence, report the conflict rather than silently choosing
+one identity.
 
 ## 4. Window snapshot schema
 

@@ -10,13 +10,16 @@ license = "BUSL-1.1"
 publish = false
 
 [dependencies]
+futures-util.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 toml.workspace = true
 xenoteer-protocol = { version = "=0.1.0", path = "../xenoteer-protocol" }
 
 [dev-dependencies]
 proptest.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

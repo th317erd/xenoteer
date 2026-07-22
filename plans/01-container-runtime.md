@@ -23,7 +23,7 @@ automation behavior.
   +-- session D-Bus (longrun, desktop uid, readiness probe)
   +-- AT-SPI bus/registry (longrun, desktop uid)
   +-- XFCE session (longrun, desktop uid)
-  +-- xenoteerd (longrun, desktop uid, critical)
+  +-- xenoteerd (longrun, daemon uid, critical)
   +-- X0tigervnc (longrun, desktop uid, loopback/view-only)
   +-- websockify/noVNC static server (longrun, desktop uid, loopback)
 ```
@@ -81,7 +81,13 @@ and fails on an expired vulnerability waiver.
 - PID 1 starts as root only to prepare runtime paths and switch identities.
 - All desktop-facing longruns execute as a fixed `xenoteer` user and group,
   initially UID/GID 1000 inside the image.
-- Applications launched by the API run as the same desktop user in release one;
+- `xenoteerd` executes as UID/GID 1001 with supplemental desktop GID 1000. The
+  supplemental group permits deliberate bus traversal while the distinct primary identity protects daemon
+  memory, environment, descriptors, Xauthority, HOME, and XDG state.
+- A separately supervised root broker accepts only UID/GID 1001 on a private
+  root:xenoteerd socket using `SO_PEERCRED`, holds no API token, and launches
+  only image-registered profiles as UID/GID 1000.
+- Applications launched by the API run as the desktop user in release one;
   per-application UIDs are future hardening.
 - `xenoteerd` is not root and has no Docker socket, host devices, or ambient
   capabilities.
@@ -95,14 +101,16 @@ workspace ownership is the deployer's responsibility. The deprecated s6
 | Path | Owner/mode | Purpose | Read-only-root deployment |
 |---|---|---|---|
 | `/run` | root:root 0755 tmpfs | s6 state and runtime hierarchy | writable tmpfs required |
-| `/run/user/1000` | xenoteer:xenoteer 0700 | XDG runtime, session bus | created by oneshot |
+| `/run/user/1000` | xenoteer:xenoteer 0710 at bootstrap, toolkit-tightened to 0700; XDG subtree 0700 | desktop-private runtime; shared buses live under `/run/xenoteer/bus` | created by oneshot, tightened by AT-SPI toolkit |
+| `/run/user/1001` | xenoteerd:xenoteerd 0700 | private daemon runtime, HOME, XDG, Xauthority | created by oneshot |
+| `/run/xenoteer/processd` | root:xenoteerd 0750; socket 0660 | daemon-to-broker IPC | created by oneshot |
 | `/tmp` | root:root 1777 tmpfs | X11 socket and application temp | writable tmpfs required |
 | `/dev/shm` | root:root 1777 tmpfs | browser/toolkit/MIT-SHM | private 4 GiB minimum; reject smaller mounts before browser launch |
 | `/home/xenoteer` | xenoteer:xenoteer 0700 | profiles/config/cache | volume or writable layer |
 | `/workspace` | deployment-defined | bot-visible files | optional explicit mount |
 
-Set `XDG_RUNTIME_DIR=/run/user/1000`. Do not point it at `/tmp`; D-Bus and
-desktop services expect a private, correctly owned directory.
+Set desktop `XDG_RUNTIME_DIR=/run/user/1000` and daemon `XDG_RUNTIME_DIR` to
+`/run/user/1001`. Do not point either at `/tmp`.
 
 For `--read-only`, set `S6_READ_ONLY_ROOT=1` and mount the writable locations
 above. s6 assumes `/run` is writable and `/var/run` resolves to `/run`.
@@ -190,10 +198,10 @@ degraded without making input unavailable; lack of Xvfb or daemon is fatal.
 ### 6.1 Xauthority
 
 - Allocate a display number from configuration, default `:99`.
-- Create an MIT-MAGIC-COOKIE-1 credential in a root-prepared file owned 0600 by
-  the desktop user.
+- Create the same MIT-MAGIC-COOKIE-1 credential in separate 0600 files owned by
+  the desktop and daemon UIDs; neither identity can read the other's file.
 - Start Xvfb with `-auth`, `-nolisten tcp`, fixed screen/depth/DPI, and no `-ac`.
-- Export identical `DISPLAY` and `XAUTHORITY` into every desktop service.
+- Export identical `DISPLAY` with identity-private `XAUTHORITY` paths.
 - Verify access with an authenticated X11 round trip, not only socket existence.
 
 `-ac` is permitted only in an isolated test fixture specifically proving auth
@@ -205,10 +213,22 @@ Use Unix-domain buses only:
 
 - System bus, if needed: standard `/run/dbus/system_bus_socket`, constrained by
   packaged policies and not published.
-- Session bus: `unix:path=/run/user/1000/bus`, created once and shared by XFCE,
+- Session bus: `unix:path=/run/xenoteer/bus/session`, created once and shared by XFCE,
   AT-SPI, applications, and daemon.
+- Create session/accessibility sockets with umask 0007 in 0710 directories so
+  daemon supplemental GID 1000 may traverse without listing desktop state.
+  Keep these cross-identity sockets outside `/run/user/1000`, whose XDG owner
+  privacy is 0700. Because `EXTERNAL` authenticates the peer UID independently
+  of filesystem groups, both buses carry an explicit closed UID 1000/1001
+  connection policy.
 - Accessibility bus: acquired through the AT-SPI bus launcher/registry and
   inherited/discovered by accessible applications.
+- Application-private AT-SPI P2P sockets remain under the desktop UID's 0700
+  XDG runtime tree and intentionally reject daemon UID 1001. The Rust adapter
+  compiles `atspi-connection` without its default `p2p` feature and performs
+  tree, action, cache, and event traffic over the central accessibility bus.
+  Do not loosen toolkit socket modes, weaken EXTERNAL authentication, or merge
+  the daemon and desktop identities to recover an optional fast path.
 
 Do not use D-Bus TCP transports. Do not let individual applications
 `dbus-launch` private competing session buses. The bootstrap service creates

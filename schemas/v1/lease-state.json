@@ -1,0 +1,100 @@
+{
+  "$defs": {
+    "ControlLeaseId": {
+      "description": "Identifies the current physical-input lease.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "LeaseAvailability": {
+      "description": "Public lease availability without another principal's identity or token.",
+      "oneOf": [
+        {
+          "const": "vacant",
+          "description": "No lease/reset transaction exists.",
+          "type": "string"
+        },
+        {
+          "const": "held_by_caller",
+          "description": "The authenticated caller owns the active lease.",
+          "type": "string"
+        },
+        {
+          "const": "occupied",
+          "description": "Another principal owns the active lease.",
+          "type": "string"
+        },
+        {
+          "const": "revoking",
+          "description": "Admission has stopped and cleanup has not started.",
+          "type": "string"
+        },
+        {
+          "const": "resetting",
+          "description": "Owned-input cleanup is in progress.",
+          "type": "string"
+        }
+      ]
+    },
+    "Timestamp": {
+      "description": "A canonical RFC 3339 timestamp with an explicit UTC offset.",
+      "format": "date-time",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A redaction-safe lease state response.",
+  "properties": {
+    "desktop_generation": {
+      "$ref": "#/$defs/DesktopGeneration",
+      "description": "Authoritative desktop lifetime."
+    },
+    "desktop_id": {
+      "$ref": "#/$defs/DesktopId",
+      "description": "Target desktop."
+    },
+    "expires_at": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Active expiry; safe occupied views may disclose this without identity."
+    },
+    "lease_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ControlLeaseId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Lease ID only when the authenticated caller owns it."
+    },
+    "state": {
+      "$ref": "#/$defs/LeaseAvailability",
+      "description": "Public availability phase."
+    }
+  },
+  "required": [
+    "desktop_id",
+    "desktop_generation",
+    "state"
+  ],
+  "title": "LeaseStateView",
+  "type": "object"
+}

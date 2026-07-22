@@ -338,6 +338,25 @@ silently fall back to physical input.
 
 ## 12. Testing
 
+### Cross-UID transport contract
+
+The daemon runs as UID 1001 while accessible applications run as UID 1000.
+GTK/ATK application P2P servers create private 0700 runtime directories and
+accept only their own Unix UID, so P2P is neither a valid nor required
+transport for Xenoteer. Build directly against `atspi-connection` and
+`atspi-proxies`, with the connection crate's default features disabled; enable
+event wrappers without enabling `p2p`. All tree reads, cache operations,
+actions, and event subscriptions use the central accessibility bus, whose
+policy explicitly admits both reviewed identities.
+
+Acceptance must prove that UID 1001 can enumerate registry children, read an
+application root property, invoke an action in the controlled fixture, and
+receive its event over the central bus. It must also prove that the same UID
+cannot connect to the application's private P2P address and that daemon logs
+contain no attempted-peer warning. A dependency-tree gate rejects the `atspi`
+facade and the `atspi-connection`/`zbus` P2P features so a dependency refresh
+cannot silently undo this boundary.
+
 ### Fixture applications
 
 Create controlled GTK and Qt apps with buttons, menus, tabs, trees, tables,

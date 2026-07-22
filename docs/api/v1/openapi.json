@@ -1,0 +1,771 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Xenoteer Control API",
+    "version": "1.0.0-phase3",
+    "description": "Implemented Phase 3 HTTP control-plane contract. Typed request and result definitions are generated from xenoteer-protocol and referenced from schemas/v1. WebSocket application messages are documented separately in websocket.md.",
+    "license": {
+      "name": "Apache License 2.0",
+      "identifier": "Apache-2.0"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:3000",
+      "description": "Default container-local control plane; production TLS may terminate at a trusted same-host proxy."
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Health",
+      "description": "Unauthenticated coarse process and desktop health."
+    },
+    {
+      "name": "Discovery",
+      "description": "Authenticated status and capability snapshots."
+    },
+    {
+      "name": "Lease",
+      "description": "Exclusive physical-input controller lease."
+    },
+    {
+      "name": "Commands",
+      "description": "Deduplicated generation-bound command lifecycle."
+    },
+    {
+      "name": "WebSocket",
+      "description": "Authenticated WebSocket upgrade; application message shapes are in websocket.md."
+    }
+  ],
+  "paths": {
+    "/livez": {
+      "get": {
+        "operationId": "getLiveness",
+        "tags": ["Health"],
+        "summary": "Prove that the HTTP process is alive",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Process is alive.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Liveness"
+                },
+                "example": {
+                  "status": "alive"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "getReadiness",
+        "tags": ["Health"],
+        "summary": "Read coarse desktop readiness",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Required desktop capabilities are ready; status is ready or degraded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Readiness"
+                },
+                "examples": {
+                  "ready": {"value": {"status": "ready"}},
+                  "degraded": {"value": {"status": "degraded"}}
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Desktop is not ready. This public route intentionally does not return detailed reasons.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Readiness"
+                },
+                "example": {"status": "not_ready"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/status": {
+      "get": {
+        "operationId": "getStatus",
+        "tags": ["Discovery"],
+        "summary": "Read detailed server, desktop, and capability status",
+        "responses": {
+          "200": {
+            "description": "Current authenticated status snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                },
+                "examples": {
+                  "ready": {
+                    "externalValue": "./examples/status-response.json"
+                  }
+                }
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/capabilities": {
+      "get": {
+        "operationId": "getCapabilities",
+        "tags": ["Discovery"],
+        "summary": "Read the deterministic capability report",
+        "responses": {
+          "200": {
+            "description": "Current capability report sorted by identifier.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../../../schemas/v1/capabilities.json"
+                },
+                "examples": {
+                  "ready": {
+                    "externalValue": "./examples/capabilities-response.json"
+                  }
+                }
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/desktops/{desktop_id}/lease": {
+      "parameters": [
+        {"$ref": "#/components/parameters/DesktopId"}
+      ],
+      "get": {
+        "operationId": "getLeaseState",
+        "tags": ["Lease"],
+        "summary": "Read caller-redacted lease state",
+        "description": "The lease ID is disclosed only when the authenticated principal owns the active lease.",
+        "responses": {
+          "200": {
+            "description": "Redaction-safe current lease state.",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../../../schemas/v1/lease-state.json"},
+                "examples": {
+                  "heldByCaller": {"externalValue": "./examples/lease-held-response.json"},
+                  "vacant": {"externalValue": "./examples/lease-vacant-response.json"}
+                }
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      },
+      "post": {
+        "operationId": "acquireLease",
+        "tags": ["Lease"],
+        "summary": "Acquire exclusive physical-input control",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "../../../schemas/v1/lease-acquire-request.json"},
+              "examples": {
+                "default": {"externalValue": "./examples/lease-acquire-request.json"}
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Lease acquired. Location identifies the caller-owned lease.",
+            "headers": {
+              "Location": {"$ref": "#/components/headers/Location"}
+            },
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../../../schemas/v1/lease-state.json"},
+                "examples": {
+                  "heldByCaller": {"externalValue": "./examples/lease-held-response.json"}
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/desktops/{desktop_id}/lease/{lease_id}/renew": {
+      "parameters": [
+        {"$ref": "#/components/parameters/DesktopId"},
+        {"$ref": "#/components/parameters/LeaseId"}
+      ],
+      "post": {
+        "operationId": "renewLease",
+        "tags": ["Lease"],
+        "summary": "Replace the TTL of a caller-owned lease",
+        "description": "The path lease ID and body lease ID must match exactly.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "../../../schemas/v1/lease-renew-request.json"},
+              "examples": {
+                "default": {"externalValue": "./examples/lease-renew-request.json"}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Lease renewed.",
+            "headers": {
+              "Location": {"$ref": "#/components/headers/Location"}
+            },
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../../../schemas/v1/lease-state.json"},
+                "examples": {
+                  "heldByCaller": {"externalValue": "./examples/lease-held-response.json"}
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/desktops/{desktop_id}/lease/{lease_id}": {
+      "parameters": [
+        {"$ref": "#/components/parameters/DesktopId"},
+        {"$ref": "#/components/parameters/LeaseId"}
+      ],
+      "delete": {
+        "operationId": "releaseLease",
+        "tags": ["Lease"],
+        "summary": "Release a caller-owned lease and wait for owned-input reset",
+        "description": "The DELETE has a required JSON body. Success means reset completed and the returned state is authoritative.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "../../../schemas/v1/lease-release-request.json"},
+              "examples": {
+                "default": {"externalValue": "./examples/lease-release-request.json"}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Lease release and owned-input reset completed.",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../../../schemas/v1/lease-state.json"},
+                "examples": {
+                  "vacant": {"externalValue": "./examples/lease-vacant-response.json"}
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/desktops/{desktop_id}/commands": {
+      "parameters": [
+        {"$ref": "#/components/parameters/DesktopId"}
+      ],
+      "post": {
+        "operationId": "submitCommand",
+        "tags": ["Commands"],
+        "summary": "Submit or idempotently retrieve a command",
+        "description": "The optional Idempotency-Key must equal command_id. A disconnect or transport timeout never cancels accepted work.",
+        "parameters": [
+          {"$ref": "#/components/parameters/IdempotencyKey"}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "../../../schemas/v1/command-envelope.json"},
+              "examples": {
+                "smoothPointerMove": {"externalValue": "./examples/command-submit-request.json"}
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "New or existing command is nonterminal.",
+            "headers": {
+              "Location": {"$ref": "#/components/headers/Location"},
+              "Retry-After": {"$ref": "#/components/headers/RetryAfter"}
+            },
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../../../schemas/v1/command-result.json"},
+                "examples": {
+                  "accepted": {"externalValue": "./examples/command-accepted-response.json"}
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Exact command ID and content were already terminal.",
+            "headers": {
+              "Location": {"$ref": "#/components/headers/Location"}
+            },
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../../../schemas/v1/command-result.json"},
+                "examples": {
+                  "succeeded": {"externalValue": "./examples/command-succeeded-response.json"}
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "422": {"$ref": "#/components/responses/UnsupportedByTarget"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/desktops/{desktop_id}/commands/{command_id}": {
+      "parameters": [
+        {"$ref": "#/components/parameters/DesktopId"},
+        {"$ref": "#/components/parameters/CommandId"}
+      ],
+      "get": {
+        "operationId": "getCommand",
+        "tags": ["Commands"],
+        "summary": "Read the current principal-scoped command result",
+        "responses": {
+          "200": {
+            "description": "Current command result; Retry-After is present while nonterminal.",
+            "headers": {
+              "Location": {"$ref": "#/components/headers/Location"},
+              "Retry-After": {"$ref": "#/components/headers/OptionalRetryAfter"}
+            },
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../../../schemas/v1/command-result.json"},
+                "examples": {
+                  "running": {"externalValue": "./examples/command-running-response.json"},
+                  "succeeded": {"externalValue": "./examples/command-succeeded-response.json"}
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      },
+      "delete": {
+        "operationId": "cancelCommand",
+        "tags": ["Commands"],
+        "summary": "Request cooperative cancellation",
+        "description": "Cancellation never promises undo. A 202 result may still be nonterminal; 200 means it was already terminal.",
+        "responses": {
+          "202": {
+            "description": "Cancellation was recorded and execution is converging to terminal state.",
+            "headers": {
+              "Location": {"$ref": "#/components/headers/Location"},
+              "Retry-After": {"$ref": "#/components/headers/RetryAfter"}
+            },
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../../../schemas/v1/command-result.json"},
+                "examples": {
+                  "running": {"externalValue": "./examples/command-running-response.json"}
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Command was already terminal and was not changed.",
+            "headers": {
+              "Location": {"$ref": "#/components/headers/Location"}
+            },
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../../../schemas/v1/command-result.json"},
+                "examples": {
+                  "cancelled": {"externalValue": "./examples/command-cancelled-response.json"}
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/desktops/{desktop_id}/commands/{command_id}/wait": {
+      "parameters": [
+        {"$ref": "#/components/parameters/DesktopId"},
+        {"$ref": "#/components/parameters/CommandId"}
+      ],
+      "get": {
+        "operationId": "waitCommand",
+        "tags": ["Commands"],
+        "summary": "Long-poll for a terminal command result",
+        "description": "timeout_ms defaults to 30000 and must be 1..30000. A 202 response means only that the long poll elapsed; command execution continues. Wait admission is bounded to eight per principal and 64 globally, or one fewer than configured HTTP concurrency when smaller, so an ordinary-control slot remains available. Exhaustion returns 429 with Retry-After.",
+        "parameters": [
+          {
+            "name": "timeout_ms",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 30000,
+              "default": 30000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Command became terminal before the long-poll deadline.",
+            "headers": {
+              "Location": {"$ref": "#/components/headers/Location"}
+            },
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../../../schemas/v1/command-result.json"},
+                "examples": {
+                  "succeeded": {"externalValue": "./examples/command-succeeded-response.json"}
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Long poll elapsed with a current nonterminal result.",
+            "headers": {
+              "Location": {"$ref": "#/components/headers/Location"},
+              "Retry-After": {"$ref": "#/components/headers/RetryAfter"}
+            },
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../../../schemas/v1/command-result.json"},
+                "examples": {
+                  "running": {"externalValue": "./examples/command-running-response.json"}
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/ws": {
+      "get": {
+        "operationId": "upgradeWebSocket",
+        "tags": ["WebSocket"],
+        "summary": "Upgrade to the v1 text-JSON application protocol",
+        "description": "The HTTP exchange is an RFC 6455 upgrade. See websocket.md for implemented message shapes, including owner-scoped process.exited events and global metadata-free resynchronization barriers. Browser Origin is checked against an exact allowlist; non-browser clients may omit it.",
+        "responses": {
+          "101": {
+            "description": "Switching Protocols."
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"}
+        },
+        "x-xenoteer-websocket-document": "./websocket.md"
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Exactly one Bearer credential. The token is opaque and must not be placed in URLs. A token maps to a closed subset of desktop:status, desktop:observe, input:control, application:launch, and application:terminate; omission of configured grants defaults to all five."
+      }
+    },
+    "parameters": {
+      "DesktopId": {
+        "name": "desktop_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "LeaseId": {
+        "name": "lease_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "CommandId": {
+        "name": "command_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "description": "When present exactly once, must equal the textual command_id from the body.",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "headers": {
+      "Location": {
+        "description": "Canonical command or caller-owned lease resource.",
+        "schema": {"type": "string"}
+      },
+      "RetryAfter": {
+        "description": "Current implementation emits 1 second for nonterminal command results and backoff responses.",
+        "required": true,
+        "schema": {"type": "integer", "minimum": 1, "example": 1}
+      },
+      "OptionalRetryAfter": {
+        "description": "Present with value 1 while the returned command result is nonterminal; absent when terminal.",
+        "schema": {"type": "integer", "minimum": 1, "example": 1}
+      }
+    },
+    "schemas": {
+      "Liveness": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status"],
+        "properties": {
+          "status": {"type": "string", "const": "alive"}
+        }
+      },
+      "Readiness": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status"],
+        "properties": {
+          "status": {"type": "string", "enum": ["ready", "degraded", "not_ready"]}
+        }
+      },
+      "ProtocolVersion": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["major", "minor"],
+        "properties": {
+          "major": {"type": "integer", "minimum": 0, "maximum": 65535},
+          "minor": {"type": "integer", "minimum": 0, "maximum": 65535}
+        }
+      },
+      "DesktopStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "generation", "state", "reason_code"],
+        "properties": {
+          "id": {"type": "string", "format": "uuid"},
+          "generation": {"type": ["string", "null"], "format": "uuid"},
+          "state": {
+            "type": "string",
+            "enum": ["booting", "probing", "ready", "degraded", "draining", "stopped", "failed"]
+          },
+          "reason_code": {"type": ["string", "null"]}
+        }
+      },
+      "StatusResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["server_version", "protocol_min", "protocol_max", "desktop", "capabilities"],
+        "properties": {
+          "server_version": {"type": "string"},
+          "protocol_min": {"$ref": "#/components/schemas/ProtocolVersion"},
+          "protocol_max": {"$ref": "#/components/schemas/ProtocolVersion"},
+          "desktop": {"$ref": "#/components/schemas/DesktopStatus"},
+          "capabilities": {"$ref": "../../../schemas/v1/capabilities.json"}
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Malformed JSON, invalid path/query/header, strict-shape failure, or unsupported protocol major.",
+        "content": {
+          "application/problem+json": {
+            "schema": {"$ref": "../../../schemas/v1/problem.json"}
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "A valid Bearer credential is required.",
+        "headers": {
+          "WWW-Authenticate": {
+            "schema": {"type": "string", "const": "Bearer realm=\"xenoteer\""}
+          }
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {"$ref": "../../../schemas/v1/problem.json"}
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "The principal lacks the required grant, or a browser WebSocket Origin is denied.",
+        "content": {
+          "application/problem+json": {
+            "schema": {"$ref": "../../../schemas/v1/problem.json"}
+          }
+        }
+      },
+      "NotFound": {
+        "description": "The requested versioned resource does not exist or may not be disclosed.",
+        "content": {
+          "application/problem+json": {
+            "schema": {"$ref": "../../../schemas/v1/problem.json"}
+          }
+        }
+      },
+      "Conflict": {
+        "description": "Stale generation, lease conflict, command ID/content conflict, or unsafe cancellation stage.",
+        "headers": {
+          "Retry-After": {"$ref": "#/components/headers/OptionalRetryAfter"}
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {"$ref": "../../../schemas/v1/problem.json"},
+            "examples": {
+              "staleReference": {"externalValue": "./examples/problem-stale-reference.json"}
+            }
+          }
+        }
+      },
+      "PayloadTooLarge": {
+        "description": "The request body exceeds the configured ordinary-message byte limit.",
+        "content": {
+          "application/problem+json": {
+            "schema": {"$ref": "../../../schemas/v1/problem.json"}
+          }
+        }
+      },
+      "UnsupportedByTarget": {
+        "description": "The target cannot perform the structurally valid operation.",
+        "content": {
+          "application/problem+json": {
+            "schema": {"$ref": "../../../schemas/v1/problem.json"}
+          }
+        }
+      },
+      "TooManyRequests": {
+        "description": "A bounded admission slot, queue, rate limit, or quota is full.",
+        "headers": {
+          "Retry-After": {"$ref": "#/components/headers/RetryAfter"}
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {"$ref": "../../../schemas/v1/problem.json"}
+          }
+        }
+      },
+      "CapabilityUnavailable": {
+        "description": "The desktop or required subsystem is not ready.",
+        "headers": {
+          "Retry-After": {"$ref": "#/components/headers/RetryAfter"}
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {"$ref": "../../../schemas/v1/problem.json"}
+          }
+        }
+      },
+      "RequestOutcomeUnknown": {
+        "description": "The handler deadline elapsed after dispatch. This does not cancel accepted work.",
+        "content": {
+          "application/problem+json": {
+            "schema": {"$ref": "../../../schemas/v1/problem.json"},
+            "examples": {
+              "exactCommandRetry": {"externalValue": "./examples/problem-request-outcome-unknown.json"},
+              "noAutomaticRetry": {"externalValue": "./examples/problem-request-outcome-unknown-no-retry.json"}
+            }
+          }
+        }
+      }
+    }
+  }
+}

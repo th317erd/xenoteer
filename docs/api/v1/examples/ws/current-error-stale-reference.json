@@ -1,0 +1,7 @@
+{
+  "type": "error",
+  "request_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0044",
+  "code": "stale_reference",
+  "detail": "The request targets an earlier desktop generation.",
+  "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002"
+}

@@ -16,8 +16,18 @@ mock_bin=$(mktemp -d)
 trap 'rm -rf -- "$test_root" "$mock_bin"' EXIT
 export CONTAINER_TEST_UID
 export CONTAINER_TEST_GID
+export CONTAINER_TEST_DAEMON_UID
+export CONTAINER_TEST_DAEMON_GID
+export CONTAINER_TEST_BROKER_UID
+export CONTAINER_TEST_TOKEN_UID
+export CONTAINER_TEST_TOKEN_GID
 CONTAINER_TEST_UID=$(id -u)
 CONTAINER_TEST_GID=$(id -g)
+CONTAINER_TEST_DAEMON_UID=$CONTAINER_TEST_UID
+CONTAINER_TEST_DAEMON_GID=$CONTAINER_TEST_GID
+CONTAINER_TEST_BROKER_UID=$CONTAINER_TEST_UID
+CONTAINER_TEST_TOKEN_UID=$CONTAINER_TEST_UID
+CONTAINER_TEST_TOKEN_GID=$CONTAINER_TEST_GID
 
 mkdir -p "$test_root/home/xenoteer" "$test_root/workspace" "$test_root/run/secrets"
 printf '%064d' 0 >"$test_root/run/secrets/xenoteer_api_token"
@@ -37,12 +47,27 @@ cmp "$test_root/run/xenoteer/env/XENOTEER__FUTURE_SECTION__FUTURE_FIELD" \
   <(printf '%s\n' "$future_value")
 test ! -e "$test_root/run/xenoteer/env/XENOTEER_HTTP_ADDR"
 test "$(find "$test_root/run/xenoteer/env" -maxdepth 1 -type f -name 'XENOTEER_*' -printf '%f\n' | LC_ALL=C sort)" = \
-  $'XENOTEER__AUTH__TOKEN_FILE\nXENOTEER__FUTURE_SECTION__FUTURE_FIELD\nXENOTEER__LOGGING__FILTER\nXENOTEER__SERVER__LISTEN'
-test "$(stat -c '%a' "$test_root/run/user/1000")" = 700
-test "$(stat -c '%a' "$test_root/run/user/1000/at-spi")" = 700
+  $'XENOTEER__FUTURE_SECTION__FUTURE_FIELD\nXENOTEER__LOGGING__FILTER\nXENOTEER__SERVER__LISTEN'
+test ! -e "$test_root/run/xenoteer/env/XENOTEER__AUTH__TOKEN_FILE"
+test "$(stat -c '%a:%u:%g' "$test_root/run/xenoteer/api-token")" = \
+  "400:$CONTAINER_TEST_TOKEN_UID:$CONTAINER_TEST_TOKEN_GID"
+cmp "$test_root/run/secrets/xenoteer_api_token" "$test_root/run/xenoteer/api-token"
+test "$(stat -c '%a' "$test_root/run/user/1000")" = 710
+test "$(stat -c '%a' "$test_root/run/user/1000/at-spi")" = 710
 test "$(stat -c '%a' "$test_root/run/user/1000/xdg/config")" = 700
 test "$(stat -c '%a' "$test_root/run/user/1000/xdg/cache")" = 700
 test "$(stat -c '%a' "$test_root/run/user/1000/xdg/data")" = 700
+test "$(stat -c '%a' "$test_root/run/user/1001")" = 700
+test "$(stat -c '%a' "$test_root/run/user/1001/home")" = 700
+test "$(stat -c '%a' "$test_root/run/user/1001/xdg/config")" = 700
+test "$(stat -c '%a' "$test_root/run/user/1001/xdg/cache")" = 700
+test "$(stat -c '%a' "$test_root/run/user/1001/xdg/data")" = 700
+test "$(stat -c '%a:%u:%g' "$test_root/run/xenoteer/processd")" = \
+  "750:$CONTAINER_TEST_BROKER_UID:$CONTAINER_TEST_DAEMON_GID"
+test "$(stat -c '%a:%u:%g' "$test_root/run/xenoteer/bus")" = \
+  "710:$CONTAINER_TEST_UID:$CONTAINER_TEST_GID"
+test "$(stat -c '%a:%u:%g' "$test_root/run/xenoteer/bus/at-spi")" = \
+  "710:$CONTAINER_TEST_UID:$CONTAINER_TEST_GID"
 test "$(stat -c '%a' "$test_root/home/xenoteer")" = 700
 test "$(stat -c '%a' "$test_root/tmp/.X11-unix")" = 1777
 test "$(stat -c '%a' "$test_root/tmp/.ICE-unix")" = 1777
@@ -53,9 +78,9 @@ test "$(cat "$test_root/run/xenoteer/env/XDG_CONFIG_HOME")" = "$test_root/run/us
 test "$(cat "$test_root/run/xenoteer/env/XDG_CACHE_HOME")" = "$test_root/run/user/1000/xdg/cache"
 test "$(cat "$test_root/run/xenoteer/env/XDG_DATA_HOME")" = "$test_root/run/user/1000/xdg/data"
 test "$(cat "$test_root/run/xenoteer/env/DBUS_SESSION_BUS_ADDRESS")" = \
-  "unix:path=$test_root/run/user/1000/bus"
+  "unix:path=$test_root/run/xenoteer/bus/session"
 test "$(cat "$test_root/run/xenoteer/env/AT_SPI_BUS_ADDRESS")" = \
-  "unix:path=$test_root/run/user/1000/at-spi/bus_77"
+  "unix:path=$test_root/run/xenoteer/bus/at-spi/bus_77"
 test "$(cat "$test_root/run/xenoteer/env/VIEWER_ENABLED")" = 1
 test "$(cat "$test_root/run/xenoteer/env/VIEWER_REQUIRED")" = 0
 test "$(cat "$test_root/run/xenoteer/env/GTK_OVERLAY_SCROLLING")" = 0
@@ -92,11 +117,23 @@ token_path_output=$(CONTAINER_TEST_ROOT="$test_root" \
 token_path_status=$?
 set -e
 test "$token_path_status" -eq 78
-grep -Fq 'authentication token file is missing' <<<"$token_path_output"
+grep -Fq 'explicit authentication token file is missing' <<<"$token_path_output"
 if grep -Fq "$token_path_canary" <<<"$token_path_output"; then
   printf 'authentication token path leaked to diagnostics\n' >&2
   exit 1
 fi
+
+rm -f -- "$test_root/run/secrets/xenoteer_api_token" \
+  "$test_root/run/xenoteer/api-token" \
+  "$test_root/run/xenoteer/generated-api-token"
+generated_output=$(CONTAINER_TEST_ROOT="$test_root" "$runtime_init" 2>&1)
+grep -Fq 'generated API bearer token is available to root at /run/xenoteer/generated-api-token' \
+  <<<"$generated_output"
+test "$(stat -c '%a:%u:%g' "$test_root/run/xenoteer/generated-api-token")" = \
+  "400:$CONTAINER_TEST_TOKEN_UID:$CONTAINER_TEST_TOKEN_GID"
+test "$(wc -c <"$test_root/run/xenoteer/generated-api-token")" -eq 64
+grep -Eq '^[0-9a-f]{64}$' "$test_root/run/xenoteer/generated-api-token"
+cmp "$test_root/run/xenoteer/generated-api-token" "$test_root/run/xenoteer/api-token"
 
 invalid_value='single-underscore-value-canary'
 set +e
@@ -161,12 +198,21 @@ cat >"$mock_bin/xauth" <<'MOCK'
 test "$1" = -f
 auth_file=$2
 : >"$auth_file"
+printf '%s\t%s\n' "$auth_file" "$6" >>"$MOCK_XAUTH_LOG"
 exit 0
 MOCK
 chmod 0755 "$mock_bin/xauth"
 
-PATH="$mock_bin:$PATH" CONTAINER_TEST_ROOT="$test_root" "$auth_init"
+xauth_log="$test_root/xauth.log"
+: >"$xauth_log"
+PATH="$mock_bin:$PATH" MOCK_XAUTH_LOG="$xauth_log" \
+  CONTAINER_TEST_ROOT="$test_root" "$auth_init"
 test "$(stat -c '%a' "$test_root/run/user/1000/Xauthority")" = 600
+test "$(stat -c '%a' "$test_root/run/user/1001/Xauthority")" = 600
+test "$(wc -l <"$xauth_log")" -eq 2
+test "$(cut -f2 "$xauth_log" | uniq | wc -l)" -eq 1
+grep -Fq "$test_root/run/user/1000/Xauthority" "$xauth_log"
+grep -Fq "$test_root/run/user/1001/Xauthority" "$xauth_log"
 
 cat >"$mock_bin/xdpyinfo" <<'MOCK'
 #!/bin/sh
@@ -215,7 +261,7 @@ PATH="$mock_bin:$PATH" \
 MOCK_GDBUS_LOG="$gdbus_log" \
 CONTAINER_TEST_ROOT="$test_root" \
 CONTAINER_TEST_ALLOW_MISSING_SOCKET=1 \
-DBUS_SESSION_BUS_ADDRESS="unix:path=$test_root/run/user/1000/bus" \
+DBUS_SESSION_BUS_ADDRESS="unix:path=$test_root/run/xenoteer/bus/session" \
   "$probe_session_dbus"
 test "$(wc -l <"$gdbus_log")" -eq 1
 grep -Fq 'org.freedesktop.DBus.NameHasOwner org.freedesktop.DBus' "$gdbus_log"
@@ -226,8 +272,8 @@ MOCK_GDBUS_LOG="$gdbus_log" \
 CONTAINER_TEST_ROOT="$test_root" \
 CONTAINER_TEST_ALLOW_MISSING_SOCKET=1 \
 DISPLAY=:77 \
-DBUS_SESSION_BUS_ADDRESS="unix:path=$test_root/run/user/1000/bus" \
-AT_SPI_BUS_ADDRESS="unix:path=$test_root/run/user/1000/at-spi/bus_77" \
+DBUS_SESSION_BUS_ADDRESS="unix:path=$test_root/run/xenoteer/bus/session" \
+AT_SPI_BUS_ADDRESS="unix:path=$test_root/run/xenoteer/bus/at-spi/bus_77" \
   "$probe_atspi"
 test "$(wc -l <"$gdbus_log")" -eq 5
 sed -n '1p' "$gdbus_log" | grep -Fq \

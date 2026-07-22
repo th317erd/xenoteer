@@ -1,0 +1,11 @@
+{
+  "command_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0021",
+  "lifecycle": "running",
+  "effect_stage": "accepted",
+  "accepted_at": "2026-07-21T20:00:00Z",
+  "started_at": "2026-07-21T20:00:00.010Z",
+  "finished_at": null,
+  "outcome": null,
+  "error": null,
+  "warnings": []
+}

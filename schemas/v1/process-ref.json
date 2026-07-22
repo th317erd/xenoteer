@@ -1,0 +1,47 @@
+{
+  "$defs": {
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "LaunchId": {
+      "description": "Identifies one managed application launch.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A reference safe against desktop restart and Linux PID reuse.",
+  "properties": {
+    "desktop_generation": {
+      "$ref": "#/$defs/DesktopGeneration",
+      "description": "Desktop lifetime that owns the child."
+    },
+    "launch_id": {
+      "$ref": "#/$defs/LaunchId",
+      "description": "Server-generated managed launch identity."
+    },
+    "pid": {
+      "description": "Positive Linux process identifier.",
+      "format": "uint32",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "proc_start_ticks": {
+      "description": "Field 22 from `/proc/{pid}/stat`, measured in boot clock ticks.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "desktop_generation",
+    "pid",
+    "proc_start_ticks",
+    "launch_id"
+  ],
+  "title": "ProcessRef",
+  "type": "object"
+}

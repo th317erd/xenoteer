@@ -23,6 +23,7 @@ crates/xenoteer-protocol/*	Apache-2.0	crates/xenoteer-protocol/LICENSE
 crates/xenoteer-sdk/*	Apache-2.0	crates/xenoteer-sdk/LICENSE
 crates/*	BUSL-1.1	LICENSE
 deny.toml	BUSL-1.1	LICENSE
+docs/api/*	Apache-2.0	docs/api/LICENSE|docs/api/NOTICE
 docs/*	BUSL-1.1	LICENSE
 examples/*	BUSL-1.1	LICENSE
 fixtures/*	BUSL-1.1	LICENSE
@@ -30,6 +31,7 @@ plans/*	BUSL-1.1	LICENSE
 rust-toolchain.toml	BUSL-1.1	LICENSE
 rustfmt.toml	BUSL-1.1	LICENSE
 schemas/*	Apache-2.0	schemas/LICENSE
+scripts/api/*	Apache-2.0	docs/api/LICENSE|docs/api/NOTICE
 scripts/*	BUSL-1.1	LICENSE
 sdks/python/*	Apache-2.0	sdks/python/LICENSE
 sdks/rust/*	Apache-2.0	sdks/rust/LICENSE

@@ -1,0 +1,46 @@
+{
+  "capabilities": [
+    {
+      "id": "application.registered.launch",
+      "status": "available",
+      "reason_code": null,
+      "backend_version": null
+    },
+    {
+      "id": "input.keyboard.xtest",
+      "status": "available",
+      "reason_code": null,
+      "backend_version": null
+    },
+    {
+      "id": "input.pointer.smooth",
+      "status": "available",
+      "reason_code": null,
+      "backend_version": null
+    },
+    {
+      "id": "input.pointer.xtest",
+      "status": "available",
+      "reason_code": null,
+      "backend_version": null
+    },
+    {
+      "id": "input.reset.owned",
+      "status": "available",
+      "reason_code": null,
+      "backend_version": null
+    },
+    {
+      "id": "process.managed.status",
+      "status": "available",
+      "reason_code": null,
+      "backend_version": null
+    },
+    {
+      "id": "process.managed.terminate",
+      "status": "available",
+      "reason_code": null,
+      "backend_version": null
+    }
+  ]
+}

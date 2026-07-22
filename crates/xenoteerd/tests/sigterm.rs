@@ -19,7 +19,7 @@ fn sigterm_drives_graceful_daemon_shutdown() -> Result<(), Box<dyn std::error::E
     drop(reservation);
 
     let child = Command::new(env!("CARGO_BIN_EXE_xenoteerd"))
-        .args(["--listen", &address.to_string()])
+        .args(["--listen", &address.to_string(), "--insecure-disable-auth"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -54,7 +54,11 @@ fn launcher_config_environment_loads_without_entering_typed_environment()
     let address = reservation.local_addr()?;
     drop(reservation);
     let config_contents = include_str!("../../../xenoteer.example.toml")
-        .replace("127.0.0.1:8080", &address.to_string());
+        .replace("127.0.0.1:8080", &address.to_string())
+        .replace(
+            "insecure_disable_auth = false",
+            "insecure_disable_auth = true",
+        );
     let config = TestConfigFile::new(CONFIG_VALUE_CANARY, &config_contents)?;
 
     let child = Command::new(env!("CARGO_BIN_EXE_xenoteerd"))

@@ -1,0 +1,11 @@
+{
+  "protocol_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "request_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0011",
+  "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
+  "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+  "lease_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0003",
+  "ttl_ms": 30000
+}

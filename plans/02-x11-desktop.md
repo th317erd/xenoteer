@@ -86,7 +86,7 @@ Every desktop process inherits a generated environment, including:
 DISPLAY=:99
 XAUTHORITY=/run/user/1000/Xauthority
 XDG_RUNTIME_DIR=/run/user/1000
-DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+DBUS_SESSION_BUS_ADDRESS=unix:path=/run/xenoteer/bus/session
 XDG_CURRENT_DESKTOP=XFCE
 XDG_SESSION_DESKTOP=xfce
 XDG_SESSION_TYPE=x11

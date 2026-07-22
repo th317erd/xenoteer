@@ -86,14 +86,26 @@ viewer WebSocket listeners stay on loopback inside the container.
 ## Runtime identity and paths
 
 `/init` remains root so s6 can prepare state and drop privileges. Its tiny
-readiness wrappers retain access to root-owned supervision directories; the Xvfb
-and `xenoteerd` payload processes run as `xenoteer:xenoteer` (UID/GID 1000).
-Arbitrary-UID entrypoints are not supported in release one.
+readiness wrappers retain access to root-owned supervision directories. Xvfb
+and GUI payloads run as `xenoteer:xenoteer` (UID/GID 1000). `xenoteerd` runs as
+UID/GID 1001 with supplemental desktop GID 1000 for X11/D-Bus socket traversal;
+the session and accessibility buses separately admit only the reviewed desktop
+and daemon UIDs through `EXTERNAL` peer authentication. The
+root-supervised `xenoteer-processd` accepts only UID/GID 1001 over a private
+Unix socket, holds no API token, and drops registered application children to
+UID/GID 1000. Arbitrary-UID entrypoints are not supported in release one.
+AT-SPI application-private P2P sockets stay confined to UID 1000; the daemon's
+Rust adapter deliberately omits P2P and uses the central accessibility bus for
+tree, action, cache, and event traffic. This preserves the UID split without
+weakening toolkit peer authentication.
 
 | Path | Required ownership/mode | Operator action |
 |---|---|---|
 | `/run` | root, writable tmpfs | Required with a read-only root |
-| `/run/user/1000` | 1000:1000, 0700 | Created by the runtime oneshot |
+| `/run/user/1000` | 1000:1000, 0710 at initialization and toolkit-tightened to 0700 at runtime | Desktop-user runtime state; cross-identity bus sockets are kept elsewhere |
+| `/run/user/1001` | 1001:1001, 0700 | Private daemon HOME, XDG tree, and Xauthority |
+| `/run/xenoteer/bus` | 1000:1000, 0710 | Session/AT-SPI sockets shared only with supplemental GID 1000 and explicit UID policy |
+| `/run/xenoteer/processd` | 0:1001, 0750; socket 0660 | Peer-credential-authenticated process broker IPC |
 | `/tmp` | root, 1777 tmpfs | Required with a read-only root |
 | `/dev/shm` | root, 1777, >=4 GiB | Private 4 GiB shm mount used by Compose |
 | `/home/xenoteer` | 1000:1000, 0700 | Named volume by default |
@@ -121,7 +133,10 @@ is passed through to the daemon, including unknown or empty values, so its stric
 typed decoder—not an s6 allowlist—decides whether the setting is supported. The
 s6 environment files use value-plus-terminator encoding and `s6-envdir -f -L` so
 an empty value remains set and embedded/trailing newlines are preserved. Secret
-contents remain file-mounted and must never enter this environment path.
+contents and the authentication-token path must never enter this shared
+environment path. Root validates and opens the token, unlinks its tmpfs staging
+inode, hands at most 1026 bytes to the daemon on one-shot FD 9, and the daemon
+closes that descriptor immediately after loading a digest.
 
 ## Service graph and readiness
 
@@ -129,7 +144,7 @@ The Phase 2 s6-rc graph is:
 
 ```text
 runtime-directories -> desktop-profile --+
-                  \-> machine-id --------+-> xvfb -> session-dbus -> atspi -> xfce -> xenoteerd
+                  \-> machine-id --------+-> xvfb -> session-dbus -> atspi -> xfce -> xenoteer-processd -> xenoteerd
                   \-> xauthority --------+                                  \-> x0tigervnc -> websockify
 ```
 
@@ -155,17 +170,19 @@ fixing one workspace, click-to-focus, theme, fonts, DPI, layout, and locale.
 
 ## Development run
 
-Create a token file containing at least 256 random bits. A file-backed Compose
+Create a Bearer token file containing at least 32 cryptographically random
+bytes encoded as token68-safe text. The recommended command below hex-encodes
+256 random bits as 64 lowercase characters. A file-backed Compose
 secret is a bind mount: Docker Compose does not implement the service-level
 `uid`, `gid`, or `mode` settings for this source type, so Xenoteer does not
-declare them. Before startup, the host file must map to UID 1000 inside the
-container and have mode 0400 or 0600. With a rootful daemon this normally means
-host UID 1000; prepare and verify it explicitly:
+declare them. Before startup, the host file must map to UID 0 inside the
+container and have mode 0400 or 0600. With a rootful daemon this means host
+root; prepare and verify it explicitly:
 
 ```sh
-install -m 0600 -o 1000 -g 1000 /dev/null /absolute/path/to/xenoteer-token
-openssl rand -out /absolute/path/to/xenoteer-token 32
-stat -c '%u:%g %a' /absolute/path/to/xenoteer-token
+sudo install -m 0600 -o 0 -g 0 /dev/null /absolute/path/to/xenoteer-token
+sudo sh -c 'openssl rand -hex 32 > /absolute/path/to/xenoteer-token'
+sudo stat -c '%u:%g %a' /absolute/path/to/xenoteer-token
 export XENOTEER_TOKEN_FILE=/absolute/path/to/xenoteer-token
 XENOTEER_IMAGE=xenoteer:dev scripts/container/build.sh
 docker compose -f compose.dev.yml --profile dev up --no-build
@@ -176,13 +193,17 @@ The Compose files deliberately contain no `build:` stanza: they consume the
 image produced by the lock-aware wrapper, and `--no-build` prevents a direct
 Compose invocation from bypassing verified dependency/source labels.
 Startup independently requires the mounted token to be owned by container UID
-1000 with mode 0400 or 0600 and fails closed otherwise. Rootless Docker and
-user-namespace remapping translate host IDs; do not assume host UID 1000 maps to
-container UID 1000. Verify the mapping for that daemon (for example with a
+0 with mode 0400 or 0600 and fails closed otherwise. Rootless Docker and
+user-namespace remapping translate host IDs; do not assume host UID 0 maps to
+host UID 0. Verify the mapping for that daemon (for example with a
 one-off container mounting the same file) or use a deployment-specific secret
 provisioner that produces the required in-container metadata. The token contents
 must not be put in environment variables, build arguments, URLs, or command-line
-arguments. Set `DESKTOP_PROFILE=standard` only when the deterministic panel is
+arguments. When `XENOTEER__AUTH__TOKEN_FILE` is unset and the default secret is
+absent, startup generates a root-owned 0400, 64-character hex token at
+`/run/xenoteer/generated-api-token` and logs only that retrieval path. An
+explicitly configured missing path always fails closed. Set
+`DESKTOP_PROFILE=standard` only when the deterministic panel is
 required; `bare` is the default and smallest automation surface.
 
 ## Hardened candidate
@@ -197,7 +218,7 @@ docker compose \
 The overlay makes the root read-only, supplies `/run` and `/tmp` tmpfs mounts,
 drops all capabilities before adding exactly seven: five for root initialization
 and UID transition (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID`),
-`KILL` so root supervision can terminate UID-1000 payloads, and `SYS_CHROOT` for
+`KILL` so root supervision can terminate UID-1000/1001 payloads, and `SYS_CHROOT` for
 Chromium's layer-1 sandbox. It enables no-new-privileges and
 applies process/file/memory/CPU
 and log limits. `/run` deliberately remains executable because s6-overlay runs
@@ -205,7 +226,7 @@ its stage-2 process there.
 
 `CAP_KILL` is a supervision capability, not an application capability. The
 image gate boots the otherwise exact hardened profile with only `CAP_KILL`
-removed, proves Xvfb and xenoteerd are UID 1000, and then proves PID 1 cannot
+removed, proves Xvfb is UID 1000 and xenoteerd is UID 1001, then proves PID 1 cannot
 stop them before a short Docker deadline: the container is forcibly killed with
 exit 137. The complete seven-cap profile stops the same payloads cleanly with
 exit 0.
@@ -264,6 +285,7 @@ Docker-required gates:
 sudo --preserve-env=XENOTEER_IMAGE scripts/container/build.sh
 sudo docker inspect xenoteer:dev
 sudo scripts/container/test-image.sh xenoteer:dev
+sudo scripts/container/test-phase3-control-plane.sh xenoteer:dev
 sudo scripts/container/test-browser-spike.sh xenoteer:dev xenoteer:browser-spike
 sudo env XENOTEER_NOVNC_SPIKE_BASE_IMAGE=xenoteer:dev \
   scripts/container/test-novnc-spike.sh
@@ -273,12 +295,57 @@ sudo XENOTEER_IDLE_SOAK_SECONDS=1800 \
   scripts/container/test-idle-soak.sh xenoteer:dev
 ```
 
-The image test waits for healthy status, confirms PID 1 and UID 1000 payloads,
+The image test waits for healthy status, confirms PID 1 and both payload UIDs,
 performs authenticated and unauthenticated X11 tests, scans for the forbidden X11
 TCP port, verifies manifests and endpoint semantics, exercises bounded SIGTERM,
 kills each critical longrun, proves production RFB/WebSocket input and clipboard
-denial, and proves a missing secret fails closed. The
-desktop-app fixture image adds pinned GTK3, Qt6, Chromium, Firefox ESR,
+denial, and proves a missing secret fails closed.
+The Phase 3 control-plane gate resolves the supplied image to an immutable digest,
+publishes only the API on a dynamically allocated loopback port, and exercises
+authenticated least-privilege grants, lease renewal/conflict/expiry/reacquisition,
+registered-process, concurrent idempotency, disconnected-response recovery, and
+owned-input reset workflows. Launch idempotency is enforced again inside the
+root process broker, including one bounded replay after an ambiguous lost reply;
+changed content under the retained command ID is rejected. A host-side Rust SDK
+example is built with four
+low-priority jobs and must complete a real command against the same image. Its
+independent UID-1000 X11 recorder must observe multiple smooth-motion samples
+and the exact endpoint, then observe a held physical button being released by a
+lease-expiry reset; an HTTP success response alone is not accepted as input
+evidence. The gate rejects a host/image architecture mismatch before copying the
+fixture and validates its dynamic-link ABI inside the image before execution.
+It forces curl to close after complete requests but before accepting JSON
+responses, then recovers only through ledger reads for the same command IDs; the
+test never turns an ambiguous response into a new submission. Exact concurrent
+`xmessage` submissions must produce one PID/start-time/argv-correlated process
+and one PID-correlated viewable X11 window, while a changed body returns 409. A
+second container grants only `desktop:status`: status remains available while
+command observation and input control return 403. Both lanes use a root-owned
+token mount and verify graceful shutdown plus absence of their token canary from
+container logs. The script's Docker-independent `--self-test-err-trap` fault
+mode proves its error trap cannot accidentally convert a failed assertion into
+exit zero; `test-static.sh` runs that regression. This gate remains separate from
+the already broad Phase 2 image matrix.
+
+The production application registry currently contains only the shell-free
+`xmessage` profile. Consequently the live image gate cannot honestly manufacture
+an output flood, a TERM-ignoring child, or a forking leader/grandchild without
+adding privileged test behavior to the production registry. Those manager
+mechanics remain covered at the private Rust boundary by
+`output_is_drained_but_retained_only_to_the_configured_bound`,
+`terminate_carries_zero_grace_and_rejects_over_protocol_maximum`, and
+`natural_leader_exit_kills_unreaped_descendants_before_pid_release`; the live
+gate additionally proves ordinary `xmessage` TERM/reap and a globally zombie-free
+process table. Closing the remaining production black-box cases requires three
+reviewed, immutable, non-shell registered fixture profiles (bounded output,
+TERM-ignore, and fork/grandchild) or a separately built non-distributable test
+image that registers them. Output-limit assertions also require a bounded public
+or test-only broker evidence field, because release-three `ProcessView`
+intentionally exposes lifecycle/exit identity but not captured stdout/stderr.
+No Rust SDK executable is installed in the production image; the gate therefore
+uses the repository example from the host rather than claiming in-image SDK
+packaging.
+The desktop-app fixture image adds pinned GTK3, Qt6, Chromium, Firefox ESR,
 QtWebEngine, AT-SPI, and window-inspection packages without expanding the
 production boundary. Its gate exercises bare and standard process sets,
 ephemeral-profile rematerialization across a persistent-HOME restart, GTK/Qt and

@@ -7,8 +7,8 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use xenoteer_core::input::{
     ActionPurpose, ButtonDirection, CleanupAction, EffectJournal, HealthEvent, InputAction,
-    InputHealth, InputState, InputStateError, LogicalButton, PhysicalButton, ResetReason,
-    plan_cleanup,
+    InputHealth, InputState, InputStateError, LogicalButton, MoveAction, PhysicalButton,
+    ResetReason, plan_cleanup, plan_motion,
 };
 
 use crate::keyboard::{KeyIdentifier, KeyboardResolutionContext, KeyboardResolutionIntent};
@@ -28,6 +28,7 @@ use super::{
     ActionContext, ActorThreadState, CleanupReport, InputCleanupEvidence, InputEffectEvidence,
     InputFailure, InputFailureKind, InputHealthSnapshot, InputOperation, InputOutcome,
     InputOutcomeKind, KeyboardAction, KeyboardBindingEvidence, KeyboardOutcomeEvidence,
+    PointerMoveRequest,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -554,10 +555,60 @@ impl<B: InputBackend> InputEngine<B> {
     ) -> Result<InputOutcome, InputFailure> {
         match operation {
             InputOperation::Pointer(action) => self.execute(context, action, cancellation),
+            InputOperation::PointerMove(request) => {
+                self.execute_pointer_move(context, request, cancellation)
+            }
             InputOperation::Keyboard(action) => {
                 self.execute_keyboard(context, action, cancellation)
             }
         }
+    }
+
+    fn execute_pointer_move(
+        &mut self,
+        context: ActionContext,
+        request: PointerMoveRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<InputOutcome, InputFailure> {
+        let target = Some(request.target());
+        if cancellation.is_cancelled() {
+            return Err(self.failure_before(
+                context,
+                InputFailureKind::CancelledBeforeEffect,
+                target,
+            ));
+        }
+        if deadline_elapsed(context.deadline) {
+            return Err(self.failure_before(
+                context,
+                InputFailureKind::DeadlineExceededBeforeEffect,
+                target,
+            ));
+        }
+        if let Err(fault) = self.drain_events() {
+            self.apply_backend_fault(&fault);
+            return Err(self.failure_before(context, backend_public_kind(&fault), target));
+        }
+        if self.state.health() != InputHealth::Healthy {
+            return Err(self.failure_before(context, InputFailureKind::HealthRejected, target));
+        }
+        let start = match self.backend.observe_pointer() {
+            Ok(observation) => {
+                self.last_pointer = Some(observation.pointer);
+                observation.pointer
+            }
+            Err(fault) => {
+                self.apply_backend_fault(&fault);
+                return Err(self.failure_before(context, backend_public_kind(&fault), target));
+            }
+        };
+        let plan = plan_motion(start, request.target(), request.options())
+            .map_err(|_| self.failure_before(context, InputFailureKind::StateRejected, target))?;
+        self.execute(
+            context,
+            InputAction::Move(MoveAction::new(plan)),
+            cancellation,
+        )
     }
 
     fn execute_keyboard(
@@ -3135,10 +3186,11 @@ fn backend_public_kind(fault: &BackendFault) -> InputFailureKind {
 pub(super) fn requested_pointer(
     operation: &InputOperation,
 ) -> Option<xenoteer_core::domain::RootPoint> {
-    let InputOperation::Pointer(action) = operation else {
-        return None;
-    };
-    requested_pointer_action(action)
+    match operation {
+        InputOperation::Pointer(action) => requested_pointer_action(action),
+        InputOperation::PointerMove(request) => Some(request.target()),
+        InputOperation::Keyboard(_) => None,
+    }
 }
 
 fn requested_pointer_action(action: &InputAction) -> Option<xenoteer_core::domain::RootPoint> {
