@@ -1,7 +1,8 @@
 //! Length-bounded, peer-credential-authenticated broker IPC.
 
+use core::fmt;
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     fs,
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
@@ -12,7 +13,7 @@ use std::{
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -29,8 +30,9 @@ use xenoteer_protocol::{
 };
 
 use crate::process_manager::{
-    ApplicationProfile, ChildIdentity, LaunchRequest, ProcessEventReplay, ProcessExit,
-    ProcessManagerError, ProcessManagerHandle, ProcessManagerJoin, ProcessManagerLimits,
+    ApplicationProfile, ChildIdentity, LaunchRequest, ManagedPidCorrelation,
+    ManagedPidCorrelationEvidence, ProcessEventReplay, ProcessExit, ProcessManagerError,
+    ProcessManagerHandle, ProcessManagerJoin, ProcessManagerLimits,
     ProcessRef as ManagedProcessRef, ProcessStatus, SequencedProcessEvent, spawn_process_manager,
 };
 
@@ -222,6 +224,20 @@ impl BrokerState {
             .as_ref()
             .ok_or(ProcessManagerError::ProcessNotManaged)?;
         if manager.generation != process.desktop_generation {
+            return Err(ProcessManagerError::WrongDesktopGeneration);
+        }
+        Ok(manager.handle.clone())
+    }
+
+    async fn current_manager_for_generation(
+        &self,
+        generation: DesktopGeneration,
+    ) -> Result<ProcessManagerHandle, ProcessManagerError> {
+        let active = self.active.lock().await;
+        let manager = active
+            .as_ref()
+            .ok_or(ProcessManagerError::ProcessNotManaged)?;
+        if manager.generation != generation {
             return Err(ProcessManagerError::WrongDesktopGeneration);
         }
         Ok(manager.handle.clone())
@@ -440,6 +456,12 @@ async fn dispatch(request: BrokerRequest, state: &BrokerState) -> BrokerResponse
         BrokerRequest::Status { process } => status(state, process)
             .await
             .map_err(|error| BrokerErrorCode::from(&error)),
+        BrokerRequest::CorrelatePids {
+            desktop_generation,
+            pids,
+        } => correlate_pids(state, desktop_generation, pids)
+            .await
+            .map_err(|error| BrokerErrorCode::from(&error)),
         BrokerRequest::Terminate { command } => terminate(state, command)
             .await
             .map_err(|error| BrokerErrorCode::from(&error)),
@@ -449,6 +471,26 @@ async fn dispatch(request: BrokerRequest, state: &BrokerState) -> BrokerResponse
         Ok(reply) => BrokerResponse::Success { reply },
         Err(code) => BrokerResponse::Error { code },
     }
+}
+
+async fn correlate_pids(
+    state: &BrokerState,
+    desktop_generation: DesktopGeneration,
+    pids: CorrelationPids,
+) -> Result<BrokerReply, ProcessManagerError> {
+    if desktop_generation.as_uuid().is_nil() {
+        return Err(ProcessManagerError::InvalidCorrelationBatch);
+    }
+    let manager = state
+        .current_manager_for_generation(desktop_generation)
+        .await?;
+    let entries = manager
+        .correlate_pids(desktop_generation, pids.into_vec())
+        .await?
+        .into_iter()
+        .map(BrokerPidCorrelation::from)
+        .collect();
+    Ok(BrokerReply::PidCorrelations { entries })
 }
 
 async fn launch(
@@ -897,6 +939,10 @@ enum BrokerRequest {
     Status {
         process: ProtocolProcessRef,
     },
+    CorrelatePids {
+        desktop_generation: DesktopGeneration,
+        pids: CorrelationPids,
+    },
     Terminate {
         command: ProcessTerminateCommand,
     },
@@ -913,13 +959,139 @@ enum BrokerResponse {
     Error { code: BrokerErrorCode },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum BrokerReply {
     Probe,
     Process { process: ProtocolProcessRef },
     Status { process: ProcessView },
+    PidCorrelations { entries: Vec<BrokerPidCorrelation> },
     EventSubscription { replay: BrokerEventReplay },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+struct CorrelationPids(Vec<u32>);
+
+impl CorrelationPids {
+    fn new(pids: Vec<u32>) -> Result<Self, ()> {
+        if pids.is_empty() || pids.len() > crate::MAX_PROCESS_CORRELATION_PIDS {
+            return Err(());
+        }
+        let mut unique = BTreeSet::new();
+        if pids.iter().any(|pid| *pid == 0 || !unique.insert(*pid)) {
+            return Err(());
+        }
+        Ok(Self(pids))
+    }
+
+    #[cfg(test)]
+    fn as_slice(&self) -> &[u32] {
+        &self.0
+    }
+
+    fn into_vec(self) -> Vec<u32> {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for CorrelationPids {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct PidsVisitor;
+
+        impl<'de> de::Visitor<'de> for PidsVisitor {
+            type Value = CorrelationPids;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(
+                    formatter,
+                    "one to {} unique nonzero process IDs",
+                    crate::MAX_PROCESS_CORRELATION_PIDS
+                )
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: de::SeqAccess<'de>,
+            {
+                let mut pids = Vec::with_capacity(
+                    sequence
+                        .size_hint()
+                        .unwrap_or(0)
+                        .min(crate::MAX_PROCESS_CORRELATION_PIDS),
+                );
+                let mut unique = BTreeSet::new();
+                while let Some(pid) = sequence.next_element::<u32>()? {
+                    if pid == 0
+                        || pids.len() >= crate::MAX_PROCESS_CORRELATION_PIDS
+                        || !unique.insert(pid)
+                    {
+                        return Err(de::Error::invalid_value(
+                            de::Unexpected::Unsigned(u64::from(pid)),
+                            &self,
+                        ));
+                    }
+                    pids.push(pid);
+                }
+                CorrelationPids::new(pids).map_err(|()| de::Error::invalid_length(0, &self))
+            }
+        }
+
+        deserializer.deserialize_seq(PidsVisitor)
+    }
+}
+
+/// Correlation evidence for one requested live PID, preserving request order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrokerPidCorrelation {
+    /// The queried nonzero Linux PID.
+    pub pid: u32,
+    /// Typed non-authoritative manager correlation evidence.
+    pub evidence: BrokerPidCorrelationEvidence,
+}
+
+/// Typed evidence only; possession never authorizes process operations.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "match", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BrokerPidCorrelationEvidence {
+    /// PID and start time exactly matched one managed leader.
+    ManagedLeader {
+        /// Full exact generation/PID/start-time/launch identity.
+        process: ProtocolProcessRef,
+    },
+    /// Live PGID matched one uniquely verified managed process group.
+    ManagedProcessGroup {
+        /// Full exact reference for the owning managed leader.
+        process: ProtocolProcessRef,
+    },
+    /// The PID was live but did not match a managed leader or process group.
+    NoMatch,
+}
+
+impl From<ManagedPidCorrelation> for BrokerPidCorrelation {
+    fn from(value: ManagedPidCorrelation) -> Self {
+        let evidence = match value.evidence {
+            ManagedPidCorrelationEvidence::Leader(process) => {
+                BrokerPidCorrelationEvidence::ManagedLeader {
+                    process: process_to_protocol(&process),
+                }
+            }
+            ManagedPidCorrelationEvidence::ProcessGroup(process) => {
+                BrokerPidCorrelationEvidence::ManagedProcessGroup {
+                    process: process_to_protocol(&process),
+                }
+            }
+            ManagedPidCorrelationEvidence::NoMatch => BrokerPidCorrelationEvidence::NoMatch,
+        };
+        Self {
+            pid: value.pid,
+            evidence,
+        }
+    }
 }
 
 /// Stable, non-disclosing broker rejection category.
@@ -962,6 +1134,7 @@ impl From<&ProcessManagerError> for BrokerErrorCode {
             ProcessManagerError::ManagerUnavailable => Self::ManagerUnavailable,
             ProcessManagerError::Spawn { .. } => Self::SpawnFailed,
             ProcessManagerError::InvalidPrincipalId
+            | ProcessManagerError::InvalidCorrelationBatch
             | ProcessManagerError::InvalidArgumentSchema
             | ProcessManagerError::InvalidArgumentCount { .. }
             | ProcessManagerError::InvalidArgument { .. }
@@ -1170,6 +1343,35 @@ impl BrokerClient {
     ) -> Result<ProcessView, BrokerClientError> {
         match self.call(BrokerRequest::Status { process }).await? {
             BrokerReply::Status { process } => Ok(process),
+            _ => Err(BrokerClientError::UnexpectedReply),
+        }
+    }
+
+    /// Correlates a bounded set of live PIDs to managed identity evidence.
+    ///
+    /// The returned references are evidence only. Every authoritative process
+    /// operation still requires its ordinary capability and exact-reference checks.
+    pub async fn correlate_pids(
+        &self,
+        desktop_generation: DesktopGeneration,
+        pids: Vec<u32>,
+    ) -> Result<Vec<BrokerPidCorrelation>, BrokerClientError> {
+        if desktop_generation.as_uuid().is_nil() {
+            return Err(BrokerClientError::Rejected {
+                code: BrokerErrorCode::InvalidRequest,
+            });
+        }
+        let pids = CorrelationPids::new(pids).map_err(|()| BrokerClientError::Rejected {
+            code: BrokerErrorCode::InvalidRequest,
+        })?;
+        match self
+            .call(BrokerRequest::CorrelatePids {
+                desktop_generation,
+                pids,
+            })
+            .await?
+        {
+            BrokerReply::PidCorrelations { entries } => Ok(entries),
             _ => Err(BrokerClientError::UnexpectedReply),
         }
     }
@@ -1389,6 +1591,10 @@ impl BrokerClientError {
 }
 
 #[cfg(test)]
+#[path = "ipc/correlation_tests.rs"]
+mod correlation_tests;
+
+#[cfg(test)]
 mod tests {
     use std::{collections::BTreeMap, os::unix::fs::MetadataExt};
 
@@ -1468,6 +1674,29 @@ mod tests {
                 },
             )
             .await?;
+        assert_eq!(
+            client
+                .correlate_pids(generation, vec![process.pid, std::process::id()])
+                .await?,
+            vec![
+                BrokerPidCorrelation {
+                    pid: process.pid,
+                    evidence: BrokerPidCorrelationEvidence::ManagedLeader { process },
+                },
+                BrokerPidCorrelation {
+                    pid: std::process::id(),
+                    evidence: BrokerPidCorrelationEvidence::NoMatch,
+                },
+            ]
+        );
+        assert!(matches!(
+            client
+                .correlate_pids(DesktopGeneration::new(), vec![process.pid])
+                .await,
+            Err(BrokerClientError::Rejected {
+                code: BrokerErrorCode::WrongDesktopGeneration
+            })
+        ));
         assert_eq!(client.status(process).await?.state, ProcessState::Running);
         assert!(matches!(
             client

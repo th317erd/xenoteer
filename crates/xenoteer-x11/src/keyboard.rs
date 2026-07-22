@@ -431,6 +431,87 @@ pub enum KeyIdentifier {
     Raw(u8),
 }
 
+impl From<xenoteer_protocol::KeyboardNamedKey> for NamedKey {
+    fn from(value: xenoteer_protocol::KeyboardNamedKey) -> Self {
+        use xenoteer_protocol::KeyboardNamedKey as Wire;
+        match value {
+            Wire::Backspace => Self::Backspace,
+            Wire::Tab => Self::Tab,
+            Wire::Enter => Self::Enter,
+            Wire::Escape => Self::Escape,
+            Wire::Space => Self::Space,
+            Wire::Insert => Self::Insert,
+            Wire::Delete => Self::Delete,
+            Wire::Home => Self::Home,
+            Wire::End => Self::End,
+            Wire::PageUp => Self::PageUp,
+            Wire::PageDown => Self::PageDown,
+            Wire::ArrowLeft => Self::ArrowLeft,
+            Wire::ArrowUp => Self::ArrowUp,
+            Wire::ArrowRight => Self::ArrowRight,
+            Wire::ArrowDown => Self::ArrowDown,
+            Wire::Shift => Self::Shift,
+            Wire::Control => Self::Control,
+            Wire::Alt => Self::Alt,
+            Wire::Meta => Self::Meta,
+            Wire::Super => Self::Super,
+            Wire::ShiftLeft => Self::ShiftLeft,
+            Wire::ShiftRight => Self::ShiftRight,
+            Wire::ControlLeft => Self::ControlLeft,
+            Wire::ControlRight => Self::ControlRight,
+            Wire::AltLeft => Self::AltLeft,
+            Wire::AltRight => Self::AltRight,
+            Wire::MetaLeft => Self::MetaLeft,
+            Wire::MetaRight => Self::MetaRight,
+            Wire::SuperLeft => Self::SuperLeft,
+            Wire::SuperRight => Self::SuperRight,
+            Wire::HyperLeft => Self::HyperLeft,
+            Wire::HyperRight => Self::HyperRight,
+            Wire::AltGraph => Self::AltGraph,
+            Wire::CapsLock => Self::CapsLock,
+            Wire::NumLock => Self::NumLock,
+            Wire::ScrollLock => Self::ScrollLock,
+            Wire::PrintScreen => Self::PrintScreen,
+            Wire::Pause => Self::Pause,
+            Wire::ContextMenu => Self::ContextMenu,
+            Wire::F1 => Self::F1,
+            Wire::F2 => Self::F2,
+            Wire::F3 => Self::F3,
+            Wire::F4 => Self::F4,
+            Wire::F5 => Self::F5,
+            Wire::F6 => Self::F6,
+            Wire::F7 => Self::F7,
+            Wire::F8 => Self::F8,
+            Wire::F9 => Self::F9,
+            Wire::F10 => Self::F10,
+            Wire::F11 => Self::F11,
+            Wire::F12 => Self::F12,
+            Wire::F13 => Self::F13,
+            Wire::F14 => Self::F14,
+            Wire::F15 => Self::F15,
+            Wire::F16 => Self::F16,
+            Wire::F17 => Self::F17,
+            Wire::F18 => Self::F18,
+            Wire::F19 => Self::F19,
+            Wire::F20 => Self::F20,
+            Wire::F21 => Self::F21,
+            Wire::F22 => Self::F22,
+            Wire::F23 => Self::F23,
+            Wire::F24 => Self::F24,
+        }
+    }
+}
+
+impl From<xenoteer_protocol::KeyboardKeyIdentifier> for KeyIdentifier {
+    fn from(value: xenoteer_protocol::KeyboardKeyIdentifier) -> Self {
+        match value {
+            xenoteer_protocol::KeyboardKeyIdentifier::Named { name } => Self::Named(name.into()),
+            xenoteer_protocol::KeyboardKeyIdentifier::Scalar { value } => Self::Scalar(value),
+            xenoteer_protocol::KeyboardKeyIdentifier::Raw { keycode } => Self::Raw(keycode),
+        }
+    }
+}
+
 /// Semantic promise requested from the keyboard resolver.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KeyboardResolutionIntent {
@@ -941,6 +1022,13 @@ pub struct KeyboardEventDrain {
     pub events: usize,
     /// Relevant core/XKB mapping invalidations observed.
     pub mapping_invalidations: usize,
+    /// Exact structural XkbSetMap notifications emitted while Xorg initializes
+    /// its XTEST keyboard device on first keyboard use.
+    ///
+    /// This shape alone is not trusted as proof of origin. The input actor
+    /// additionally requires first-keyboard-effect ordering, a single total
+    /// invalidation, and an unchanged complete keymap fingerprint.
+    pub structural_set_map_invalidations: usize,
     /// Relevant XKB state snapshots applied.
     pub state_updates: usize,
     /// Events not owned by the keyboard model. These are counted rather than
@@ -955,6 +1043,9 @@ impl KeyboardEventDrain {
         self.mapping_invalidations = self
             .mapping_invalidations
             .saturating_add(other.mapping_invalidations);
+        self.structural_set_map_invalidations = self
+            .structural_set_map_invalidations
+            .saturating_add(other.structural_set_map_invalidations);
         self.state_updates = self.state_updates.saturating_add(other.state_updates);
         self.unrelated_events = self.unrelated_events.saturating_add(other.unrelated_events);
     }
@@ -1233,7 +1324,7 @@ mod native {
     };
 
     use x11rb::{
-        connection::Connection,
+        connection::{Connection, RequestConnection},
         protocol::{
             Event,
             xkb::{
@@ -1361,6 +1452,7 @@ mod native {
         device_id: i32,
         server_major: u16,
         server_minor: u16,
+        xkb_major_opcode: u8,
         base_event: u8,
         base_error: u8,
         modifier_side_defaults: ModifierSideDefaults,
@@ -1422,6 +1514,15 @@ mod native {
                     "server rejected the minimum XKB extension version".to_owned(),
                 ));
             }
+            let xkb_major_opcode = connection
+                .extension_information(xkb_protocol::X11_EXTENSION_NAME)
+                .map_err(|error| X11Error::Connection(error.to_string()))?
+                .ok_or_else(|| {
+                    X11Error::Keyboard(
+                        "XKB extension vanished after successful negotiation".to_owned(),
+                    )
+                })?
+                .major_opcode;
 
             // Subscribe before the first authoritative build. A checked
             // post-subscription preflight below closes the remaining window by
@@ -1467,6 +1568,7 @@ mod native {
                 device_id,
                 server_major,
                 server_minor,
+                xkb_major_opcode,
                 base_event,
                 base_error,
                 modifier_side_defaults,
@@ -1724,6 +1826,12 @@ mod native {
                     Event::MappingNotify(event)
                         if matches!(event.request, Mapping::KEYBOARD | Mapping::MODIFIER) =>
                     {
+                        tracing::debug!(
+                            request = ?event.request,
+                            first_keycode = event.first_keycode,
+                            count = event.count,
+                            "core keyboard mapping invalidation observed"
+                        );
                         self.note_core_mapping_notify(&event);
                         report.mapping_invalidations =
                             report.mapping_invalidations.saturating_add(1);
@@ -1732,11 +1840,42 @@ mod native {
                         if i32::from(event.device_id) == self.device_id
                             || i32::from(event.old_device_id) == self.device_id =>
                     {
+                        tracing::debug!(
+                            device_id = event.device_id,
+                            old_device_id = event.old_device_id,
+                            changed = ?event.changed,
+                            request_major = event.request_major,
+                            request_minor = event.request_minor,
+                            event_time = event.time,
+                            sequence = event.sequence,
+                            "XKB keyboard identity invalidation observed"
+                        );
                         self.note_new_keyboard_notify(&event);
                         report.mapping_invalidations =
                             report.mapping_invalidations.saturating_add(1);
+                        let structural_parts = NKNDetail::KEYCODES | NKNDetail::GEOMETRY;
+                        if event.device_id == event.old_device_id
+                            && i32::from(event.device_id) == self.device_id
+                            && event.min_key_code == event.old_min_key_code
+                            && event.max_key_code == event.old_max_key_code
+                            && event.changed == structural_parts
+                            && event.request_major == self.xkb_major_opcode
+                            && event.request_minor == xkb_protocol::SET_MAP_REQUEST
+                        {
+                            report.structural_set_map_invalidations =
+                                report.structural_set_map_invalidations.saturating_add(1);
+                        }
                     }
                     Event::XkbMapNotify(event) if i32::from(event.device_id) == self.device_id => {
+                        tracing::debug!(
+                            device_id = event.device_id,
+                            changed = ?event.changed,
+                            first_key_sym = event.first_key_sym,
+                            key_sym_count = event.n_key_syms,
+                            first_modifier_key = event.first_mod_map_key,
+                            modifier_key_count = event.n_mod_map_keys,
+                            "XKB keymap invalidation observed"
+                        );
                         self.note_map_notify(&event);
                         report.mapping_invalidations =
                             report.mapping_invalidations.saturating_add(1);

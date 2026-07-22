@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-for required in Xvfb xauth xdpyinfo cargo flock seq mktemp rm tr touch grep sed sleep cat; do
+for required in Xvfb xauth xdpyinfo cargo flock seq mktemp rm tr touch grep sed sleep cat timeout; do
     command -v "$required" >/dev/null 2>&1 || {
         echo "missing required command: $required" >&2
         exit 2
@@ -55,7 +55,11 @@ auth_file=$test_dir/Xauthority
 cookie=$(tr -d '-' </proc/sys/kernel/random/uuid)
 touch "$auth_file"
 xauth -f "$auth_file" add "$display" . "$cookie"
-Xvfb "$display" -screen 0 800x600x24 -dpi 96 -nolisten tcp -auth "$auth_file" \
+# Keep the isolated server alive between libtest binaries. Without -noreset,
+# Xvfb resets when the last client from one binary disconnects; the next
+# binary can then lose its opening handshake with ECONNRESET, especially when
+# two harnesses are deliberately running concurrently.
+Xvfb "$display" -screen 0 800x600x24 -dpi 96 -nolisten tcp -noreset -auth "$auth_file" \
     >"$test_dir/xvfb.log" 2>&1 &
 xvfb_pid=$!
 
@@ -81,7 +85,27 @@ fi
 
 export DISPLAY="$display"
 export XAUTHORITY="$auth_file"
-cargo test -j 4 -p xenoteer-x11 --all-features --test x11_live -- --ignored --test-threads=1
+export XENOTEER_TEST_DISPLAY="$display"
+# This harness intentionally provisions bare 800x600 Xvfb. The two named
+# integration tests require the distinct 1920x1080 Phase-2 XFCE profile and are
+# exercised by the container desktop/live-fixture gates instead.
+timeout --signal=TERM --kill-after=10s 120s \
+    cargo test -j 4 -p xenoteer-x11 --all-features --test x11_live -- \
+    --ignored --test-threads=1 \
+    --skip desktop_probe_proves_ewmh_lifecycle_workspace_and_capture \
+    --skip frame_relative_clamp_uses_live_extents_and_waits_for_quiet_geometry
+# These live capture tests are library-internal because they exercise the
+# concrete X11 backend directly. Keep them on this same authenticated, isolated
+# display and serialize them because they deliberately mutate root/window state.
+timeout --signal=TERM --kill-after=10s 120s \
+    cargo test -j 4 -p xenoteer-x11 --all-features --lib \
+    capture::x11::live_tests:: -- --ignored --test-threads=1
+# Exercise the daemon's normalized identity/query/wait boundary against the
+# same real X server. These adversarial cases deliberately reuse an XID and
+# race wait admission against MapNotify, so they remain serialized.
+timeout --signal=TERM --kill-after=10s 120s \
+    cargo test -j 4 -p xenoteerd --bin xenoteerd \
+    observation_plane::live_tests:: -- --ignored --test-threads=1
 cargo build -j 4 --manifest-path fixtures/x11/Cargo.toml
 fixtures/x11/target/debug/x11-color-bars --exit-after-expose >"$test_dir/color-bars.jsonl"
 # Keep the recorder connection (and therefore its window) alive until the

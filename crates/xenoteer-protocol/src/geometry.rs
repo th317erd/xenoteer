@@ -1,15 +1,31 @@
 //! Checked protocol geometry and coordinate-space declarations.
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 /// A signed two-dimensional point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct Point {
     x: i32,
     y: i32,
+}
+
+/// Closed request-direction point object.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "Point")]
+pub(crate) struct StrictPoint {
+    x: i32,
+    y: i32,
+}
+
+pub(crate) fn deserialize_strict_point<'de, D>(deserializer: D) -> Result<Point, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = StrictPoint::deserialize(deserializer)?;
+    Ok(Point::new(value.x, value.y))
 }
 
 impl Point {
@@ -34,7 +50,6 @@ impl Point {
 
 /// A non-empty unsigned size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct Size {
     #[schemars(range(min = 1))]
     width: u32,
@@ -73,7 +88,6 @@ impl Size {
 
 /// A signed origin and non-empty unsigned extent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct Rect {
     x: i32,
     y: i32,
@@ -81,6 +95,39 @@ pub struct Rect {
     width: u32,
     #[schemars(range(min = 1))]
     height: u32,
+}
+
+/// Closed request-direction rectangle object.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "Rect")]
+pub(crate) struct StrictRect {
+    x: i32,
+    y: i32,
+    #[schemars(range(min = 1))]
+    width: u32,
+    #[schemars(range(min = 1))]
+    height: u32,
+}
+
+impl From<StrictRect> for Rect {
+    fn from(value: StrictRect) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+            width: value.width,
+            height: value.height,
+        }
+    }
+}
+
+pub(crate) fn deserialize_optional_strict_rect<'de, D>(
+    deserializer: D,
+) -> Result<Option<Rect>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<StrictRect>::deserialize(deserializer).map(|value| value.map(Into::into))
 }
 
 impl Rect {

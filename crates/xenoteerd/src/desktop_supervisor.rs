@@ -30,6 +30,7 @@ const STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const MONITOR_INTERVAL: Duration = Duration::from_secs(5);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
 const BLOCKING_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+const VIEWER_INPUT_SETTLE_INTERVAL: Duration = Duration::from_millis(100);
 const TERMINAL_BLOCKING_EXIT_CODE: i32 = 70;
 
 /// Non-secret startup values copied from validated configuration.
@@ -92,6 +93,7 @@ pub(crate) struct DesktopSupervisorHandle {
 
 impl DesktopSupervisorHandle {
     /// Returns a child-safe cancellation signal for the HTTP shutdown future.
+    #[cfg(test)]
     pub(crate) fn cancellation(&self) -> CancellationToken {
         self.cancellation.clone()
     }
@@ -183,12 +185,37 @@ async fn run_supervisor(
         }
     };
 
+    // A complete RFB ClientInit causes X0tigervnc to initialize its XKB view
+    // and can emit a legitimate SetMap/NewKeyboardNotify after the input
+    // actor's startup probe. Drain and rebuild that generation before the
+    // actor becomes publishable or readiness becomes operational.
+    let viewer_available = optional_viewer_is_available(&spec).await;
+    let input_after_viewer = if spec.viewer_enabled && viewer_available {
+        stabilize_input_after_viewer(&runtime.input).await
+    } else {
+        probe_input(&runtime.input).await
+    };
+    if let Err(failure) = input_after_viewer {
+        tracing::error!(
+            probe = failure.code(),
+            "required input capability failed after viewer initialization"
+        );
+        readiness.transition_if_not_stopping(ReadinessSnapshot::new(
+            DesktopReadiness::Failed,
+            None,
+            Some("desktop_capability_startup_failed"),
+        ));
+        let cleanup = runtime.shutdown().await;
+        let _ignored = fatal_tx.send(());
+        cleanup?;
+        return Err(DesktopSupervisorError::RequiredCapability(failure.code()));
+    }
     input.send_replace(Some(runtime.input.clone()));
     publish_operational_readiness(
         &readiness,
         generation,
         spec.viewer_enabled,
-        optional_viewer_is_available(&spec).await,
+        viewer_available,
     );
     tracing::info!(desktop_generation = %generation, "desktop capabilities ready");
 
@@ -214,10 +241,26 @@ async fn run_supervisor(
                     cleanup?;
                     return Err(DesktopSupervisorError::RequiredCapability(failure.code()));
                 }
-                let viewer_available = probe_viewer_if_enabled(&spec).await.is_ok();
+                let viewer_available = probe_viewer_transport_if_enabled(&spec).await.is_ok();
                 if spec.viewer_required && !viewer_available {
                     let failure = ProbeFailure::Viewer;
                     tracing::error!(probe = failure.code(), "required desktop capability was lost");
+                    readiness.transition_if_not_stopping(ReadinessSnapshot::new(
+                        DesktopReadiness::Failed,
+                        Some(generation),
+                        Some("desktop_capability_lost"),
+                    ));
+                    input.send_replace(None);
+                    let cleanup = runtime.shutdown().await;
+                    let _ignored = fatal_tx.send(());
+                    cleanup?;
+                    return Err(DesktopSupervisorError::RequiredCapability(failure.code()));
+                }
+                // Keep the input actor's generation ordered after the active
+                // viewer probe for the same X0tigervnc/XKB interaction handled
+                // during startup.
+                if let Err(failure) = probe_input(&runtime.input).await {
+                    tracing::error!(probe = failure.code(), "required input capability was lost");
                     readiness.transition_if_not_stopping(ReadinessSnapshot::new(
                         DesktopReadiness::Failed,
                         Some(generation),
@@ -412,8 +455,28 @@ async fn probe_viewer_if_enabled(spec: &DesktopProbeSpec) -> Result<(), ProbeFai
     probe_websocket_rfb(
         "127.0.0.1:6080".parse().map_err(|_| ProbeFailure::Viewer)?,
         deadline,
+        ViewerProbeDepth::Full,
     )
     .await
+}
+
+async fn probe_viewer_transport_if_enabled(spec: &DesktopProbeSpec) -> Result<(), ProbeFailure> {
+    if !spec.viewer_enabled {
+        return Ok(());
+    }
+    let deadline = Instant::now() + OPERATION_TIMEOUT;
+    probe_websocket_rfb(
+        "127.0.0.1:6080".parse().map_err(|_| ProbeFailure::Viewer)?,
+        deadline,
+        ViewerProbeDepth::Transport,
+    )
+    .await
+}
+
+async fn stabilize_input_after_viewer(input: &InputActorHandle) -> Result<(), ProbeFailure> {
+    probe_input(input).await?;
+    tokio::time::sleep(VIEWER_INPUT_SETTLE_INTERVAL).await;
+    probe_input(input).await
 }
 
 async fn optional_viewer_is_available(spec: &DesktopProbeSpec) -> bool {
@@ -453,7 +516,17 @@ fn publish_operational_readiness(
     }
 }
 
-async fn probe_websocket_rfb(address: SocketAddr, deadline: Instant) -> Result<(), ProbeFailure> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ViewerProbeDepth {
+    Transport,
+    Full,
+}
+
+async fn probe_websocket_rfb(
+    address: SocketAddr,
+    deadline: Instant,
+    depth: ViewerProbeDepth,
+) -> Result<(), ProbeFailure> {
     const MAX_RESPONSE_HEADER_BYTES: usize = 4_096;
     const MAX_FRAME_PAYLOAD_BYTES: u64 = 1_048_576;
     const MAX_FRAMES: usize = 32;
@@ -503,6 +576,9 @@ Sec-WebSocket-Protocol: binary\r\n\r\n",
     .await?;
     if greeting.as_slice() != b"RFB 003.008\n" {
         return Err(ProbeFailure::Viewer);
+    }
+    if depth == ViewerProbeDepth::Transport {
+        return Ok(());
     }
     write_websocket_binary(&mut web, deadline, b"RFB 003.008\n").await?;
 
@@ -788,8 +864,8 @@ mod tests {
 
     use super::{
         DesktopProbeExpectation, DesktopProbeSpec, DesktopRuntime, DesktopSupervisorError,
-        ProbeFailure, parse_binary_setting, probe_websocket_rfb, publish_operational_readiness,
-        spawn, valid_websocket_upgrade,
+        ProbeFailure, ViewerProbeDepth, parse_binary_setting, probe_websocket_rfb,
+        publish_operational_readiness, spawn, valid_websocket_upgrade,
     };
 
     async fn read_client_binary(stream: &mut tokio::net::TcpStream) -> std::io::Result<Vec<u8>> {
@@ -954,9 +1030,58 @@ Sec-WebSocket-Protocol: binary\r\n\r\n\
         });
 
         assert!(
-            probe_websocket_rfb(address, Instant::now() + Duration::from_secs(2))
-                .await
-                .is_ok()
+            probe_websocket_rfb(
+                address,
+                Instant::now() + Duration::from_secs(2),
+                ViewerProbeDepth::Full,
+            )
+            .await
+            .is_ok()
+        );
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recurring_viewer_probe_stops_before_rfb_negotiation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut request = Vec::with_capacity(512);
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0_u8; 1];
+                stream.read_exact(&mut byte).await?;
+                request.push(byte[0]);
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 101 Switching Protocols\r\n\
+Upgrade: websocket\r\n\
+Connection: Upgrade\r\n\
+Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\
+Sec-WebSocket-Protocol: binary\r\n\r\n",
+                )
+                .await?;
+            write_server_binary(&mut stream, b"RFB 003.008\n").await?;
+            let mut client_version = [0_u8; 1];
+            if stream.read(&mut client_version).await? != 0 {
+                return Err(std::io::Error::other(
+                    "transport-only probe advanced the RFB handshake",
+                ));
+            }
+            Ok::<(), std::io::Error>(())
+        });
+
+        assert!(
+            probe_websocket_rfb(
+                address,
+                Instant::now() + Duration::from_secs(2),
+                ViewerProbeDepth::Transport,
+            )
+            .await
+            .is_ok()
         );
         server.await??;
         Ok(())

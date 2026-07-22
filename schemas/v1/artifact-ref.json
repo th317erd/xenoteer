@@ -1,0 +1,124 @@
+{
+  "$defs": {
+    "ArtifactContentType": {
+      "description": "A validated HTTP media type without attacker-controlled control characters.",
+      "maxLength": 128,
+      "minLength": 3,
+      "pattern": "^[!#$&^_.+A-Za-z0-9-]+/[!#$&^_.+A-Za-z0-9-]+(?:;[ -~]+)?$",
+      "type": "string"
+    },
+    "ArtifactId": {
+      "description": "Identifies a bounded server-side artifact.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ArtifactPurpose": {
+      "description": "Why an immutable object exists and which capability authorizes it.",
+      "oneOf": [
+        {
+          "const": "clipboard_input",
+          "description": "Private caller upload consumed only as clipboard command input.",
+          "type": "string"
+        },
+        {
+          "const": "clipboard_output",
+          "description": "Private output produced by a clipboard read.",
+          "type": "string"
+        },
+        {
+          "const": "screenshot",
+          "description": "Screenshot bytes produced by an explicit capture request.",
+          "type": "string"
+        },
+        {
+          "const": "action_trace",
+          "description": "Bounded action-trace evidence.",
+          "type": "string"
+        },
+        {
+          "const": "support_bundle",
+          "description": "Explicitly requested diagnostic support material.",
+          "type": "string"
+        }
+      ]
+    },
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase hexadecimal SHA-256 content identity.",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "Timestamp": {
+      "description": "A canonical RFC 3339 timestamp with an explicit UTC offset.",
+      "format": "date-time",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "An immutable artifact reference; possession alone never grants access.",
+  "properties": {
+    "artifact_id": {
+      "$ref": "#/$defs/ArtifactId",
+      "description": "Opaque object identifier."
+    },
+    "content_length": {
+      "description": "Exact immutable body length.",
+      "format": "uint64",
+      "maximum": 33554432,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "content_type": {
+      "$ref": "#/$defs/ArtifactContentType",
+      "description": "Validated response media type."
+    },
+    "created_at": {
+      "$ref": "#/$defs/Timestamp",
+      "description": "Publication time."
+    },
+    "desktop_generation": {
+      "$ref": "#/$defs/DesktopGeneration",
+      "description": "Exact desktop lifetime owning the object."
+    },
+    "desktop_id": {
+      "$ref": "#/$defs/DesktopId",
+      "description": "Desktop owning the object."
+    },
+    "expires_at": {
+      "$ref": "#/$defs/Timestamp",
+      "description": "Time after which the object is no longer usable."
+    },
+    "purpose": {
+      "$ref": "#/$defs/ArtifactPurpose",
+      "description": "Capability-defining object purpose."
+    },
+    "sha256": {
+      "$ref": "#/$defs/Sha256Digest",
+      "description": "Digest rechecked whenever an artifact is consumed by a command."
+    }
+  },
+  "required": [
+    "artifact_id",
+    "purpose",
+    "desktop_id",
+    "desktop_generation",
+    "content_type",
+    "content_length",
+    "sha256",
+    "created_at",
+    "expires_at"
+  ],
+  "title": "ArtifactRef",
+  "type": "object"
+}

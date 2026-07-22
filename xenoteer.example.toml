@@ -39,7 +39,44 @@ accepted_commands_per_daemon = 128
 result_ledger_entries = 10000
 result_ledger_ttl_seconds = 900
 
+[artifacts]
+root_directory = "/run/xenoteer/artifacts"
+max_object_bytes = 33554432
+max_total_bytes = 1073741824
+max_objects = 1024
+max_owner_bytes = 268435456
+max_owner_objects = 256
+max_retention_ms = 3600000
+clipboard_input_retention_ms = 900000
+upload_total_timeout_ms = 60000
+upload_idle_timeout_ms = 10000
+
+[observation]
+request_capacity = 128
+max_waiters = 128
+token_capacity = 8192
+cursor_ttl_ms = 60000
+reference_ttl_ms = 900000
+raw_request_timeout_ms = 2000
+startup_timeout_ms = 10000
+idle_poll_interval_ms = 5
+max_live_windows = 4096
+max_tombstones = 8192
+tombstone_ttl_ms = 900000
+
 [viewer]
+enabled = false
+allowed_origins = []
+backend_address = "127.0.0.1:6080"
+no_vnc_root = "/usr/share/novnc"
+ticket_capacity = 1024
+ticket_ttl_seconds = 60
+connect_timeout_ms = 3000
+write_timeout_ms = 5000
+idle_timeout_ms = 120000
+session_timeout_ms = 28800000
+maximum_frame_bytes = 8388608
+maximum_sessions = 16
 view_only = true
 
 [logging]

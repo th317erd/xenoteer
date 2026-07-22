@@ -23,10 +23,25 @@ MAX_RFB_TEXT = 1024 * 1024
 MAX_RFB_NAME = 4096
 MAX_RFB_RECTANGLES = 1024
 MAX_FRAMEBUFFER_BYTES = 16 * 1024 * 1024
+MAX_API_RESPONSE_BYTES = 1024 * 1024
+MIN_VIEWER_TICKET_BYTES = 43
+MAX_VIEWER_TICKET_BYTES = 128
+VIEWER_BINARY_PROTOCOL = "binary"
+VIEWER_TICKET_PROTOCOL_PREFIX = "xenoteer.ticket."
 
 
 class ProbeError(RuntimeError):
     """A protocol or evidence assertion failed."""
+
+
+def _extend_bounded(buffer: bytearray, payload: bytes, description: str) -> None:
+    if len(buffer) > MAX_WEBSOCKET_PAYLOAD or len(payload) > (
+        MAX_WEBSOCKET_PAYLOAD - len(buffer)
+    ):
+        raise ProbeError(
+            f"{description} exceeds {MAX_WEBSOCKET_PAYLOAD} bytes"
+        )
+    buffer.extend(payload)
 
 
 class WebSocket:
@@ -35,14 +50,15 @@ class WebSocket:
         host: str,
         port: int,
         path: str,
-        protocol: str | None = "binary",
+        protocol: str | None = VIEWER_BINARY_PROTOCOL,
         origin: str | None = "http://localhost",
+        requested_protocols: tuple[str, ...] | None = None,
     ) -> None:
         self._socket = socket.create_connection((host, port), timeout=5.0)
         self._socket.settimeout(5.0)
         self._network_buffer = bytearray()
         self._rfb_buffer = bytearray()
-        self._upgrade(host, port, path, protocol, origin)
+        self._upgrade(host, port, path, protocol, origin, requested_protocols)
 
     def _upgrade(
         self,
@@ -51,6 +67,7 @@ class WebSocket:
         path: str,
         protocol: str | None,
         origin: str | None,
+        requested_protocols: tuple[str, ...] | None,
     ) -> None:
         nonce = os.urandom(16)
         key = base64.b64encode(nonce).decode("ascii")
@@ -62,8 +79,13 @@ class WebSocket:
             f"Sec-WebSocket-Key: {key}",
             "Sec-WebSocket-Version: 13",
         ]
-        if protocol is not None:
-            request_lines.append(f"Sec-WebSocket-Protocol: {protocol}")
+        protocols = requested_protocols
+        if protocols is None:
+            protocols = () if protocol is None else (protocol,)
+        if protocols:
+            request_lines.append(
+                f"Sec-WebSocket-Protocol: {', '.join(protocols)}"
+            )
         if origin is not None:
             request_lines.append(f"Origin: {origin}")
         request = ("\r\n".join(request_lines) + "\r\n\r\n").encode("ascii")
@@ -158,16 +180,21 @@ class WebSocket:
             if opcode not in (0x1, 0x2):
                 raise ProbeError(f"unexpected WebSocket opcode {opcode}")
             if not final:
-                fragments = bytearray(payload)
+                fragments = bytearray()
+                _extend_bounded(fragments, payload, "fragmented WebSocket message")
                 while not final:
                     final, continuation, payload = self._recv_frame()
                     if continuation != 0x0:
                         raise ProbeError("invalid fragmented WebSocket message")
-                    fragments.extend(payload)
+                    _extend_bounded(
+                        fragments, payload, "fragmented WebSocket message"
+                    )
                 payload = bytes(fragments)
             return opcode, payload
 
     def recv_rfb(self, length: int) -> bytes:
+        if length < 0 or length > MAX_WEBSOCKET_PAYLOAD:
+            raise ProbeError(f"refusing bounded RFB read of {length} bytes")
         while len(self._rfb_buffer) < length:
             final, opcode, payload = self._recv_frame()
             if opcode == 0x8:
@@ -180,14 +207,15 @@ class WebSocket:
             if opcode not in (0x0, 0x2):
                 raise ProbeError(f"unexpected WebSocket opcode {opcode}")
             if not final:
-                fragments = bytearray(payload)
+                fragments = bytearray()
+                _extend_bounded(fragments, payload, "fragmented RFB message")
                 while not final:
                     final, continuation, payload = self._recv_frame()
                     if continuation != 0x0:
                         raise ProbeError("invalid fragmented binary message")
-                    fragments.extend(payload)
+                    _extend_bounded(fragments, payload, "fragmented RFB message")
                 payload = bytes(fragments)
-            self._rfb_buffer.extend(payload)
+            _extend_bounded(self._rfb_buffer, payload, "RFB receive buffer")
         value = bytes(self._rfb_buffer[:length])
         del self._rfb_buffer[:length]
         return value
@@ -200,6 +228,204 @@ class WebSocket:
 
     def set_timeout(self, timeout: float) -> None:
         self._socket.settimeout(timeout)
+
+
+def viewer_protocols(ticket_file: str | None) -> tuple[str, ...]:
+    """Build viewer protocols without accepting ticket material on argv."""
+    if ticket_file is None:
+        return (VIEWER_BINARY_PROTOCOL,)
+    ticket_bytes = pathlib.Path(ticket_file).read_bytes()
+    if ticket_bytes.endswith(b"\n"):
+        ticket_bytes = ticket_bytes[:-1]
+    if (
+        len(ticket_bytes) < MIN_VIEWER_TICKET_BYTES
+        or len(ticket_bytes) > MAX_VIEWER_TICKET_BYTES
+        or any(
+            value
+            not in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+            for value in ticket_bytes
+        )
+    ):
+        raise ProbeError("viewer ticket file is invalid")
+    ticket = ticket_bytes.decode("ascii")
+    return (
+        VIEWER_BINARY_PROTOCOL,
+        f"{VIEWER_TICKET_PROTOCOL_PREFIX}{ticket}",
+    )
+
+
+def _authenticated_api_json(
+    host: str,
+    port: int,
+    path: str,
+    origin: str,
+    authorization: str,
+    body: dict[str, object] | None = None,
+    *,
+    expected_status: int,
+) -> dict[str, object]:
+    data = None
+    headers = {
+        "Accept": "application/json",
+        "Authorization": authorization,
+        "Origin": origin,
+    }
+    if body is not None:
+        data = json.dumps(body, separators=(",", ":")).encode("ascii")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(
+        f"http://{host}:{port}{path}",
+        data=data,
+        headers=headers,
+        method="POST" if data is not None else "GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5.0) as response:
+            if response.status != expected_status:
+                raise ProbeError("authenticated viewer API returned an unexpected status")
+            payload = response.read(MAX_API_RESPONSE_BYTES + 1)
+    except (OSError, ValueError) as error:
+        raise ProbeError("authenticated viewer API request failed") from error
+    if len(payload) > MAX_API_RESPONSE_BYTES:
+        raise ProbeError("authenticated viewer API response exceeded its bound")
+    try:
+        parsed = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ProbeError("authenticated viewer API returned invalid JSON") from error
+    if not isinstance(parsed, dict):
+        raise ProbeError("authenticated viewer API returned an invalid document")
+    return parsed
+
+
+def _write_private_viewer_files(
+    files: tuple[tuple[pathlib.Path, bytes], ...],
+) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptors: list[int] = []
+    created_paths: list[pathlib.Path] = []
+    try:
+        for path, _ in files:
+            descriptor = os.open(path, flags, 0o600)
+            descriptors.append(descriptor)
+            created_paths.append(path)
+            os.fchmod(descriptor, 0o600)
+        for index, ((_, contents), descriptor) in enumerate(zip(files, descriptors)):
+            output = os.fdopen(descriptor, "wb")
+            descriptors[index] = -1
+            with output:
+                output.write(contents)
+    except (OSError, ValueError) as error:
+        for descriptor in descriptors:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        for path in created_paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise ProbeError("could not create private viewer evidence files") from error
+
+
+def mint_viewer_ticket(
+    host: str,
+    port: int,
+    origin: str,
+    api_token_file: str,
+    ticket_file: str,
+    metadata_file: str,
+) -> dict[str, object]:
+    """Mint one real ticket while keeping both bearer values out of argv/output."""
+    api_token = pathlib.Path(api_token_file).read_bytes()
+    if (
+        len(api_token) < 32
+        or len(api_token) > 1026
+        or any(value < 0x21 or value > 0x7E for value in api_token)
+    ):
+        raise ProbeError("API token file is invalid")
+    authorization = f"Bearer {api_token.decode('ascii')}"
+    status = _authenticated_api_json(
+        host,
+        port,
+        "/v1/status",
+        origin,
+        authorization,
+        expected_status=200,
+    )
+    desktop = status.get("desktop")
+    if not isinstance(desktop, dict) or desktop.get("state") != "ready":
+        raise ProbeError("authenticated viewer API desktop is not ready")
+    desktop_id = desktop.get("id")
+    desktop_generation = desktop.get("generation")
+    if not isinstance(desktop_id, str) or not isinstance(desktop_generation, str):
+        raise ProbeError("authenticated viewer API desktop identity is invalid")
+    request_body = {
+        "desktop_id": desktop_id,
+        "desktop_generation": desktop_generation,
+        "mode": "view_only",
+    }
+    ticket = _authenticated_api_json(
+        host,
+        port,
+        f"/v1/desktops/{desktop_id}/viewer-tickets",
+        origin,
+        authorization,
+        request_body,
+        expected_status=201,
+    )
+    ticket_secret = ticket.get("ticket")
+    if (
+        not isinstance(ticket_secret, str)
+        or ticket.get("desktop_id") != desktop_id
+        or ticket.get("desktop_generation") != desktop_generation
+        or ticket.get("origin") != origin
+        or ticket.get("audience") != "viewer_websocket"
+        or ticket.get("mode") != "view_only"
+        or ticket.get("use_policy") != "single_use"
+    ):
+        raise ProbeError("authenticated viewer API returned invalid ticket claims")
+    try:
+        ticket_secret_bytes = ticket_secret.encode("ascii")
+    except UnicodeEncodeError as error:
+        raise ProbeError("authenticated viewer API returned an invalid ticket") from error
+    if (
+        len(ticket_secret_bytes) < MIN_VIEWER_TICKET_BYTES
+        or len(ticket_secret_bytes) > MAX_VIEWER_TICKET_BYTES
+        or any(
+            value
+            not in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+            for value in ticket_secret_bytes
+        )
+    ):
+        raise ProbeError("authenticated viewer API returned an invalid ticket")
+    gateway_path = (
+        f"/v1/desktops/{desktop_id}/generations/"
+        f"{desktop_generation}/viewer/ws"
+    )
+    metadata_bytes = (
+        json.dumps(
+            {
+                "desktop_generation": desktop_generation,
+                "desktop_id": desktop_id,
+                "gateway_path": gateway_path,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
+    _write_private_viewer_files(
+        (
+            (pathlib.Path(ticket_file), ticket_secret_bytes + b"\n"),
+            (pathlib.Path(metadata_file), metadata_bytes),
+        )
+    )
+    return {
+        "authenticated_api": True,
+        "ticket_minted": True,
+    }
 
 
 def wait_port(host: str, port: int, timeout: float) -> None:
@@ -383,6 +609,11 @@ def run_rfb_probe(
     forbidden_server_bytes_file: str | None = None,
     resize_ready_file: str | None = None,
     resize_continue_file: str | None = None,
+    websocket_host: str = "127.0.0.1",
+    websocket_port: int = 6080,
+    websocket_path: str = "/websockify",
+    websocket_origin: str = "http://localhost",
+    gateway_ticket_file: str | None = None,
 ) -> dict[str, object]:
     if observe_seconds < 0:
         raise ProbeError("RFB observation duration cannot be negative")
@@ -397,7 +628,15 @@ def run_rfb_probe(
         forbidden_server_bytes = pathlib.Path(forbidden_server_bytes_file).read_bytes()
         if not forbidden_server_bytes or len(forbidden_server_bytes) > MAX_RFB_TEXT:
             raise ProbeError("forbidden server byte canary has an invalid length")
-    websocket = WebSocket("127.0.0.1", 6080, "/websockify")
+    protocols = viewer_protocols(gateway_ticket_file)
+    websocket = WebSocket(
+        websocket_host,
+        websocket_port,
+        websocket_path,
+        protocol=VIEWER_BINARY_PROTOCOL,
+        origin=websocket_origin,
+        requested_protocols=protocols,
+    )
     try:
         version = websocket.recv_rfb(12)
         if not version.startswith(b"RFB 003."):
@@ -659,7 +898,8 @@ def run_rfb_probe(
             "forbidden_server_bytes_sha256": hashlib.sha256(
                 forbidden_server_bytes
             ).hexdigest(),
-            "websocket_subprotocol": "binary",
+            "gateway_authenticated": gateway_ticket_file is not None,
+            "websocket_subprotocol": VIEWER_BINARY_PROTOCOL,
         }
     finally:
         websocket.close()
@@ -681,6 +921,13 @@ def main() -> int:
     chromium_parser = subparsers.add_parser("chromium")
     chromium_parser.add_argument("port", type=int)
     chromium_parser.add_argument("screenshot")
+    mint_parser = subparsers.add_parser("mint-ticket")
+    mint_parser.add_argument("--host", default="127.0.0.1")
+    mint_parser.add_argument("--port", type=int, default=8080)
+    mint_parser.add_argument("--origin", required=True)
+    mint_parser.add_argument("--api-token-file", required=True)
+    mint_parser.add_argument("--ticket-file", required=True)
+    mint_parser.add_argument("--metadata-file", required=True)
     rfb_parser = subparsers.add_parser("rfb")
     rfb_parser.add_argument("--width", type=int, default=800)
     rfb_parser.add_argument("--height", type=int, default=600)
@@ -691,6 +938,11 @@ def main() -> int:
     rfb_parser.add_argument("--forbidden-server-bytes-file")
     rfb_parser.add_argument("--resize-ready-file")
     rfb_parser.add_argument("--resize-continue-file")
+    rfb_parser.add_argument("--host", default="127.0.0.1")
+    rfb_parser.add_argument("--port", type=int, default=6080)
+    rfb_parser.add_argument("--path", default="/websockify")
+    rfb_parser.add_argument("--origin", default="http://localhost")
+    rfb_parser.add_argument("--gateway-ticket-file")
     arguments = parser.parse_args()
     if arguments.command == "wait-port":
         wait_port(arguments.host, arguments.port, arguments.timeout)
@@ -702,6 +954,20 @@ def main() -> int:
         print(
             json.dumps(
                 run_chromium_probe(arguments.port, arguments.screenshot), sort_keys=True
+            )
+        )
+    elif arguments.command == "mint-ticket":
+        print(
+            json.dumps(
+                mint_viewer_ticket(
+                    arguments.host,
+                    arguments.port,
+                    arguments.origin,
+                    arguments.api_token_file,
+                    arguments.ticket_file,
+                    arguments.metadata_file,
+                ),
+                sort_keys=True,
             )
         )
     else:
@@ -717,6 +983,11 @@ def main() -> int:
                     arguments.forbidden_server_bytes_file,
                     arguments.resize_ready_file,
                     arguments.resize_continue_file,
+                    arguments.host,
+                    arguments.port,
+                    arguments.path,
+                    arguments.origin,
+                    arguments.gateway_ticket_file,
                 ),
                 sort_keys=True,
             )

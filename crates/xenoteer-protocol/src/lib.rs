@@ -6,10 +6,16 @@
 
 #![forbid(unsafe_code)]
 
+pub mod artifact;
 pub mod capabilities;
+pub mod capture_contract;
+pub mod clipboard;
+pub mod clipboard_event;
+pub mod damage;
 pub mod envelope;
 pub mod geometry;
 pub mod ids;
+pub mod input;
 pub mod lease;
 pub mod problem;
 pub mod process;
@@ -17,22 +23,38 @@ pub mod result;
 pub mod schema;
 pub mod timestamp;
 pub mod version;
+pub mod viewer;
 pub mod websocket;
+pub mod window;
+pub mod window_control;
+pub mod window_selector;
+
+#[cfg(test)]
+mod compatibility_tests;
+#[cfg(test)]
+mod input_tests;
+
+pub use artifact::*;
 
 pub use capabilities::{
     Capability, CapabilityId, CapabilityIdError, CapabilityReport, CapabilityReportError,
     CapabilityStatus, CapabilityValidationError, MAX_CAPABILITIES,
 };
+pub use capture_contract::*;
+pub use clipboard::*;
+pub use clipboard_event::*;
+pub use damage::*;
 pub use envelope::{
     Command, CommandEnvelope, DesktopProbeCommand, EnvelopeValidationError, InputResetCommand,
-    KeyboardKeyCommand, MAX_POINTER_MOVE_DURATION_MS, MAX_XTEST_DELAY_MS, MIN_PHYSICAL_KEYCODE,
-    PointerButtonCommand, PointerCurve, PointerMoveCommand, TracePolicy,
+    KeyboardKeyCommand, MAX_XTEST_DELAY_MS, MIN_PHYSICAL_KEYCODE, PointerButtonCommand,
+    PointerMoveCommand, TracePolicy,
 };
 pub use geometry::{CoordinateSpace, GeometryError, Point, Rect, Size};
 pub use ids::{
     ArtifactId, CommandId, ConnectionId, ControlLeaseId, DesktopGeneration, DesktopId, LaunchId,
     RequestId,
 };
+pub use input::*;
 pub use lease::{
     LeaseAcquireRequest, LeaseAvailability, LeaseReleaseRequest, LeaseRenewRequest, LeaseStateView,
     LeaseValidationError, MAX_LEASE_TTL_MS,
@@ -54,6 +76,7 @@ pub use result::{
 };
 pub use timestamp::{Timestamp, TimestampError};
 pub use version::{ProtocolVersion, VersionRange};
+pub use viewer::*;
 pub use websocket::{
     ACTION_LIFECYCLE_TOPIC, COMMAND_LIFECYCLE_TOPIC, ClientHello, EventResumeRequest,
     EventResumeStatus, EventResyncReason, EventTopic, MAX_EVENT_PAYLOAD_BYTES,
@@ -62,3 +85,6 @@ pub use websocket::{
     WebSocketValidationError, WelcomeDesktop, WelcomeDesktopState, WelcomeLimits, WelcomePrincipal,
     WelcomeResume,
 };
+pub use window::*;
+pub use window_control::*;
+pub use window_selector::*;

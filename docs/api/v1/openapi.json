@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Xenoteer Control API",
-    "version": "1.0.0-phase3",
-    "description": "Implemented Phase 3 HTTP control-plane contract. Typed request and result definitions are generated from xenoteer-protocol and referenced from schemas/v1. WebSocket application messages are documented separately in websocket.md.",
+    "version": "1.0.0-phase4",
+    "description": "Implemented Phase 4 HTTP control, observation, clipboard, capture, artifact, and viewer contract. Typed request and result definitions are generated from xenoteer-protocol and referenced from schemas/v1. Control WebSocket application messages are documented separately in websocket.md.",
     "license": {
       "name": "Apache License 2.0",
       "identifier": "Apache-2.0"
@@ -35,7 +35,27 @@
     },
     {
       "name": "Commands",
-      "description": "Deduplicated generation-bound command lifecycle."
+      "description": "Deduplicated generation-bound command lifecycle. Window control, clipboard writes, and text insertion are command variants, not standalone HTTP routes."
+    },
+    {
+      "name": "Windows",
+      "description": "Generation-fenced window inventory, selectors, opaque references, and bounded waits."
+    },
+    {
+      "name": "Clipboard",
+      "description": "Bounded clipboard reads; clipboard writes are submitted as commands."
+    },
+    {
+      "name": "Screenshots",
+      "description": "Bounded root or exact-window capture into private artifacts."
+    },
+    {
+      "name": "Artifacts",
+      "description": "Purpose- and owner-authorized private artifact upload, download, range, and deletion."
+    },
+    {
+      "name": "Viewer",
+      "description": "Origin-bound one-time tickets, hardened static viewer resources, and the binary viewer gateway."
     },
     {
       "name": "WebSocket",
@@ -530,6 +550,404 @@
         }
       }
     },
+    "/v1/desktops/{desktop_id}/windows": {
+      "parameters": [
+        {"$ref": "#/components/parameters/DesktopId"}
+      ],
+      "get": {
+        "operationId": "listWindows",
+        "tags": ["Windows"],
+        "summary": "List one bounded, atomic page of windows",
+        "description": "Requires desktop:observe. The cursor is opaque and bound to the principal, generation, model revision, order, and query.",
+        "parameters": [
+          {"$ref": "#/components/parameters/DesktopGenerationQuery"},
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "integer", "format": "uint16", "minimum": 1, "maximum": 200, "default": 50}
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["creation_ascending", "creation_descending", "stacking_bottom_to_top", "stacking_top_to_bottom", "title_ascending", "title_descending", "xid_ascending"],
+              "default": "creation_ascending"
+            }
+          },
+          {"$ref": "#/components/parameters/WindowCursorQuery"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Atomic window page. Cache-Control is private, no-store.",
+            "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/window-list-page.json"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/desktops/{desktop_id}/windows/query": {
+      "parameters": [{"$ref": "#/components/parameters/DesktopId"}],
+      "post": {
+        "operationId": "queryWindows",
+        "tags": ["Windows"],
+        "summary": "Evaluate a bounded selector against one model revision",
+        "description": "Requires desktop:observe. Path and body desktop IDs must match.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/window-query-request.json"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Atomic selector result page. Cache-Control is private, no-store.",
+            "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/window-query-page.json"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/desktops/{desktop_id}/windows/resolve": {
+      "parameters": [{"$ref": "#/components/parameters/DesktopId"}],
+      "post": {
+        "operationId": "resolveWindow",
+        "tags": ["Windows"],
+        "summary": "Resolve a selector to one exact live window birth",
+        "description": "Requires desktop:observe. Ambiguous selectors fail instead of choosing an arbitrary target.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/window-resolve-request.json"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Exact resolved window and opaque reference token. Cache-Control is private, no-store.",
+            "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/window-resolve-result.json"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/desktops/{desktop_id}/windows/wait": {
+      "parameters": [{"$ref": "#/components/parameters/DesktopId"}],
+      "post": {
+        "operationId": "waitWindow",
+        "tags": ["Windows"],
+        "summary": "Wait for one bounded window predicate",
+        "description": "Requires desktop:observe. The model actor atomically checks, registers, and rechecks the predicate. Admission is bounded; timeout and resynchronization are represented in the 200 response body.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/window-wait-request.json"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Satisfied, timed-out, or resynchronization-required wait result. Cache-Control is private, no-store.",
+            "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/window-wait-result.json"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/desktops/{desktop_id}/windows/{reference_token}": {
+      "parameters": [
+        {"$ref": "#/components/parameters/DesktopId"},
+        {"$ref": "#/components/parameters/WindowReferenceToken"}
+      ],
+      "get": {
+        "operationId": "getWindowSnapshot",
+        "tags": ["Windows"],
+        "summary": "Resolve an opaque token to one exact live window snapshot",
+        "description": "Requires desktop:observe. Tokens are principal-, generation-, and exact-birth-bound and expire.",
+        "parameters": [{"$ref": "#/components/parameters/DesktopGenerationQuery"}],
+        "responses": {
+          "200": {
+            "description": "Exact snapshot and model revision. Cache-Control is private, no-store.",
+            "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/window-snapshot-result.json"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/desktops/{desktop_id}/clipboard/read": {
+      "parameters": [{"$ref": "#/components/parameters/DesktopId"}],
+      "post": {
+        "operationId": "readClipboard",
+        "tags": ["Clipboard"],
+        "summary": "Read one bounded X11 selection representation",
+        "description": "Requires clipboard:read. Text or small binary data may be inline; larger or policy-selected output is returned as a private artifact reference.",
+        "parameters": [{"$ref": "#/components/parameters/DesktopGenerationQuery"}],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/clipboard-read-request.json"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Validated clipboard result. Cache-Control is private, no-store.",
+            "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/clipboard-read-result.json"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "422": {"$ref": "#/components/responses/UnsupportedByTarget"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/desktops/{desktop_id}/screenshots": {
+      "parameters": [{"$ref": "#/components/parameters/DesktopId"}],
+      "post": {
+        "operationId": "captureScreenshot",
+        "tags": ["Screenshots"],
+        "summary": "Capture bounded root or exact-window pixels",
+        "description": "Requires capture:read. Window targets are exact birth references and are revalidated immediately before capture. Successful bytes are stored as a private screenshot artifact.",
+        "parameters": [{"$ref": "#/components/parameters/DesktopGenerationQuery"}],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/screenshot-request.json"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Capture metadata and private artifact reference. Cache-Control is private, no-store.",
+            "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/screenshot-result.json"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "422": {"$ref": "#/components/responses/UnsupportedByTarget"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/artifacts": {
+      "post": {
+        "operationId": "uploadArtifact",
+        "tags": ["Artifacts"],
+        "summary": "Stream one immutable clipboard-input artifact",
+        "description": "Requires clipboard:write. Release four accepts only purpose=clipboard_input, a single non-multipart Content-Type, an exact positive Content-Length within the clipboard-input limit, no transfer/content encoding, and an optional lowercase SHA-256 digest. The server binds the artifact to the currently ready desktop generation.",
+        "parameters": [
+          {
+            "name": "purpose",
+            "in": "query",
+            "required": true,
+            "schema": {"type": "string", "const": "clipboard_input"}
+          },
+          {"$ref": "#/components/parameters/ContentLength"},
+          {"$ref": "#/components/parameters/ContentSha256"}
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "Raw bytes with one explicit non-multipart Content-Type; this is not a JSON or multipart upload.",
+          "content": {"*/*": {"schema": {"type": "string", "format": "binary"}}}
+        },
+        "responses": {
+          "201": {
+            "description": "Private immutable artifact metadata. Location includes the required desktop scope query.",
+            "headers": {"Location": {"$ref": "#/components/headers/Location"}},
+            "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/artifact-ref.json"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/artifacts/{artifact_id}": {
+      "parameters": [
+        {"$ref": "#/components/parameters/ArtifactId"},
+        {"$ref": "#/components/parameters/DesktopIdQuery"},
+        {"$ref": "#/components/parameters/DesktopGenerationQuery"}
+      ],
+      "get": {
+        "operationId": "downloadArtifact",
+        "tags": ["Artifacts"],
+        "summary": "Stream an authorized immutable artifact or one byte range",
+        "description": "Grant requirements depend on stored purpose: clipboard:read for clipboard output, capture:read for screenshots, or artifact:read for action traces/support bundles. Clipboard-input artifacts are command inputs and are not downloadable through this route. Possession of an artifact ID grants no authority. Exactly zero or one single bytes Range header is accepted; multi-range requests are rejected with 416.",
+        "parameters": [{"$ref": "#/components/parameters/Range"}],
+        "responses": {
+          "200": {"$ref": "#/components/responses/ArtifactBody"},
+          "206": {"$ref": "#/components/responses/ArtifactPartialBody"},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "416": {"$ref": "#/components/responses/RangeNotSatisfiable"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      },
+      "delete": {
+        "operationId": "deleteArtifact",
+        "tags": ["Artifacts"],
+        "summary": "Delete an authorized artifact",
+        "description": "clipboard:write permits deletion of caller-owned clipboard input. artifact:delete permits traces/support bundles; deleting clipboard output or screenshots additionally requires the originating clipboard:read or capture:read grant. Owner/share, purpose, scope, generation, and expiry are rechecked in the private store.",
+        "responses": {
+          "204": {"description": "Artifact deleted. Cache-Control is private, no-store."},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/desktops/{desktop_id}/viewer-tickets": {
+      "parameters": [{"$ref": "#/components/parameters/DesktopId"}],
+      "post": {
+        "operationId": "issueViewerTicket",
+        "tags": ["Viewer"],
+        "summary": "Issue a short-lived, origin-bound, single-use viewer ticket",
+        "description": "Requires viewer:read and exactly one allowlisted Origin header. The returned secret is bearer material for the viewer gateway only; it must not be logged or placed in a URL.",
+        "parameters": [{"$ref": "#/components/parameters/Origin"}],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/viewer-ticket-request.json"}}}
+        },
+        "responses": {
+          "201": {
+            "description": "Single-use ticket. Cache-Control is private, no-store.",
+            "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/viewer-ticket.json"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/viewer/{desktop_id}/{desktop_generation}/": {
+      "parameters": [
+        {"$ref": "#/components/parameters/DesktopId"},
+        {"$ref": "#/components/parameters/DesktopGenerationPath"}
+      ],
+      "get": {
+        "operationId": "getViewerPage",
+        "tags": ["Viewer"],
+        "summary": "Load the hardened query-free viewer shell",
+        "description": "Public static bootstrap page for the current ready desktop lifetime. It accepts no query string and contains no ticket or long-lived credential.",
+        "security": [],
+        "responses": {
+          "200": {"description": "Hardened no-store HTML viewer shell.", "content": {"text/html": {"schema": {"type": "string"}}}},
+          "404": {"description": "Viewer disabled, route scope stale, malformed, or query string present."}
+        }
+      }
+    },
+    "/viewer/assets/viewer.css": {
+      "get": {
+        "operationId": "getViewerStylesheet",
+        "tags": ["Viewer"],
+        "summary": "Load the fixed hardened viewer stylesheet",
+        "security": [],
+        "responses": {"200": {"description": "No-store CSS.", "content": {"text/css": {"schema": {"type": "string"}}}}}
+      }
+    },
+    "/viewer/assets/viewer.mjs": {
+      "get": {
+        "operationId": "getViewerModule",
+        "tags": ["Viewer"],
+        "summary": "Load the fixed hardened viewer bootstrap module",
+        "security": [],
+        "responses": {"200": {"description": "No-store JavaScript module.", "content": {"text/javascript": {"schema": {"type": "string"}}}}}
+      }
+    },
+    "/viewer/vendor/{asset}": {
+      "x-xenoteer-axum-route": "/viewer/vendor/{*asset}",
+      "parameters": [{"$ref": "#/components/parameters/ViewerAsset"}],
+      "get": {
+        "operationId": "getViewerVendorAsset",
+        "tags": ["Viewer"],
+        "summary": "Load one allowlisted module from the pinned noVNC closure",
+        "description": "The implementation route is an Axum catch-all. Only preloaded allowlisted module paths are served; arbitrary filesystem paths are never resolved.",
+        "security": [],
+        "responses": {
+          "200": {"description": "No-store JavaScript module.", "content": {"text/javascript": {"schema": {"type": "string"}}}},
+          "404": {"description": "Viewer disabled or module is not in the fixed asset closure."}
+        }
+      }
+    },
+    "/v1/desktops/{desktop_id}/generations/{desktop_generation}/viewer/ws": {
+      "parameters": [
+        {"$ref": "#/components/parameters/DesktopId"},
+        {"$ref": "#/components/parameters/DesktopGenerationPath"},
+        {"$ref": "#/components/parameters/Origin"},
+        {"$ref": "#/components/parameters/ViewerSubprotocol"}
+      ],
+      "get": {
+        "operationId": "upgradeViewerWebSocket",
+        "tags": ["Viewer"],
+        "summary": "Consume a one-time ticket and open the binary view-only gateway",
+        "description": "This route does not accept the long-lived API Bearer credential. It requires an allowlisted Origin and exactly one binary subprotocol plus one xenoteer.ticket.<secret> subprotocol. The ticket is atomically consumed and all scope, generation, origin, audience, mode, expiry, and single-use claims are rechecked before the backend connection. Only binary frames are bridged; input, clipboard, and resize are disabled.",
+        "security": [{"viewerTicketSubprotocol": []}],
+        "responses": {
+          "101": {"description": "Switching Protocols using the binary subprotocol."},
+          "403": {"description": "Malformed upgrade, denied origin, invalid/expired/consumed ticket, stale scope, or claim mismatch. Response is content-free."},
+          "429": {"description": "Viewer or global WebSocket capacity is full. Response is content-free."},
+          "503": {"description": "Viewer gateway or backend is unavailable. Response is content-free."}
+        },
+        "x-xenoteer-viewer-protocol": "Opaque binary RFB/noVNC bridge; text frames and browser-to-desktop control are rejected."
+      }
+    },
     "/v1/ws": {
       "get": {
         "operationId": "upgradeWebSocket",
@@ -554,7 +972,13 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Exactly one Bearer credential. The token is opaque and must not be placed in URLs. A token maps to a closed subset of desktop:status, desktop:observe, input:control, application:launch, and application:terminate; omission of configured grants defaults to all five."
+        "description": "Exactly one long-lived API Bearer credential. The token is opaque and must not be placed in URLs. The closed grant vocabulary is desktop:status, desktop:observe, input:control, application:launch, application:terminate, window:control, clipboard:read, clipboard:write, capture:read, artifact:read, artifact:delete, and viewer:read. This scheme is not accepted by the viewer gateway WebSocket."
+      },
+      "viewerTicketSubprotocol": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Sec-WebSocket-Protocol",
+        "description": "A short-lived single-use viewer ticket carried only as the xenoteer.ticket.<secret> WebSocket subprotocol alongside the exact binary subprotocol. Never place the secret in a URL or log it."
       }
     },
     "parameters": {
@@ -566,6 +990,88 @@
           "type": "string",
           "format": "uuid"
         }
+      },
+      "DesktopIdQuery": {
+        "name": "desktop_id",
+        "in": "query",
+        "required": true,
+        "description": "Desktop resource to which artifact access is fenced.",
+        "schema": {"type": "string", "format": "uuid"}
+      },
+      "DesktopGenerationPath": {
+        "name": "desktop_generation",
+        "in": "path",
+        "required": true,
+        "schema": {"type": "string", "format": "uuid"}
+      },
+      "DesktopGenerationQuery": {
+        "name": "desktop_generation",
+        "in": "query",
+        "required": true,
+        "schema": {"type": "string", "format": "uuid"}
+      },
+      "WindowReferenceToken": {
+        "name": "reference_token",
+        "in": "path",
+        "required": true,
+        "description": "Opaque principal- and exact-window-birth-bound token; it is not an XID.",
+        "schema": {"type": "string", "minLength": 16, "maxLength": 1024, "pattern": "^[A-Za-z0-9_-]+$"}
+      },
+      "WindowCursorQuery": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "description": "Opaque cursor returned by the preceding list page.",
+        "schema": {"type": "string", "minLength": 16, "maxLength": 1024, "pattern": "^[A-Za-z0-9_-]+$"}
+      },
+      "ArtifactId": {
+        "name": "artifact_id",
+        "in": "path",
+        "required": true,
+        "description": "Opaque non-nil artifact identifier; possession grants no authority.",
+        "schema": {"type": "string", "format": "uuid"}
+      },
+      "ContentLength": {
+        "name": "Content-Length",
+        "in": "header",
+        "required": true,
+        "description": "Canonical positive decimal byte length, checked again while streaming.",
+        "schema": {"type": "integer", "format": "uint64", "minimum": 1, "maximum": 16777216}
+      },
+      "ContentSha256": {
+        "name": "x-content-sha256",
+        "in": "header",
+        "required": false,
+        "description": "Optional lowercase SHA-256 digest checked while streaming.",
+        "schema": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"}
+      },
+      "Range": {
+        "name": "Range",
+        "in": "header",
+        "required": false,
+        "description": "At most one bytes range: start-end, start-, or -suffix. Multiple headers or comma-separated ranges are unsatisfiable.",
+        "schema": {"type": "string", "pattern": "^bytes=(?:[0-9]+-[0-9]*|-[0-9]+)$"}
+      },
+      "Origin": {
+        "name": "Origin",
+        "in": "header",
+        "required": true,
+        "description": "Exactly one allowlisted canonical HTTP(S) browser origin.",
+        "schema": {"type": "string", "format": "uri", "maxLength": 512}
+      },
+      "ViewerSubprotocol": {
+        "name": "Sec-WebSocket-Protocol",
+        "in": "header",
+        "required": true,
+        "description": "Exactly the binary protocol and one xenoteer.ticket.<secret> protocol, with no unknown or duplicate entries.",
+        "schema": {"type": "string", "example": "binary, xenoteer.ticket.<redacted>"}
+      },
+      "ViewerAsset": {
+        "name": "asset",
+        "in": "path",
+        "required": true,
+        "description": "Relative module path within the preloaded, allowlisted noVNC asset closure.",
+        "schema": {"type": "string", "minLength": 1}
       },
       "LeaseId": {
         "name": "lease_id",
@@ -598,7 +1104,7 @@
     },
     "headers": {
       "Location": {
-        "description": "Canonical command or caller-owned lease resource.",
+        "description": "Canonical command, caller-owned lease, or private artifact resource.",
         "schema": {"type": "string"}
       },
       "RetryAfter": {
@@ -665,6 +1171,41 @@
       }
     },
     "responses": {
+      "ArtifactBody": {
+        "description": "Complete immutable artifact stream.",
+        "headers": {
+          "Content-Length": {"description": "Complete artifact length.", "schema": {"type": "integer", "format": "uint64", "minimum": 1}},
+          "x-content-sha256": {"description": "Digest of the complete immutable artifact, including for a ranged response.", "schema": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"}},
+          "Accept-Ranges": {"description": "Supported range unit.", "schema": {"type": "string", "const": "bytes"}},
+          "Content-Disposition": {"description": "Safe generated attachment filename.", "schema": {"type": "string"}},
+          "Cache-Control": {"description": "Private response prohibition on storage.", "schema": {"type": "string", "const": "private, no-store"}},
+          "X-Content-Type-Options": {"description": "Content sniffing is disabled.", "schema": {"type": "string", "const": "nosniff"}}
+        },
+        "content": {"*/*": {"schema": {"type": "string", "format": "binary"}}}
+      },
+      "ArtifactPartialBody": {
+        "description": "One satisfiable byte range from the immutable artifact.",
+        "headers": {
+          "Content-Length": {"description": "Selected range length.", "schema": {"type": "integer", "format": "uint64", "minimum": 1}},
+          "Content-Range": {"description": "Selected inclusive range and complete artifact length.", "schema": {"type": "string", "pattern": "^bytes [0-9]+-[0-9]+/[0-9]+$"}},
+          "x-content-sha256": {"description": "Digest of the complete immutable artifact, not merely the selected range.", "schema": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"}},
+          "Accept-Ranges": {"description": "Supported range unit.", "schema": {"type": "string", "const": "bytes"}},
+          "Content-Disposition": {"description": "Safe generated attachment filename.", "schema": {"type": "string"}},
+          "Cache-Control": {"description": "Private response prohibition on storage.", "schema": {"type": "string", "const": "private, no-store"}},
+          "X-Content-Type-Options": {"description": "Content sniffing is disabled.", "schema": {"type": "string", "const": "nosniff"}}
+        },
+        "content": {"*/*": {"schema": {"type": "string", "format": "binary"}}}
+      },
+      "RangeNotSatisfiable": {
+        "description": "The Range header is malformed, duplicated, multi-range, or outside the immutable object.",
+        "headers": {
+          "Content-Length": {"description": "Always zero.", "schema": {"type": "integer", "const": 0}},
+          "Content-Range": {"description": "Complete artifact length.", "schema": {"type": "string", "pattern": "^bytes \\*/[0-9]+$"}},
+          "x-content-sha256": {"description": "Digest of the complete immutable artifact.", "schema": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"}},
+          "Accept-Ranges": {"description": "Supported range unit.", "schema": {"type": "string", "const": "bytes"}},
+          "Cache-Control": {"description": "Private response prohibition on storage.", "schema": {"type": "string", "const": "private, no-store"}}
+        }
+      },
       "BadRequest": {
         "description": "Malformed JSON, invalid path/query/header, strict-shape failure, or unsupported protocol major.",
         "content": {

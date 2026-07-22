@@ -3,14 +3,31 @@
 #![forbid(unsafe_code)]
 
 mod abuse;
+mod artifacts;
 mod auth;
+#[cfg(test)]
+mod auth_input_tests;
+mod clipboard_read;
 mod control;
 mod health;
 mod limits;
+mod observation;
 mod problem;
 mod readiness;
+mod screenshot;
 mod status;
+mod viewer;
+mod viewer_gateway;
 mod websocket;
+
+#[cfg(test)]
+mod clipboard_read_tests;
+
+#[cfg(test)]
+mod screenshot_tests;
+
+#[cfg(test)]
+mod viewer_gateway_tests;
 
 use std::{future::Future, net::SocketAddr, sync::Arc};
 
@@ -27,10 +44,16 @@ use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use xenoteer_protocol::DesktopId;
 
-pub use auth::{
-    Authentication, Grant, Principal, PrincipalError, StaticTokenProvider, TokenLoadError,
-    TokenMaterialError, TokenProvider, TokenProviderError,
+pub use artifacts::{
+    ARTIFACT_SHA256_HEADER, ArtifactAccessRequest, ArtifactDownload, ArtifactFuture,
+    ArtifactPurposeSet, ArtifactRequestContext, ArtifactService, ArtifactUploadRequest,
 };
+pub use auth::{
+    Authentication, Grant, GrantRequirement, Principal, PrincipalError, StaticTokenProvider,
+    TokenLoadError, TokenMaterialError, TokenProvider, TokenProviderError,
+    command_grant_requirement,
+};
+pub use clipboard_read::{ClipboardReadFuture, ClipboardReadRequestContext, ClipboardReadService};
 pub use control::{
     CommandCancellation, CommandSubmission, CommandWait, ControlFuture, ControlPlane,
     ControlPlaneError, ControlRequestContext, EventReplay, EventSubscription, LiveEvent,
@@ -40,9 +63,93 @@ pub use limits::{
     DEFAULT_MAX_CONCURRENT_LONG_POLLS, DEFAULT_MAX_CONCURRENT_LONG_POLLS_PER_PRINCIPAL,
     TransportLimitError, TransportLimits,
 };
+pub use observation::{ObservationFuture, ObservationPlane};
 pub use readiness::{DesktopReadiness, ReadinessHandle, ReadinessSnapshot};
+pub use screenshot::{ScreenshotFuture, ScreenshotRequestContext, ScreenshotService};
 pub use status::{CapabilityProvider, StaticCapabilityProvider};
+pub use viewer::{
+    DEFAULT_VIEWER_TICKET_CAPACITY, InMemoryViewerTicketRegistry, MAX_VIEWER_TICKET_CAPACITY,
+    VIEWER_WEBSOCKET_AUDIENCE, ViewerTicketClaims, ViewerTicketClock, ViewerTicketClockReading,
+    ViewerTicketConsumeAudience, ViewerTicketConsumeRequest, ViewerTicketEntropy,
+    ViewerTicketFuture, ViewerTicketIssueContext, ViewerTicketRegistryConfig,
+    ViewerTicketRegistryError, ViewerTicketService,
+};
+pub use viewer_gateway::{
+    DEFAULT_MAX_VIEWER_SESSIONS, LoopbackWebsockifyConnector, MAX_VIEWER_FRAME_BYTES,
+    VIEWER_BINARY_PROTOCOL, VIEWER_TICKET_PROTOCOL_PREFIX, ViewerBackendConnection,
+    ViewerBackendConnector, ViewerBackendError, ViewerBackendFuture, ViewerBackendMessage,
+    ViewerGateway, ViewerGatewayConfigurationError, ViewerGatewayLimits,
+};
 pub use websocket::{AllowedOrigins, OriginPolicyError};
+
+/// Replaceable service seams composed into the authenticated API router.
+#[derive(Clone)]
+pub struct ApiServices {
+    control: Arc<dyn ControlPlane>,
+    observation: Arc<dyn ObservationPlane>,
+    artifacts: Arc<dyn ArtifactService>,
+    clipboard_reads: Arc<dyn ClipboardReadService>,
+    screenshots: Arc<dyn ScreenshotService>,
+    viewer_tickets: Arc<dyn ViewerTicketService>,
+    viewer_gateway: Option<Arc<ViewerGateway>>,
+}
+
+impl ApiServices {
+    /// Creates a service bundle while retaining the unavailable artifact default.
+    #[must_use]
+    pub fn new(control: Arc<dyn ControlPlane>, observation: Arc<dyn ObservationPlane>) -> Self {
+        Self {
+            control,
+            observation,
+            artifacts: Arc::new(artifacts::UnavailableArtifactService),
+            clipboard_reads: Arc::new(clipboard_read::UnavailableClipboardReadService),
+            screenshots: Arc::new(screenshot::UnavailableScreenshotService),
+            viewer_tickets: Arc::new(viewer::UnavailableViewerTicketService),
+            viewer_gateway: None,
+        }
+    }
+
+    /// Replaces the artifact service without changing control or observation.
+    #[must_use]
+    pub fn with_artifact_service(mut self, artifacts: Arc<dyn ArtifactService>) -> Self {
+        self.artifacts = artifacts;
+        self
+    }
+
+    /// Replaces clipboard reading without changing other service seams.
+    #[must_use]
+    pub fn with_clipboard_read_service(
+        mut self,
+        clipboard_reads: Arc<dyn ClipboardReadService>,
+    ) -> Self {
+        self.clipboard_reads = clipboard_reads;
+        self
+    }
+
+    /// Replaces screenshot capture without changing other service seams.
+    #[must_use]
+    pub fn with_screenshot_service(mut self, screenshots: Arc<dyn ScreenshotService>) -> Self {
+        self.screenshots = screenshots;
+        self
+    }
+
+    /// Replaces ticket issuance without enabling or exposing a viewer gateway.
+    #[must_use]
+    pub fn with_viewer_ticket_service(
+        mut self,
+        viewer_tickets: Arc<dyn ViewerTicketService>,
+    ) -> Self {
+        self.viewer_tickets = viewer_tickets;
+        self
+    }
+
+    /// Enables the public query-free viewer page and WebSocket gateway.
+    #[must_use]
+    pub fn with_viewer_gateway(mut self, viewer_gateway: Arc<ViewerGateway>) -> Self {
+        self.viewer_gateway = Some(viewer_gateway);
+        self
+    }
+}
 
 #[derive(Clone)]
 struct ApiState {
@@ -52,6 +159,7 @@ struct ApiState {
     limits: TransportLimits,
     origins: AllowedOrigins,
     control: control::SharedControlPlane,
+    observation: observation::SharedObservationPlane,
     abuse: abuse::AbuseControls,
     long_polls: limits::LongPollAdmission,
 }
@@ -94,6 +202,60 @@ pub fn api_router_with_control(
     origins: AllowedOrigins,
     control: Arc<dyn ControlPlane>,
 ) -> Router {
+    api_router_with_planes(
+        readiness,
+        desktop_id,
+        authentication,
+        capabilities,
+        limits,
+        origins,
+        control,
+        Arc::new(observation::UnavailableObservationPlane),
+    )
+}
+
+/// Builds the authenticated API with replaceable control and observation actors.
+#[allow(clippy::too_many_arguments)]
+pub fn api_router_with_planes(
+    readiness: ReadinessHandle,
+    desktop_id: DesktopId,
+    authentication: Authentication,
+    capabilities: impl CapabilityProvider,
+    limits: TransportLimits,
+    origins: AllowedOrigins,
+    control: Arc<dyn ControlPlane>,
+    observation: Arc<dyn ObservationPlane>,
+) -> Router {
+    api_router_with_services(
+        readiness,
+        desktop_id,
+        authentication,
+        capabilities,
+        limits,
+        origins,
+        ApiServices::new(control, observation),
+    )
+}
+
+/// Builds the authenticated API with every Phase-4 service seam replaceable.
+pub fn api_router_with_services(
+    readiness: ReadinessHandle,
+    desktop_id: DesktopId,
+    authentication: Authentication,
+    capabilities: impl CapabilityProvider,
+    limits: TransportLimits,
+    origins: AllowedOrigins,
+    services: ApiServices,
+) -> Router {
+    let ApiServices {
+        control,
+        observation,
+        artifacts,
+        clipboard_reads,
+        screenshots,
+        viewer_tickets,
+        viewer_gateway,
+    } = services;
     let abuse = abuse::AbuseControls::new();
     let state = ApiState {
         readiness: readiness.clone(),
@@ -102,14 +264,23 @@ pub fn api_router_with_control(
         limits,
         origins,
         control,
+        observation,
         abuse: abuse.clone(),
         long_polls: limits::LongPollAdmission::new(limits),
     };
+    let public_viewer = viewer_gateway::routes(viewer_tickets.clone(), viewer_gateway)
+        .layer(middleware::from_fn(assign_request_id))
+        .with_state(state.clone());
     let versioned = Router::new()
         .route("/v1/status", get(status::status))
         .route("/v1/capabilities", get(status::capabilities))
         .route("/v1/ws", get(websocket::upgrade))
         .merge(control::routes())
+        .merge(observation::routes())
+        .merge(artifacts::routes(artifacts))
+        .merge(clipboard_read::routes(clipboard_reads))
+        .merge(screenshot::routes(screenshots))
+        .merge(viewer::routes(viewer_tickets))
         .fallback(status::not_found)
         .layer(DefaultBodyLimit::max(limits.max_body_bytes()))
         .layer(middleware::from_fn_with_state(
@@ -120,12 +291,16 @@ pub fn api_router_with_control(
             limits::AdmissionControl::new(limits),
             limits::enforce,
         ))
+        .layer(middleware::from_fn(
+            artifacts::preserve_upload_content_length,
+        ))
         .layer(middleware::from_fn(assign_request_id))
         .with_state(state);
 
     with_trace(
         Router::new()
             .merge(health_routes(readiness))
+            .merge(public_viewer)
             .merge(versioned),
     )
 }

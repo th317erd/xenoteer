@@ -12,6 +12,7 @@ Build the current production image first, then build the fixture image:
 sudo scripts/container/build.sh
 sudo scripts/container/build-desktop-app-fixture.sh
 sudo scripts/container/test-desktop-app-image.sh xenoteer:desktop-apps-test
+sudo scripts/container/test-phase4-live-fixtures.py xenoteer:desktop-apps-test
 ```
 
 Both builds use the Debian snapshot recorded in `container/locks/release.lock`.
@@ -73,3 +74,21 @@ consumed. This distinguishes safe profile isolation from destructive HOME
 cleanup. Run `scripts/container/test-runtime-profiles.sh` for the image-free
 materialization/profile/Compose contract before paying the cost of the live
 matrix.
+
+The separate Phase 4 live-API gate keeps this already broad Phase 2 matrix from
+growing further. It starts one two-CPU container from the same derived image and
+requires GTK3, Qt6, Chromium, Firefox ESR, and QtWebEngine. Through authenticated
+`xenoteerd` routes it proves direct and ICCCM INCR clipboard reads, inline and
+artifact-backed selection ownership, application paste with value-copy restore,
+window list/query/resolve/snapshot plus representative xfwm4 operations, and
+root/window PNG capture through private artifact range/download/delete. The two
+small AT-SPI/GTK helpers emit only content length and digest evidence; expected
+clipboard and text bodies are never printed. Every named fixture is mandatory,
+so a stale fixture image or unavailable application fails rather than skipping.
+
+The fixture image should normally be rebuilt from the current production image
+before this gate runs. For local diagnosis of an intentionally stale cached
+fixture layer, `XENOTEERD_BINARY_OVERRIDE` may name an executable current
+`xenoteerd` binary; the runner mounts that single binary read-only and still
+requires every desktop fixture. CI and release qualification must use a
+coherent freshly derived image and leave this override unset.

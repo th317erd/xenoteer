@@ -68,6 +68,8 @@ test "$(stat -c '%a:%u:%g' "$test_root/run/xenoteer/bus")" = \
   "710:$CONTAINER_TEST_UID:$CONTAINER_TEST_GID"
 test "$(stat -c '%a:%u:%g' "$test_root/run/xenoteer/bus/at-spi")" = \
   "710:$CONTAINER_TEST_UID:$CONTAINER_TEST_GID"
+test "$(stat -c '%a:%u:%g' "$test_root/run/xenoteer/artifacts")" = \
+  "700:$CONTAINER_TEST_DAEMON_UID:$CONTAINER_TEST_DAEMON_GID"
 test "$(stat -c '%a' "$test_root/home/xenoteer")" = 700
 test "$(stat -c '%a' "$test_root/tmp/.X11-unix")" = 1777
 test "$(stat -c '%a' "$test_root/tmp/.ICE-unix")" = 1777

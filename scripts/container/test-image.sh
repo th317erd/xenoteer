@@ -334,7 +334,9 @@ assert_logs_contain "$startup_crash" \
   'the upward-transaction shutdown fallback diagnostic'
 assert_logs_exclude "$startup_crash" "$token_canary" 'authentication token contents'
 
-start_container "$container_name"
+start_container "$container_name" \
+  --env XENOTEER__VIEWER__ENABLED=true \
+  --env 'XENOTEER__VIEWER__ALLOWED_ORIGINS=["http://127.0.0.1:8080"]'
 wait_running_probe "$container_name"
 
 test "$(docker inspect "$container_name" --format '{{json .Config.Entrypoint}}')" = '["/init"]'
@@ -366,6 +368,7 @@ docker exec "$container_name" sh -eu -c '
   test "$(stat -c %a:%u:%g /run/user/1001/xdg/config)" = 700:1001:1001
   test "$(stat -c %a:%u:%g /run/user/1001/xdg/cache)" = 700:1001:1001
   test "$(stat -c %a:%u:%g /run/user/1001/xdg/data)" = 700:1001:1001
+  test "$(stat -c %a:%u:%g /run/xenoteer/artifacts)" = 700:1001:1001
   test "$(stat -c %a:%u:%g /run/xenoteer/processd)" = 750:0:1001
   test "$(stat -c %a:%u:%g /run/xenoteer/processd/broker.sock)" = 660:0:1001
   /command/s6-setuidgid xenoteerd /usr/local/bin/xenoteer-processd --probe

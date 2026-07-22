@@ -1,6 +1,7 @@
 //! Typed, precedence-aware, fail-closed configuration.
 
 use std::{
+    collections::BTreeSet,
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
@@ -9,7 +10,9 @@ use std::{
 use serde::Deserialize;
 use thiserror::Error;
 use toml::{Table, Value};
-use xenoteer_protocol::MAX_XTEST_DELAY_MS;
+use xenoteer_protocol::{
+    MAX_VIEWER_TICKET_TTL_SECONDS, MAX_WINDOW_PAGE_LIMIT, MAX_XTEST_DELAY_MS, ViewerOrigin,
+};
 
 /// Environment-variable prefix. Nested fields use a double underscore.
 pub const ENV_PREFIX: &str = "XENOTEER__";
@@ -27,13 +30,42 @@ pub const MAX_RESULT_LEDGER_ENTRIES: usize = 10_000;
 pub const MAX_DEFAULT_ACTION_TIMEOUT_MS: u64 = 305_000;
 /// Hard ceiling for retaining recent in-memory command results.
 pub const MAX_RESULT_LEDGER_TTL_SECONDS: u64 = 900;
-/// Closed release-three authorization grant vocabulary.
-pub const AUTHORIZATION_GRANTS: [&str; 5] = [
+/// Hard ceiling for artifact upload wall-clock duration.
+pub const MAX_ARTIFACT_UPLOAD_TOTAL_TIMEOUT_MS: u64 = 300_000;
+/// Hard ceiling for artifact upload silence between body chunks.
+pub const MAX_ARTIFACT_UPLOAD_IDLE_TIMEOUT_MS: u64 = 60_000;
+/// Hard ceiling for daemon observation request and waiter lanes.
+pub const MAX_OBSERVATION_QUEUE_CAPACITY: usize = 4_096;
+/// Hard ceiling for opaque cursor/reference claims retained in memory.
+pub const MAX_OBSERVATION_TOKEN_CAPACITY: usize = 1_048_576;
+/// Hard ceiling for simultaneous unexpired one-time viewer tickets.
+pub const MAX_VIEWER_TICKET_CAPACITY: usize = 16_384;
+/// Hard ceiling for viewer backend connection establishment.
+pub const MAX_VIEWER_CONNECT_TIMEOUT_MS: u64 = 30_000;
+/// Hard ceiling for one viewer backend or browser write.
+pub const MAX_VIEWER_WRITE_TIMEOUT_MS: u64 = 30_000;
+/// Hard ceiling for viewer session inactivity.
+pub const MAX_VIEWER_IDLE_TIMEOUT_MS: u64 = 60 * 60 * 1_000;
+/// Hard ceiling for one viewer session lifetime.
+pub const MAX_VIEWER_SESSION_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1_000;
+/// Hard ceiling for one viewer WebSocket frame or reassembled message.
+pub const MAX_VIEWER_FRAME_BYTES: usize = 8 * 1_024 * 1_024;
+/// Hard ceiling for simultaneous viewer sessions.
+pub const MAX_VIEWER_SESSIONS: usize = 64;
+/// Closed release-four authorization grant vocabulary.
+pub const AUTHORIZATION_GRANTS: [&str; 12] = [
     "desktop:status",
     "desktop:observe",
     "input:control",
     "application:launch",
     "application:terminate",
+    "window:control",
+    "clipboard:read",
+    "clipboard:write",
+    "capture:read",
+    "artifact:read",
+    "artifact:delete",
+    "viewer:read",
 ];
 
 /// Complete immutable daemon configuration.
@@ -45,6 +77,8 @@ pub struct Config {
     desktop: DesktopConfig,
     input: InputConfig,
     limits: LimitsConfig,
+    artifacts: ArtifactConfig,
+    observation: ObservationConfig,
     viewer: ViewerConfig,
     logging: LoggingConfig,
 }
@@ -117,7 +151,7 @@ impl Config {
         {
             issues.push(ValidationIssue::new(
                 "auth.grants",
-                "authorization grants must be unique members of the closed release-three vocabulary",
+                "authorization grants must be unique members of the closed release-four vocabulary",
             ));
         }
         if self.server.request_body_limit_bytes == 0
@@ -285,10 +319,241 @@ impl Config {
                 "result ledger TTL must be between 1 and 900 seconds",
             ));
         }
+        if self.artifacts.root_directory.as_os_str().is_empty()
+            || !self.artifacts.root_directory.is_absolute()
+            || self.artifacts.root_directory == Path::new("/")
+        {
+            issues.push(ValidationIssue::new(
+                "artifacts.root_directory",
+                "artifact root must be a non-root absolute path",
+            ));
+        }
+        if self.artifacts.max_object_bytes == 0
+            || self.artifacts.max_object_bytes > self.artifacts.max_total_bytes
+            || self.artifacts.max_object_bytes > self.artifacts.max_owner_bytes
+        {
+            issues.push(ValidationIssue::new(
+                "artifacts.max_object_bytes",
+                "artifact object bytes must be non-zero and fit total and owner quotas",
+            ));
+        }
+        if self.artifacts.max_total_bytes == 0
+            || self.artifacts.max_owner_bytes == 0
+            || self.artifacts.max_owner_bytes > self.artifacts.max_total_bytes
+        {
+            issues.push(ValidationIssue::new(
+                "artifacts.max_total_bytes",
+                "artifact total and owner byte quotas must be non-zero and ordered",
+            ));
+        }
+        if self.artifacts.max_objects == 0
+            || self.artifacts.max_owner_objects == 0
+            || self.artifacts.max_owner_objects > self.artifacts.max_objects
+        {
+            issues.push(ValidationIssue::new(
+                "artifacts.max_objects",
+                "artifact total and owner object quotas must be non-zero and ordered",
+            ));
+        }
+        if self.artifacts.max_retention_ms == 0
+            || self.artifacts.clipboard_input_retention_ms == 0
+            || self.artifacts.clipboard_input_retention_ms > self.artifacts.max_retention_ms
+        {
+            issues.push(ValidationIssue::new(
+                "artifacts.clipboard_input_retention_ms",
+                "clipboard retention must be non-zero and fit store retention",
+            ));
+        }
+        if self.artifacts.upload_total_timeout_ms == 0
+            || self.artifacts.upload_total_timeout_ms > MAX_ARTIFACT_UPLOAD_TOTAL_TIMEOUT_MS
+        {
+            issues.push(ValidationIssue::new(
+                "artifacts.upload_total_timeout_ms",
+                "artifact upload total timeout must be between 1 and 300000 ms",
+            ));
+        }
+        if self.artifacts.upload_idle_timeout_ms == 0
+            || self.artifacts.upload_idle_timeout_ms > MAX_ARTIFACT_UPLOAD_IDLE_TIMEOUT_MS
+            || self.artifacts.upload_idle_timeout_ms > self.artifacts.upload_total_timeout_ms
+        {
+            issues.push(ValidationIssue::new(
+                "artifacts.upload_idle_timeout_ms",
+                "artifact upload idle timeout must be non-zero, at most 60000 ms, and no greater than total timeout",
+            ));
+        }
+        if self.observation.request_capacity == 0
+            || self.observation.request_capacity > MAX_OBSERVATION_QUEUE_CAPACITY
+        {
+            issues.push(ValidationIssue::new(
+                "observation.request_capacity",
+                "observation request capacity must be between 1 and 4096",
+            ));
+        }
+        if self.observation.max_waiters == 0
+            || self.observation.max_waiters > MAX_OBSERVATION_QUEUE_CAPACITY
+        {
+            issues.push(ValidationIssue::new(
+                "observation.max_waiters",
+                "observation waiter capacity must be between 1 and 4096",
+            ));
+        }
+        if self.observation.token_capacity < usize::from(MAX_WINDOW_PAGE_LIMIT)
+            || self.observation.token_capacity > MAX_OBSERVATION_TOKEN_CAPACITY
+        {
+            issues.push(ValidationIssue::new(
+                "observation.token_capacity",
+                "observation token capacity must cover one maximum page and not exceed 1048576",
+            ));
+        }
+        for (path, value, maximum) in [
+            (
+                "observation.cursor_ttl_ms",
+                self.observation.cursor_ttl_ms,
+                86_400_000,
+            ),
+            (
+                "observation.reference_ttl_ms",
+                self.observation.reference_ttl_ms,
+                86_400_000,
+            ),
+            (
+                "observation.raw_request_timeout_ms",
+                self.observation.raw_request_timeout_ms,
+                60_000,
+            ),
+            (
+                "observation.startup_timeout_ms",
+                self.observation.startup_timeout_ms,
+                60_000,
+            ),
+            (
+                "observation.idle_poll_interval_ms",
+                self.observation.idle_poll_interval_ms,
+                1_000,
+            ),
+            (
+                "observation.tombstone_ttl_ms",
+                self.observation.tombstone_ttl_ms,
+                86_400_000,
+            ),
+        ] {
+            if value == 0 || value > maximum {
+                issues.push(ValidationIssue::new(
+                    path,
+                    "observation duration must be non-zero and within its hard ceiling",
+                ));
+            }
+        }
+        if self.observation.max_live_windows == 0 || self.observation.max_live_windows > 4_096 {
+            issues.push(ValidationIssue::new(
+                "observation.max_live_windows",
+                "live window capacity must be between 1 and 4096",
+            ));
+        }
+        if self.observation.max_tombstones == 0 || self.observation.max_tombstones > 1_048_576 {
+            issues.push(ValidationIssue::new(
+                "observation.max_tombstones",
+                "window tombstone capacity must be between 1 and 1048576",
+            ));
+        }
         if !self.viewer.view_only {
             issues.push(ValidationIssue::new(
                 "viewer.view_only",
                 "release one requires server-side view-only viewer input",
+            ));
+        }
+        let canonical_origins = self
+            .viewer
+            .allowed_origins
+            .iter()
+            .filter_map(|origin| ViewerOrigin::new(origin.clone()).ok())
+            .map(|origin| origin.as_str().to_owned())
+            .collect::<BTreeSet<_>>();
+        if (self.viewer.enabled && self.viewer.allowed_origins.is_empty())
+            || canonical_origins.len() != self.viewer.allowed_origins.len()
+        {
+            issues.push(ValidationIssue::new(
+                "viewer.allowed_origins",
+                "enabled viewer origins must be non-empty, unique, canonical exact HTTP(S) origins",
+            ));
+        }
+        if !self.viewer.backend_address.ip().is_loopback()
+            || self.viewer.backend_address.port() == 0
+        {
+            issues.push(ValidationIssue::new(
+                "viewer.backend_address",
+                "viewer backend must be an explicit nonzero loopback socket",
+            ));
+        }
+        if self.viewer.no_vnc_root.as_os_str().is_empty()
+            || !self.viewer.no_vnc_root.is_absolute()
+            || self.viewer.no_vnc_root == Path::new("/")
+        {
+            issues.push(ValidationIssue::new(
+                "viewer.no_vnc_root",
+                "noVNC asset root must be a non-root absolute path",
+            ));
+        }
+        if self.viewer.ticket_capacity == 0
+            || self.viewer.ticket_capacity > MAX_VIEWER_TICKET_CAPACITY
+        {
+            issues.push(ValidationIssue::new(
+                "viewer.ticket_capacity",
+                "viewer ticket capacity must be between 1 and 16384",
+            ));
+        }
+        if self.viewer.ticket_ttl_seconds == 0
+            || i128::from(self.viewer.ticket_ttl_seconds) > MAX_VIEWER_TICKET_TTL_SECONDS
+        {
+            issues.push(ValidationIssue::new(
+                "viewer.ticket_ttl_seconds",
+                "viewer ticket TTL must be between 1 and 60 seconds",
+            ));
+        }
+        if self.viewer.connect_timeout_ms == 0
+            || self.viewer.connect_timeout_ms > MAX_VIEWER_CONNECT_TIMEOUT_MS
+        {
+            issues.push(ValidationIssue::new(
+                "viewer.connect_timeout_ms",
+                "viewer connect timeout must be between 1 and 30000 ms",
+            ));
+        }
+        if self.viewer.write_timeout_ms == 0
+            || self.viewer.write_timeout_ms > MAX_VIEWER_WRITE_TIMEOUT_MS
+        {
+            issues.push(ValidationIssue::new(
+                "viewer.write_timeout_ms",
+                "viewer write timeout must be between 1 and 30000 ms",
+            ));
+        }
+        if self.viewer.idle_timeout_ms == 0
+            || self.viewer.idle_timeout_ms > MAX_VIEWER_IDLE_TIMEOUT_MS
+        {
+            issues.push(ValidationIssue::new(
+                "viewer.idle_timeout_ms",
+                "viewer idle timeout must be between 1 and 3600000 ms",
+            ));
+        }
+        if self.viewer.session_timeout_ms < self.viewer.idle_timeout_ms
+            || self.viewer.session_timeout_ms > MAX_VIEWER_SESSION_TIMEOUT_MS
+        {
+            issues.push(ValidationIssue::new(
+                "viewer.session_timeout_ms",
+                "viewer session timeout must cover idle timeout and not exceed 86400000 ms",
+            ));
+        }
+        if self.viewer.maximum_frame_bytes == 0
+            || self.viewer.maximum_frame_bytes > MAX_VIEWER_FRAME_BYTES
+        {
+            issues.push(ValidationIssue::new(
+                "viewer.maximum_frame_bytes",
+                "viewer frame limit must be between 1 and 8388608 bytes",
+            ));
+        }
+        if self.viewer.maximum_sessions == 0 || self.viewer.maximum_sessions > MAX_VIEWER_SESSIONS {
+            issues.push(ValidationIssue::new(
+                "viewer.maximum_sessions",
+                "viewer session capacity must be between 1 and 64",
             ));
         }
 
@@ -348,6 +613,18 @@ impl Config {
     #[must_use]
     pub const fn limits(&self) -> &LimitsConfig {
         &self.limits
+    }
+
+    /// Returns private artifact-store configuration.
+    #[must_use]
+    pub const fn artifacts(&self) -> &ArtifactConfig {
+        &self.artifacts
+    }
+
+    /// Returns daemon observation model/actor configuration.
+    #[must_use]
+    pub const fn observation(&self) -> &ObservationConfig {
+        &self.observation
     }
 
     /// Returns viewer configuration.
@@ -622,14 +899,296 @@ impl Default for LimitsConfig {
     }
 }
 
+/// Private artifact-store quotas, retention, and streaming deadlines.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ArtifactConfig {
+    root_directory: PathBuf,
+    max_object_bytes: u64,
+    max_total_bytes: u64,
+    max_objects: u64,
+    max_owner_bytes: u64,
+    max_owner_objects: u64,
+    max_retention_ms: u64,
+    clipboard_input_retention_ms: u64,
+    upload_total_timeout_ms: u64,
+    upload_idle_timeout_ms: u64,
+}
+
+impl ArtifactConfig {
+    /// Returns the private artifact-store root directory.
+    #[must_use]
+    pub fn root_directory(&self) -> &Path {
+        &self.root_directory
+    }
+
+    /// Returns the maximum size of one artifact in bytes.
+    #[must_use]
+    pub const fn max_object_bytes(&self) -> u64 {
+        self.max_object_bytes
+    }
+
+    /// Returns the aggregate artifact-store byte quota.
+    #[must_use]
+    pub const fn max_total_bytes(&self) -> u64 {
+        self.max_total_bytes
+    }
+
+    /// Returns the aggregate artifact-store object-count quota.
+    #[must_use]
+    pub const fn max_objects(&self) -> u64 {
+        self.max_objects
+    }
+
+    /// Returns the per-owner artifact byte quota.
+    #[must_use]
+    pub const fn max_owner_bytes(&self) -> u64 {
+        self.max_owner_bytes
+    }
+
+    /// Returns the per-owner artifact object-count quota.
+    #[must_use]
+    pub const fn max_owner_objects(&self) -> u64 {
+        self.max_owner_objects
+    }
+
+    /// Returns the maximum artifact retention duration in milliseconds.
+    #[must_use]
+    pub const fn max_retention_ms(&self) -> u64 {
+        self.max_retention_ms
+    }
+
+    /// Returns clipboard-input artifact retention in milliseconds.
+    #[must_use]
+    pub const fn clipboard_input_retention_ms(&self) -> u64 {
+        self.clipboard_input_retention_ms
+    }
+
+    /// Returns the total upload deadline in milliseconds.
+    #[must_use]
+    pub const fn upload_total_timeout_ms(&self) -> u64 {
+        self.upload_total_timeout_ms
+    }
+
+    /// Returns the between-chunk upload deadline in milliseconds.
+    #[must_use]
+    pub const fn upload_idle_timeout_ms(&self) -> u64 {
+        self.upload_idle_timeout_ms
+    }
+}
+
+impl Default for ArtifactConfig {
+    fn default() -> Self {
+        Self {
+            root_directory: PathBuf::from("/run/xenoteer/artifacts"),
+            max_object_bytes: 32 * 1024 * 1024,
+            max_total_bytes: 1024 * 1024 * 1024,
+            max_objects: 1_024,
+            max_owner_bytes: 256 * 1024 * 1024,
+            max_owner_objects: 256,
+            max_retention_ms: 60 * 60 * 1_000,
+            clipboard_input_retention_ms: 15 * 60 * 1_000,
+            upload_total_timeout_ms: 60_000,
+            upload_idle_timeout_ms: 10_000,
+        }
+    }
+}
+
+/// Bounded daemon-owned observation actor and window-model settings.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ObservationConfig {
+    request_capacity: usize,
+    max_waiters: usize,
+    token_capacity: usize,
+    cursor_ttl_ms: u64,
+    reference_ttl_ms: u64,
+    raw_request_timeout_ms: u64,
+    startup_timeout_ms: u64,
+    idle_poll_interval_ms: u64,
+    max_live_windows: usize,
+    max_tombstones: usize,
+    tombstone_ttl_ms: u64,
+}
+
+impl ObservationConfig {
+    /// Returns the bounded model-request queue capacity.
+    #[must_use]
+    pub const fn request_capacity(&self) -> usize {
+        self.request_capacity
+    }
+
+    /// Returns the maximum number of simultaneous waits.
+    #[must_use]
+    pub const fn max_waiters(&self) -> usize {
+        self.max_waiters
+    }
+
+    /// Returns the aggregate cursor and reference token capacity.
+    #[must_use]
+    pub const fn token_capacity(&self) -> usize {
+        self.token_capacity
+    }
+
+    /// Returns cursor-token lifetime in milliseconds.
+    #[must_use]
+    pub const fn cursor_ttl_ms(&self) -> u64 {
+        self.cursor_ttl_ms
+    }
+
+    /// Returns reference-token lifetime in milliseconds.
+    #[must_use]
+    pub const fn reference_ttl_ms(&self) -> u64 {
+        self.reference_ttl_ms
+    }
+
+    /// Returns the per-request raw-X11 deadline in milliseconds.
+    #[must_use]
+    pub const fn raw_request_timeout_ms(&self) -> u64 {
+        self.raw_request_timeout_ms
+    }
+
+    /// Returns the initial observation reconciliation deadline in milliseconds.
+    #[must_use]
+    pub const fn startup_timeout_ms(&self) -> u64 {
+        self.startup_timeout_ms
+    }
+
+    /// Returns the idle actor polling interval in milliseconds.
+    #[must_use]
+    pub const fn idle_poll_interval_ms(&self) -> u64 {
+        self.idle_poll_interval_ms
+    }
+
+    /// Returns the maximum number of simultaneously live windows.
+    #[must_use]
+    pub const fn max_live_windows(&self) -> usize {
+        self.max_live_windows
+    }
+
+    /// Returns the maximum number of retained window tombstones.
+    #[must_use]
+    pub const fn max_tombstones(&self) -> usize {
+        self.max_tombstones
+    }
+
+    /// Returns window-tombstone lifetime in milliseconds.
+    #[must_use]
+    pub const fn tombstone_ttl_ms(&self) -> u64 {
+        self.tombstone_ttl_ms
+    }
+}
+
+impl Default for ObservationConfig {
+    fn default() -> Self {
+        Self {
+            request_capacity: 128,
+            max_waiters: 128,
+            token_capacity: 8_192,
+            cursor_ttl_ms: 60_000,
+            reference_ttl_ms: 15 * 60 * 1_000,
+            raw_request_timeout_ms: 2_000,
+            startup_timeout_ms: 10_000,
+            idle_poll_interval_ms: 5,
+            max_live_windows: 4_096,
+            max_tombstones: 8_192,
+            tombstone_ttl_ms: 15 * 60 * 1_000,
+        }
+    }
+}
+
 /// Viewer safety policy.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ViewerConfig {
+    enabled: bool,
+    allowed_origins: Vec<String>,
+    backend_address: SocketAddr,
+    no_vnc_root: PathBuf,
+    ticket_capacity: usize,
+    ticket_ttl_seconds: u64,
+    connect_timeout_ms: u64,
+    write_timeout_ms: u64,
+    idle_timeout_ms: u64,
+    session_timeout_ms: u64,
+    maximum_frame_bytes: usize,
+    maximum_sessions: usize,
     view_only: bool,
 }
 
 impl ViewerConfig {
+    /// Returns whether viewer ticket issuance and gateway routes are enabled.
+    #[must_use]
+    pub const fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Returns the unique canonical exact browser-origin allowlist.
+    #[must_use]
+    pub fn allowed_origins(&self) -> &[String] {
+        &self.allowed_origins
+    }
+
+    /// Returns the fixed loopback websockify endpoint.
+    #[must_use]
+    pub const fn backend_address(&self) -> SocketAddr {
+        self.backend_address
+    }
+
+    /// Returns the pinned noVNC module root.
+    #[must_use]
+    pub fn no_vnc_root(&self) -> &Path {
+        &self.no_vnc_root
+    }
+
+    /// Returns the maximum number of unexpired one-time viewer tickets.
+    #[must_use]
+    pub const fn ticket_capacity(&self) -> usize {
+        self.ticket_capacity
+    }
+
+    /// Returns the one-time viewer ticket lifetime in seconds.
+    #[must_use]
+    pub const fn ticket_ttl_seconds(&self) -> u64 {
+        self.ticket_ttl_seconds
+    }
+
+    /// Returns the viewer backend connection deadline in milliseconds.
+    #[must_use]
+    pub const fn connect_timeout_ms(&self) -> u64 {
+        self.connect_timeout_ms
+    }
+
+    /// Returns the per-write viewer deadline in milliseconds.
+    #[must_use]
+    pub const fn write_timeout_ms(&self) -> u64 {
+        self.write_timeout_ms
+    }
+
+    /// Returns the viewer inactivity deadline in milliseconds.
+    #[must_use]
+    pub const fn idle_timeout_ms(&self) -> u64 {
+        self.idle_timeout_ms
+    }
+
+    /// Returns the absolute viewer session deadline in milliseconds.
+    #[must_use]
+    pub const fn session_timeout_ms(&self) -> u64 {
+        self.session_timeout_ms
+    }
+
+    /// Returns the maximum WebSocket frame or reassembled message size.
+    #[must_use]
+    pub const fn maximum_frame_bytes(&self) -> usize {
+        self.maximum_frame_bytes
+    }
+
+    /// Returns the maximum simultaneous viewer sessions.
+    #[must_use]
+    pub const fn maximum_sessions(&self) -> usize {
+        self.maximum_sessions
+    }
+
     /// Returns whether server-side viewer input is disabled.
     #[must_use]
     pub const fn view_only(&self) -> bool {
@@ -639,7 +1198,21 @@ impl ViewerConfig {
 
 impl Default for ViewerConfig {
     fn default() -> Self {
-        Self { view_only: true }
+        Self {
+            enabled: false,
+            allowed_origins: Vec::new(),
+            backend_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 6_080),
+            no_vnc_root: PathBuf::from("/usr/share/novnc"),
+            ticket_capacity: 1_024,
+            ticket_ttl_seconds: 60,
+            connect_timeout_ms: 3_000,
+            write_timeout_ms: 5_000,
+            idle_timeout_ms: 2 * 60 * 1_000,
+            session_timeout_ms: 8 * 60 * 60 * 1_000,
+            maximum_frame_bytes: MAX_VIEWER_FRAME_BYTES,
+            maximum_sessions: 16,
+            view_only: true,
+        }
     }
 }
 
@@ -1214,6 +1787,29 @@ mod tests {
         assert_eq!(config.desktop().display_height(), 1080);
         assert_eq!(config.input().queue_capacity(), 256);
         assert_eq!(
+            config.artifacts().root_directory(),
+            Path::new("/run/xenoteer/artifacts")
+        );
+        assert_eq!(config.artifacts().upload_total_timeout_ms(), 60_000);
+        assert_eq!(config.artifacts().upload_idle_timeout_ms(), 10_000);
+        assert_eq!(config.observation().max_live_windows(), 4_096);
+        assert_eq!(config.observation().token_capacity(), 8_192);
+        assert!(!config.viewer().enabled());
+        assert!(config.viewer().allowed_origins().is_empty());
+        assert_eq!(
+            config.viewer().backend_address(),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 6_080)
+        );
+        assert_eq!(config.viewer().no_vnc_root(), Path::new("/usr/share/novnc"));
+        assert_eq!(config.viewer().ticket_capacity(), 1_024);
+        assert_eq!(config.viewer().ticket_ttl_seconds(), 60);
+        assert_eq!(config.viewer().connect_timeout_ms(), 3_000);
+        assert_eq!(config.viewer().write_timeout_ms(), 5_000);
+        assert_eq!(config.viewer().idle_timeout_ms(), 120_000);
+        assert_eq!(config.viewer().session_timeout_ms(), 28_800_000);
+        assert_eq!(config.viewer().maximum_frame_bytes(), 8_388_608);
+        assert_eq!(config.viewer().maximum_sessions(), 16);
+        assert_eq!(
             config.auth().grants(),
             AUTHORIZATION_GRANTS.map(str::to_owned)
         );
@@ -1247,6 +1843,184 @@ mod tests {
             ("[desktop]\ndisplay_height = 1079", "desktop.display_height"),
             ("[desktop]\ndepth = 16", "desktop.depth"),
             ("[desktop]\ndpi = 97", "desktop.dpi"),
+        ] {
+            assert_validation_path(document, expected_path)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_and_observation_config_fail_closed_at_boundaries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (document, expected_path) in [
+            (
+                "[artifacts]\nroot_directory = 'relative/path'",
+                "artifacts.root_directory",
+            ),
+            (
+                "[artifacts]\nupload_total_timeout_ms = 0",
+                "artifacts.upload_total_timeout_ms",
+            ),
+            (
+                "[artifacts]\nupload_total_timeout_ms = 10\nupload_idle_timeout_ms = 11",
+                "artifacts.upload_idle_timeout_ms",
+            ),
+            (
+                "[artifacts]\nmax_object_bytes = 1025\nmax_total_bytes = 1024",
+                "artifacts.max_object_bytes",
+            ),
+            (
+                "[artifacts]\nclipboard_input_retention_ms = 3600001",
+                "artifacts.clipboard_input_retention_ms",
+            ),
+            (
+                "[observation]\nrequest_capacity = 0",
+                "observation.request_capacity",
+            ),
+            (
+                "[observation]\ntoken_capacity = 1",
+                "observation.token_capacity",
+            ),
+            (
+                "[observation]\nraw_request_timeout_ms = 0",
+                "observation.raw_request_timeout_ms",
+            ),
+            (
+                "[observation]\nmax_live_windows = 4097",
+                "observation.max_live_windows",
+            ),
+        ] {
+            assert_validation_path(document, expected_path)?;
+        }
+
+        let unknown = Config::load(
+            Some("[artifacts]\nsecret_backdoor = true"),
+            std::iter::empty::<(&str, &str)>(),
+            &ConfigOverrides::default(),
+        );
+        assert!(matches!(unknown, Err(ConfigLoadError::Decode(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn viewer_config_requires_canonical_origins_and_server_hard_limits()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let enabled = Config::load(
+            Some(
+                r#"
+                [viewer]
+                enabled = true
+                allowed_origins = ["https://viewer.example", "http://127.0.0.1:8080"]
+                backend_address = "127.0.0.1:6080"
+                no_vnc_root = "/usr/share/novnc"
+                ticket_capacity = 1024
+                ticket_ttl_seconds = 60
+                connect_timeout_ms = 3000
+                write_timeout_ms = 5000
+                idle_timeout_ms = 120000
+                session_timeout_ms = 28800000
+                maximum_frame_bytes = 8388608
+                maximum_sessions = 16
+                view_only = true
+                "#,
+            ),
+            std::iter::empty::<(&str, &str)>(),
+            &ConfigOverrides::default(),
+        );
+        assert!(enabled.is_ok());
+        let exact_ceilings = Config::load(
+            Some(
+                r#"
+                [viewer]
+                enabled = true
+                allowed_origins = ["https://viewer.example"]
+                ticket_capacity = 16384
+                ticket_ttl_seconds = 60
+                connect_timeout_ms = 30000
+                write_timeout_ms = 30000
+                idle_timeout_ms = 3600000
+                session_timeout_ms = 86400000
+                maximum_frame_bytes = 8388608
+                maximum_sessions = 64
+                "#,
+            ),
+            std::iter::empty::<(&str, &str)>(),
+            &ConfigOverrides::default(),
+        );
+        assert!(exact_ceilings.is_ok());
+
+        for (document, expected_path) in [
+            ("[viewer]\nenabled = true", "viewer.allowed_origins"),
+            (
+                "[viewer]\nenabled = true\nallowed_origins = ['https://viewer.example', 'https://viewer.example']",
+                "viewer.allowed_origins",
+            ),
+            (
+                "[viewer]\nallowed_origins = ['ftp://viewer.example']",
+                "viewer.allowed_origins",
+            ),
+            (
+                "[viewer]\nbackend_address = '0.0.0.0:6080'",
+                "viewer.backend_address",
+            ),
+            (
+                "[viewer]\nbackend_address = '127.0.0.1:0'",
+                "viewer.backend_address",
+            ),
+            (
+                "[viewer]\nno_vnc_root = 'relative/novnc'",
+                "viewer.no_vnc_root",
+            ),
+            ("[viewer]\nno_vnc_root = '/'", "viewer.no_vnc_root"),
+            ("[viewer]\nticket_capacity = 0", "viewer.ticket_capacity"),
+            (
+                "[viewer]\nticket_capacity = 16385",
+                "viewer.ticket_capacity",
+            ),
+            (
+                "[viewer]\nticket_ttl_seconds = 0",
+                "viewer.ticket_ttl_seconds",
+            ),
+            (
+                "[viewer]\nticket_ttl_seconds = 61",
+                "viewer.ticket_ttl_seconds",
+            ),
+            (
+                "[viewer]\nconnect_timeout_ms = 0",
+                "viewer.connect_timeout_ms",
+            ),
+            (
+                "[viewer]\nconnect_timeout_ms = 30001",
+                "viewer.connect_timeout_ms",
+            ),
+            ("[viewer]\nwrite_timeout_ms = 0", "viewer.write_timeout_ms"),
+            (
+                "[viewer]\nwrite_timeout_ms = 30001",
+                "viewer.write_timeout_ms",
+            ),
+            ("[viewer]\nidle_timeout_ms = 0", "viewer.idle_timeout_ms"),
+            (
+                "[viewer]\nidle_timeout_ms = 3600001",
+                "viewer.idle_timeout_ms",
+            ),
+            (
+                "[viewer]\nidle_timeout_ms = 100\nsession_timeout_ms = 99",
+                "viewer.session_timeout_ms",
+            ),
+            (
+                "[viewer]\nsession_timeout_ms = 86400001",
+                "viewer.session_timeout_ms",
+            ),
+            (
+                "[viewer]\nmaximum_frame_bytes = 0",
+                "viewer.maximum_frame_bytes",
+            ),
+            (
+                "[viewer]\nmaximum_frame_bytes = 8388609",
+                "viewer.maximum_frame_bytes",
+            ),
+            ("[viewer]\nmaximum_sessions = 0", "viewer.maximum_sessions"),
+            ("[viewer]\nmaximum_sessions = 65", "viewer.maximum_sessions"),
         ] {
             assert_validation_path(document, expected_path)?;
         }

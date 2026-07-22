@@ -1,0 +1,121 @@
+{
+  "$defs": {
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "WindowIdentityHash": {
+      "description": "Fixed lowercase SHA-256 projection binding an XID birth to initial evidence.",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "WindowRef": {
+      "additionalProperties": false,
+      "description": "Closed request-direction representation of [`WindowRef`].",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration"
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId"
+        },
+        "identity_hash": {
+          "$ref": "#/$defs/WindowIdentityHash"
+        },
+        "observed_generation": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "xid": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "desktop_id",
+        "desktop_generation",
+        "xid",
+        "observed_generation",
+        "identity_hash"
+      ],
+      "type": "object"
+    },
+    "WindowReferenceToken": {
+      "description": "Opaque URL-safe transport form of a generation-bound window reference.",
+      "maxLength": 1024,
+      "minLength": 16,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "WindowSnapshotTarget": {
+      "description": "Full-reference or URL-token lookup target for one window snapshot.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "reference",
+              "type": "string"
+            },
+            "window": {
+              "$ref": "#/$defs/WindowRef"
+            }
+          },
+          "required": [
+            "type",
+            "window"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "token": {
+              "$ref": "#/$defs/WindowReferenceToken"
+            },
+            "type": {
+              "const": "token",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "token"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Read-only exact-window lookup authorized by `desktop:observe`.",
+  "properties": {
+    "desktop_generation": {
+      "$ref": "#/$defs/DesktopGeneration"
+    },
+    "desktop_id": {
+      "$ref": "#/$defs/DesktopId"
+    },
+    "target": {
+      "$ref": "#/$defs/WindowSnapshotTarget"
+    }
+  },
+  "required": [
+    "desktop_id",
+    "desktop_generation",
+    "target"
+  ],
+  "title": "WindowSnapshotRequest",
+  "type": "object"
+}

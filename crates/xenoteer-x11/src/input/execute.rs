@@ -6,9 +6,9 @@ use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
 use xenoteer_core::input::{
-    ActionPurpose, ButtonDirection, CleanupAction, EffectJournal, HealthEvent, InputAction,
-    InputHealth, InputState, InputStateError, LogicalButton, MoveAction, PhysicalButton,
-    ResetReason, plan_cleanup, plan_motion,
+    ActionPurpose, ButtonDirection, CleanupAction, ClickAction, DragAction, EffectJournal,
+    HealthEvent, InputAction, InputHealth, InputState, InputStateError, LogicalButton, MoveAction,
+    PhysicalButton, ResetReason, plan_cleanup, plan_motion,
 };
 
 use crate::keyboard::{KeyIdentifier, KeyboardResolutionContext, KeyboardResolutionIntent};
@@ -27,8 +27,10 @@ use super::keyboard_model::{
 use super::{
     ActionContext, ActorThreadState, CleanupReport, InputCleanupEvidence, InputEffectEvidence,
     InputFailure, InputFailureKind, InputHealthSnapshot, InputOperation, InputOutcome,
-    InputOutcomeKind, KeyboardAction, KeyboardBindingEvidence, KeyboardOutcomeEvidence,
-    PointerMoveRequest,
+    InputOutcomeKind, InputPrecondition, InputPreconditionFailure, KeyboardAction,
+    KeyboardBindingEvidence, KeyboardOutcomeEvidence, PointerClickRequest, PointerDragRequest,
+    PointerEndpoint, PointerMoveRelativeRequest, PointerMoveRequest, WindowPointerBoundsPolicy,
+    WindowPointerClickRequest,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -201,6 +203,12 @@ struct ActionProgress {
     stopped: Option<BoundaryStop>,
 }
 
+struct WindowClickRevalidation {
+    request: WindowPointerClickRequest,
+    expected_target: xenoteer_core::domain::RootPoint,
+    precondition: Option<InputPrecondition>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BoundaryStop {
     Cancelled,
@@ -249,6 +257,12 @@ struct KeyboardRunError {
     progress_known: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct KeyBatchPostflight {
+    model: ModelPreflight,
+    accepted_initial_xtest_set_map: bool,
+}
+
 impl KeyboardProgress {
     fn failure(self, kind: InputFailureKind) -> KeyboardRunError {
         KeyboardRunError {
@@ -272,6 +286,7 @@ pub(super) struct InputEngine<B: InputBackend> {
     synthesized_modifiers: Vec<SynthesizedModifierRef>,
     pending_keyboard_restore: Option<PendingTemporaryRestore>,
     sent_press_ledger: SentPressLedger,
+    keyboard_effect_emitted: bool,
     #[cfg(test)]
     fail_next_state_mutation: bool,
 }
@@ -339,6 +354,7 @@ impl<B: InputBackend> InputEngine<B> {
             synthesized_modifiers: Vec::new(),
             pending_keyboard_restore: None,
             sent_press_ledger: SentPressLedger::default(),
+            keyboard_effect_emitted: false,
             #[cfg(test)]
             fail_next_state_mutation: false,
         })
@@ -373,10 +389,32 @@ impl<B: InputBackend> InputEngine<B> {
             )
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn execute(
         &mut self,
         context: ActionContext,
         action: InputAction,
+        cancellation: &CancellationToken,
+    ) -> Result<InputOutcome, InputFailure> {
+        self.execute_with_precondition(context, action, None, cancellation)
+    }
+
+    fn execute_with_precondition(
+        &mut self,
+        context: ActionContext,
+        action: InputAction,
+        precondition: Option<InputPrecondition>,
+        cancellation: &CancellationToken,
+    ) -> Result<InputOutcome, InputFailure> {
+        self.execute_prepared_action(context, action, precondition, None, cancellation)
+    }
+
+    fn execute_prepared_action(
+        &mut self,
+        context: ActionContext,
+        action: InputAction,
+        precondition: Option<InputPrecondition>,
+        mut window_click: Option<WindowClickRevalidation>,
         cancellation: &CancellationToken,
     ) -> Result<InputOutcome, InputFailure> {
         let requested_pointer = requested_pointer_action(&action);
@@ -433,13 +471,19 @@ impl<B: InputBackend> InputEngine<B> {
         if let Err(kind) = self.preflight(&action) {
             return Err(self.failure_before(context, kind, requested_pointer));
         }
+        self.check_precondition(context, precondition, requested_pointer)?;
         if self.state.begin_action(ActionPurpose::Ordinary).is_err() {
             self.mark_panicked();
             let _abandoned_journal = self.state.finish_action();
             return Err(self.invariant_failure(context, requested_pointer, None));
         }
 
-        let result = self.run_action(&action, cancellation, context.deadline);
+        let result = self.run_action(
+            &action,
+            cancellation,
+            context.deadline,
+            window_click.as_mut(),
+        );
         match result {
             Ok(progress) => {
                 let effects = match self.state.finish_action() {
@@ -547,19 +591,50 @@ impl<B: InputBackend> InputEngine<B> {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn execute_operation(
         &mut self,
         context: ActionContext,
         operation: InputOperation,
         cancellation: &CancellationToken,
     ) -> Result<InputOutcome, InputFailure> {
+        self.execute_operation_with_precondition(context, operation, None, cancellation)
+    }
+
+    pub(super) fn execute_operation_with_precondition(
+        &mut self,
+        context: ActionContext,
+        operation: InputOperation,
+        precondition: Option<InputPrecondition>,
+        cancellation: &CancellationToken,
+    ) -> Result<InputOutcome, InputFailure> {
         match operation {
-            InputOperation::Pointer(action) => self.execute(context, action, cancellation),
-            InputOperation::PointerMove(request) => {
-                self.execute_pointer_move(context, request, cancellation)
+            InputOperation::Pointer(action) => {
+                self.execute_with_precondition(context, action, precondition, cancellation)
             }
+            InputOperation::PointerMove(request) => {
+                self.execute_pointer_move(context, request, precondition, cancellation)
+            }
+            InputOperation::PointerMoveRelative(request) => {
+                self.execute_pointer_move_relative(context, request, precondition, cancellation)
+            }
+            InputOperation::PointerClick(request) => {
+                self.execute_pointer_click(context, request, precondition, cancellation)
+            }
+            InputOperation::PointerDrag(request) => {
+                self.execute_pointer_drag(context, request, precondition, cancellation)
+            }
+            InputOperation::WindowPointerClick(request) => {
+                self.execute_window_pointer_click(context, request, precondition, cancellation)
+            }
+            InputOperation::PointerScroll(action) => self.execute_with_precondition(
+                context,
+                InputAction::Scroll(action),
+                precondition,
+                cancellation,
+            ),
             InputOperation::Keyboard(action) => {
-                self.execute_keyboard(context, action, cancellation)
+                self.execute_keyboard(context, action, precondition, cancellation)
             }
         }
     }
@@ -568,6 +643,7 @@ impl<B: InputBackend> InputEngine<B> {
         &mut self,
         context: ActionContext,
         request: PointerMoveRequest,
+        precondition: Option<InputPrecondition>,
         cancellation: &CancellationToken,
     ) -> Result<InputOutcome, InputFailure> {
         let target = Some(request.target());
@@ -604,17 +680,306 @@ impl<B: InputBackend> InputEngine<B> {
         };
         let plan = plan_motion(start, request.target(), request.options())
             .map_err(|_| self.failure_before(context, InputFailureKind::StateRejected, target))?;
-        self.execute(
+        self.execute_with_precondition(
             context,
             InputAction::Move(MoveAction::new(plan)),
+            precondition,
             cancellation,
         )
+    }
+
+    fn execute_pointer_move_relative(
+        &mut self,
+        context: ActionContext,
+        request: PointerMoveRelativeRequest,
+        precondition: Option<InputPrecondition>,
+        cancellation: &CancellationToken,
+    ) -> Result<InputOutcome, InputFailure> {
+        let (start, target) = self.resolve_pointer_endpoint(
+            context,
+            PointerEndpoint::Relative(request.delta()),
+            cancellation,
+        )?;
+        let plan = plan_motion(start, target, request.options()).map_err(|_| {
+            self.failure_before(context, InputFailureKind::StateRejected, Some(target))
+        })?;
+        self.execute_with_precondition(
+            context,
+            InputAction::Move(MoveAction::new(plan)),
+            precondition,
+            cancellation,
+        )
+    }
+
+    fn execute_pointer_click(
+        &mut self,
+        context: ActionContext,
+        request: PointerClickRequest,
+        precondition: Option<InputPrecondition>,
+        cancellation: &CancellationToken,
+    ) -> Result<InputOutcome, InputFailure> {
+        let movement = match request.endpoint() {
+            Some(endpoint) => {
+                let (start, target) =
+                    self.resolve_pointer_endpoint(context, endpoint, cancellation)?;
+                Some(plan_motion(start, target, request.options()).map_err(|_| {
+                    self.failure_before(context, InputFailureKind::StateRejected, Some(target))
+                })?)
+            }
+            None => None,
+        };
+        let target = movement.as_ref().map(|plan| plan.end());
+        let action = ClickAction::new(
+            movement,
+            request.button(),
+            request.count(),
+            request.pre_click_dwell_ms(),
+            request.press_duration_ms(),
+            request.inter_click_interval_ms(),
+            xenoteer_core::input::DEFAULT_DOUBLE_CLICK_THRESHOLD_MS,
+        )
+        .map_err(|_| self.failure_before(context, InputFailureKind::StateRejected, target))?;
+        self.execute_with_precondition(
+            context,
+            InputAction::Click(action),
+            precondition,
+            cancellation,
+        )
+    }
+
+    fn execute_pointer_drag(
+        &mut self,
+        context: ActionContext,
+        request: PointerDragRequest,
+        precondition: Option<InputPrecondition>,
+        cancellation: &CancellationToken,
+    ) -> Result<InputOutcome, InputFailure> {
+        let (start, target) =
+            self.resolve_pointer_endpoint(context, request.endpoint(), cancellation)?;
+        let movement = plan_motion(start, target, request.options()).map_err(|_| {
+            self.failure_before(context, InputFailureKind::StateRejected, Some(target))
+        })?;
+        let action = DragAction::new(
+            movement,
+            request.button(),
+            request.press_dwell_ms(),
+            request.release_dwell_ms(),
+        )
+        .map_err(|_| self.failure_before(context, InputFailureKind::StateRejected, Some(target)))?;
+        self.execute_with_precondition(
+            context,
+            InputAction::Drag(action),
+            precondition,
+            cancellation,
+        )
+    }
+
+    fn execute_window_pointer_click(
+        &mut self,
+        context: ActionContext,
+        request: WindowPointerClickRequest,
+        precondition: Option<InputPrecondition>,
+        cancellation: &CancellationToken,
+    ) -> Result<InputOutcome, InputFailure> {
+        if cancellation.is_cancelled() {
+            return Err(self.failure_before(
+                context,
+                InputFailureKind::CancelledBeforeEffect,
+                None,
+            ));
+        }
+        if deadline_elapsed(context.deadline) {
+            return Err(self.failure_before(
+                context,
+                InputFailureKind::DeadlineExceededBeforeEffect,
+                None,
+            ));
+        }
+        if let Err(fault) = self.drain_events() {
+            self.apply_backend_fault(&fault);
+            return Err(self.failure_before(context, backend_public_kind(&fault), None));
+        }
+        if self.state.health() != InputHealth::Healthy {
+            return Err(self.failure_before(context, InputFailureKind::HealthRejected, None));
+        }
+        let target = self
+            .resolve_window_click_target(request)
+            .map_err(|kind| self.failure_before(context, kind, None))?;
+        let start = self
+            .backend
+            .observe_pointer()
+            .map_err(|fault| {
+                self.apply_backend_fault(&fault);
+                self.failure_before(context, backend_public_kind(&fault), Some(target))
+            })?
+            .pointer;
+        self.last_pointer = Some(start);
+        let movement = plan_motion(start, target, request.options()).map_err(|_| {
+            self.failure_before(context, InputFailureKind::StateRejected, Some(target))
+        })?;
+        let action = ClickAction::new(
+            Some(movement),
+            request.button(),
+            request.count(),
+            request.pre_click_dwell_ms(),
+            request.press_duration_ms(),
+            request.inter_click_interval_ms(),
+            xenoteer_core::input::DEFAULT_DOUBLE_CLICK_THRESHOLD_MS,
+        )
+        .map_err(|_| self.failure_before(context, InputFailureKind::StateRejected, Some(target)))?;
+        self.execute_prepared_action(
+            context,
+            InputAction::Click(action),
+            None,
+            Some(WindowClickRevalidation {
+                request,
+                expected_target: target,
+                precondition,
+            }),
+            cancellation,
+        )
+    }
+
+    fn resolve_window_click_target(
+        &mut self,
+        request: WindowPointerClickRequest,
+    ) -> Result<xenoteer_core::domain::RootPoint, InputFailureKind> {
+        let geometry = self
+            .backend
+            .observe_window_geometry(request.window())
+            .map_err(|fault| {
+                self.apply_backend_fault(&fault);
+                backend_public_kind(&fault)
+            })?;
+        let selected = match request.coordinate_space() {
+            xenoteer_protocol::CoordinateSpace::WindowClient => geometry.window().client_rect,
+            xenoteer_protocol::CoordinateSpace::WindowFrame => geometry
+                .window()
+                .frame_rect
+                .ok_or(InputFailureKind::UnsupportedByBackend)?,
+            xenoteer_protocol::CoordinateSpace::RootPhysical
+            | xenoteer_protocol::CoordinateSpace::AtspiScreen => {
+                return Err(InputFailureKind::StateRejected);
+            }
+        };
+        let size = selected
+            .rect
+            .size()
+            .map_err(|_| InputFailureKind::StateRejected)?;
+        let requested = request.point();
+        let inside = requested.x() >= 0
+            && requested.y() >= 0
+            && i64::from(requested.x()) < i64::from(size.width())
+            && i64::from(requested.y()) < i64::from(size.height());
+        let local = match request.bounds_policy() {
+            WindowPointerBoundsPolicy::Reject if !inside => {
+                return Err(InputFailureKind::StateRejected);
+            }
+            WindowPointerBoundsPolicy::Clamp => xenoteer_protocol::Point::new(
+                requested
+                    .x()
+                    .clamp(0, i32::try_from(size.width() - 1).unwrap_or(i32::MAX)),
+                requested
+                    .y()
+                    .clamp(0, i32::try_from(size.height() - 1).unwrap_or(i32::MAX)),
+            ),
+            WindowPointerBoundsPolicy::Reject | WindowPointerBoundsPolicy::Allow => requested,
+        };
+        let resolved = geometry
+            .resolve_local_point(
+                request.coordinate_space(),
+                local,
+                xenoteer_protocol::WindowScreenBoundsPolicy::AllowOffscreen,
+            )
+            .map_err(|error| match error {
+                xenoteer_core::window_geometry::WindowGeometryResolveError::FrameGeometryUnavailable
+                | xenoteer_core::window_geometry::WindowGeometryResolveError::UnsupportedCoordinateSpace => {
+                    InputFailureKind::UnsupportedByBackend
+                }
+                _ => InputFailureKind::StateRejected,
+            })?;
+        xenoteer_core::domain::RootPoint::try_from_protocol(resolved.root)
+            .map_err(|_| InputFailureKind::StateRejected)
+    }
+
+    fn resolve_pointer_endpoint(
+        &mut self,
+        context: ActionContext,
+        endpoint: PointerEndpoint,
+        cancellation: &CancellationToken,
+    ) -> Result<
+        (
+            xenoteer_core::domain::RootPoint,
+            xenoteer_core::domain::RootPoint,
+        ),
+        InputFailure,
+    > {
+        let requested = match endpoint {
+            PointerEndpoint::Root(target) => Some(target),
+            PointerEndpoint::Relative(_) => None,
+        };
+        if cancellation.is_cancelled() {
+            return Err(self.failure_before(
+                context,
+                InputFailureKind::CancelledBeforeEffect,
+                requested,
+            ));
+        }
+        if deadline_elapsed(context.deadline) {
+            return Err(self.failure_before(
+                context,
+                InputFailureKind::DeadlineExceededBeforeEffect,
+                requested,
+            ));
+        }
+        if let Err(fault) = self.drain_events() {
+            self.apply_backend_fault(&fault);
+            return Err(self.failure_before(context, backend_public_kind(&fault), requested));
+        }
+        if self.state.health() != InputHealth::Healthy {
+            return Err(self.failure_before(context, InputFailureKind::HealthRejected, requested));
+        }
+        let start = self
+            .backend
+            .observe_pointer()
+            .map_err(|fault| {
+                self.apply_backend_fault(&fault);
+                self.failure_before(context, backend_public_kind(&fault), requested)
+            })?
+            .pointer;
+        self.last_pointer = Some(start);
+        let target = match endpoint {
+            PointerEndpoint::Root(target) => target,
+            PointerEndpoint::Relative(delta) => start
+                .checked_add(delta)
+                .map_err(|_| self.failure_before(context, InputFailureKind::StateRejected, None))?,
+        };
+        Ok((start, target))
+    }
+
+    fn check_precondition(
+        &self,
+        context: ActionContext,
+        precondition: Option<InputPrecondition>,
+        requested_pointer: Option<xenoteer_core::domain::RootPoint>,
+    ) -> Result<(), InputFailure> {
+        let Some(mut precondition) = precondition else {
+            return Ok(());
+        };
+        precondition.evaluate().map_err(|failure| {
+            self.failure_before(
+                context,
+                input_precondition_failure_kind(failure),
+                requested_pointer,
+            )
+        })
     }
 
     fn execute_keyboard(
         &mut self,
         context: ActionContext,
         action: KeyboardAction,
+        precondition: Option<InputPrecondition>,
         cancellation: &CancellationToken,
     ) -> Result<InputOutcome, InputFailure> {
         if cancellation.is_cancelled() {
@@ -652,6 +1017,7 @@ impl<B: InputBackend> InputEngine<B> {
         if self.state.health() != InputHealth::Healthy || self.pending_keyboard_restore.is_some() {
             return Err(self.failure_before(context, InputFailureKind::HealthRejected, None));
         }
+        self.check_precondition(context, precondition, None)?;
         if self.state.begin_action(ActionPurpose::Ordinary).is_err() {
             self.mark_panicked();
             let _abandoned_journal = self.state.finish_action();
@@ -754,6 +1120,12 @@ impl<B: InputBackend> InputEngine<B> {
         if let Err(fault) = self.drain_events() {
             self.apply_backend_fault(&fault);
             return Err(self.actor_failure(backend_public_kind(&fault), None));
+        }
+        if let Err(fault) = self.keyboard.synchronize_preflight()
+            && fault.kind != KeyboardModelFaultKind::Unavailable
+        {
+            let kind = self.keyboard_model_failure(fault, false);
+            return Err(self.actor_failure(kind, None));
         }
         match self.backend.observe_pointer() {
             Ok(observation) => self.last_pointer = Some(observation.pointer),
@@ -1248,8 +1620,8 @@ impl<B: InputBackend> InputEngine<B> {
             ));
         }
         let expected_up: Vec<_> = press_order.iter().map(|(key, _)| *key).collect();
-        let _post = self.run_key_batch(&events, generation, &expected_up, true, progress)?;
-        self.validate_complete_bindings_after_effect(&bindings, &context)?;
+        let post = self.run_key_batch(&events, generation, &expected_up, false, progress)?;
+        self.validate_complete_bindings_after_effect(&bindings, &context, post)?;
         self.confirm_pending_key_batch()?;
         Ok(true)
     }
@@ -1370,8 +1742,8 @@ impl<B: InputBackend> InputEngine<B> {
             ));
         }
         let expected_up: Vec<_> = press_order.iter().map(|(key, _)| *key).collect();
-        let _post = self.run_key_batch(&events, generation, &expected_up, true, progress)?;
-        self.validate_complete_bindings_after_effect(&bindings, execution.resolution)?;
+        let post = self.run_key_batch(&events, generation, &expected_up, false, progress)?;
+        self.validate_complete_bindings_after_effect(&bindings, execution.resolution, post)?;
         self.confirm_pending_key_batch()?;
         Ok(true)
     }
@@ -1438,7 +1810,7 @@ impl<B: InputBackend> InputEngine<B> {
             .collect();
         events.push(key_planned_event(binding.key, true, 0, binding.is_modifier));
         let generation = binding.generation;
-        let _post = self.run_key_batch(&events, generation, &[], true, progress)?;
+        let post = self.run_key_batch(&events, generation, &[], true, progress)?;
         let post_context =
             self.keyboard_resolution_context(KeyboardResolutionIntent::PhysicalKey)?;
         let post_binding = match self
@@ -1451,10 +1823,21 @@ impl<B: InputBackend> InputEngine<B> {
                 return Err(self.keyboard_identifier_failure(fault, identifier, true));
             }
         };
-        if !binding.physically_equivalent(&post_binding) {
+        let equivalent = if post.accepted_initial_xtest_set_map {
+            post_binding.generation == post.model.generation
+                && binding.physically_equivalent_across_generation(&post_binding)
+        } else {
+            binding.physically_equivalent(&post_binding)
+        };
+        if !equivalent {
             self.fail_pending_key_batch(ResetReason::PostconditionFailed)?;
             return Err(InputFailureKind::KeyboardMappingChangedAfterEffect);
         }
+        let held_binding = if post.accepted_initial_xtest_set_map {
+            post_binding
+        } else {
+            binding
+        };
         self.confirm_pending_key_batch()?;
         for key in &synthesized {
             if let Some(existing) = self
@@ -1472,7 +1855,7 @@ impl<B: InputBackend> InputEngine<B> {
         }
         self.captured_keys.push(CapturedKeyHold {
             identifier,
-            binding,
+            binding: held_binding,
             synthesized_modifiers: synthesized,
         });
         Ok(true)
@@ -1588,7 +1971,7 @@ impl<B: InputBackend> InputEngine<B> {
         self.synthesized_modifiers
             .retain(|existing| existing.references > 0);
         let mapping_changed = matches!(held_generation, HeldBindingGeneration::Stale { .. })
-            || post.generation != hold.binding.generation;
+            || post.model.generation != hold.binding.generation;
         if let Some(kind) = deferred_validation_failure {
             return Err(kind);
         }
@@ -1653,15 +2036,26 @@ impl<B: InputBackend> InputEngine<B> {
         expected_up: &[xenoteer_core::input::PhysicalKey],
         enforce_generation: bool,
         progress: &mut KeyboardProgress,
-    ) -> Result<ModelPreflight, InputFailureKind> {
-        let batch = self.run_batch(events, false, false).map_err(|failure| {
-            let kind = failure.public_kind();
-            progress.events_emitted = progress.events_emitted.saturating_add(failure.sent);
-            if let Some(observation) = failure.observation {
-                progress.pointer = Some(observation);
+    ) -> Result<KeyBatchPostflight, InputFailureKind> {
+        let first_keyboard_effect = !self.keyboard_effect_emitted;
+        let pre_fingerprint = self.keyboard.diagnostics().keymap_fingerprint;
+        let batch = match self.run_batch(events, false, false) {
+            Ok(batch) => batch,
+            Err(failure) => {
+                if failure.sent > 0 {
+                    self.keyboard_effect_emitted = true;
+                }
+                let kind = failure.public_kind();
+                progress.events_emitted = progress.events_emitted.saturating_add(failure.sent);
+                if let Some(observation) = failure.observation {
+                    progress.pointer = Some(observation);
+                }
+                return Err(kind);
             }
-            kind
-        })?;
+        };
+        if batch.sent > 0 {
+            self.keyboard_effect_emitted = true;
+        }
         progress.events_emitted = progress.events_emitted.saturating_add(batch.sent);
         progress.pointer = Some(batch.observation);
         let pressed = match self.backend.observe_keys() {
@@ -1688,7 +2082,17 @@ impl<B: InputBackend> InputEngine<B> {
                 return Err(kind);
             }
         };
-        if enforce_generation && preflight.generation != expected_generation {
+        let accepted_initial_xtest_set_map = first_keyboard_effect
+            && batch.sent > 0
+            && preflight.generation == expected_generation.saturating_add(1)
+            && preflight.mapping_invalidations == 1
+            && preflight.structural_set_map_invalidations == 1
+            && pre_fingerprint.is_some()
+            && preflight.keymap_fingerprint == pre_fingerprint;
+        if enforce_generation
+            && preflight.generation != expected_generation
+            && !accepted_initial_xtest_set_map
+        {
             self.fail_pending_key_batch(ResetReason::PostconditionFailed)?;
             return Err(InputFailureKind::KeyboardMappingChangedAfterEffect);
         }
@@ -1702,14 +2106,65 @@ impl<B: InputBackend> InputEngine<B> {
             self.fail_pending_key_batch(ResetReason::PostconditionFailed)?;
             return Err(InputFailureKind::PostconditionFailed);
         }
-        Ok(preflight)
+        Ok(KeyBatchPostflight {
+            model: preflight,
+            accepted_initial_xtest_set_map,
+        })
     }
 
     fn validate_complete_bindings_after_effect(
         &mut self,
         bindings: &[CapturedKeyBinding],
         context: &KeyboardResolutionContext,
+        postflight: KeyBatchPostflight,
     ) -> Result<(), InputFailureKind> {
+        let captured_generation = bindings
+            .first()
+            .map(|binding| binding.generation)
+            .ok_or(InputFailureKind::StateRejected)?;
+        if postflight.model.generation != captured_generation {
+            if !postflight.accepted_initial_xtest_set_map {
+                self.fail_pending_key_batch(ResetReason::PostconditionFailed)?;
+                return Err(InputFailureKind::KeyboardMappingChangedAfterEffect);
+            }
+            for binding in bindings {
+                let current = match self
+                    .keyboard
+                    .resolve_synchronized(binding.identifier, context)
+                {
+                    Ok(current) => current,
+                    Err(fault) => {
+                        self.fail_pending_key_batch(ResetReason::PostconditionFailed)?;
+                        return Err(self.keyboard_identifier_failure(
+                            fault,
+                            binding.identifier,
+                            true,
+                        ));
+                    }
+                };
+                if current.generation != postflight.model.generation
+                    || !binding.physically_equivalent_across_generation(&current)
+                {
+                    self.fail_pending_key_batch(ResetReason::PostconditionFailed)?;
+                    return Err(InputFailureKind::KeyboardMappingChangedAfterEffect);
+                }
+            }
+            let final_preflight = match self.keyboard.synchronize_preflight() {
+                Ok(preflight) => preflight,
+                Err(fault) => {
+                    self.fail_pending_key_batch(ResetReason::PostconditionFailed)?;
+                    return Err(self.keyboard_model_failure(fault, true));
+                }
+            };
+            if final_preflight.generation != postflight.model.generation
+                || final_preflight.mapping_invalidations != 0
+                || final_preflight.keymap_fingerprint != postflight.model.keymap_fingerprint
+            {
+                self.fail_pending_key_batch(ResetReason::PostconditionFailed)?;
+                return Err(InputFailureKind::KeyboardMappingChangedAfterEffect);
+            }
+            return Ok(());
+        }
         for binding in bindings {
             let preflight = match self
                 .keyboard
@@ -2236,6 +2691,7 @@ impl<B: InputBackend> InputEngine<B> {
         action: &InputAction,
         cancellation: &CancellationToken,
         deadline: Option<Instant>,
+        mut window_click: Option<&mut WindowClickRevalidation>,
     ) -> Result<ActionProgress, ActionError> {
         match action {
             InputAction::Move(action) => {
@@ -2335,6 +2791,19 @@ impl<B: InputBackend> InputEngine<B> {
                         progress.stopped = Some(stopped);
                         return Ok(progress);
                     }
+                    if window_click.is_some() {
+                        let dwell_ms = if click_index == 0 {
+                            action.pre_click_dwell_ms()
+                        } else {
+                            action.inter_click_interval_ms()
+                        };
+                        self.run_window_click_dwell(dwell_ms);
+                        self.drain_for_action(&progress)?;
+                        if let Some(stopped) = boundary_stop(cancellation, deadline) {
+                            progress.stopped = Some(stopped);
+                            return Ok(progress);
+                        }
+                    }
                     let button = self
                         .resolve_button(action.logical_button())
                         .map_err(|kind| progress.error(kind))?;
@@ -2342,7 +2811,12 @@ impl<B: InputBackend> InputEngine<B> {
                     if self.state.pressed_buttons().contains(&button) {
                         return Err(progress.error(InputFailureKind::StateRejected));
                     }
-                    let press_delay = if click_index == 0 {
+                    if let Some(staged) = window_click.as_deref_mut() {
+                        self.revalidate_window_click(staged, &mut progress)?;
+                    }
+                    let press_delay = if window_click.is_some() {
+                        0
+                    } else if click_index == 0 {
                         u32::from(action.pre_click_dwell_ms())
                     } else {
                         u32::from(action.inter_click_interval_ms())
@@ -2555,6 +3029,42 @@ impl<B: InputBackend> InputEngine<B> {
                 Err(ActionProgress::default().error(InputFailureKind::UnsupportedOperation))
             }
         }
+    }
+
+    fn run_window_click_dwell(&self, dwell_ms: u16) {
+        if dwell_ms > 0 {
+            self.backend
+                .wait_for_input_delay(std::time::Duration::from_millis(u64::from(dwell_ms)));
+        }
+    }
+
+    fn revalidate_window_click(
+        &mut self,
+        staged: &mut WindowClickRevalidation,
+        progress: &mut ActionProgress,
+    ) -> Result<(), ActionError> {
+        let live_target = self
+            .resolve_window_click_target(staged.request)
+            .map_err(|kind| progress.error(kind))?;
+        if live_target != staged.expected_target {
+            return Err(progress.error(InputFailureKind::PostconditionFailed));
+        }
+        let observation = self.backend.observe_pointer().map_err(|fault| {
+            self.apply_backend_fault(&fault);
+            progress.error(backend_public_kind(&fault))
+        })?;
+        self.last_pointer = Some(observation.pointer);
+        progress.observed_pointer = Some(observation.pointer);
+        progress.observed_buttons = Some(observation.logical_buttons_1_to_5);
+        if observation.pointer != live_target {
+            return Err(progress.error(InputFailureKind::PostconditionFailed));
+        }
+        if let Some(precondition) = staged.precondition.as_mut() {
+            precondition
+                .evaluate()
+                .map_err(|failure| progress.error(input_precondition_failure_kind(failure)))?;
+        }
+        Ok(())
     }
 
     fn run_batch(
@@ -3026,6 +3536,14 @@ impl ActionProgress {
     }
 }
 
+const fn input_precondition_failure_kind(failure: InputPreconditionFailure) -> InputFailureKind {
+    match failure {
+        InputPreconditionFailure::TargetStale => InputFailureKind::TargetStale,
+        InputPreconditionFailure::FocusLost => InputFailureKind::FocusLost,
+        InputPreconditionFailure::Unavailable => InputFailureKind::PreconditionUnavailable,
+    }
+}
+
 fn motion_sample_events(samples: &[xenoteer_core::input::MotionSample]) -> Vec<PlannedEvent> {
     samples
         .iter()
@@ -3189,7 +3707,12 @@ pub(super) fn requested_pointer(
     match operation {
         InputOperation::Pointer(action) => requested_pointer_action(action),
         InputOperation::PointerMove(request) => Some(request.target()),
-        InputOperation::Keyboard(_) => None,
+        InputOperation::PointerMoveRelative(_)
+        | InputOperation::PointerClick(_)
+        | InputOperation::PointerDrag(_)
+        | InputOperation::WindowPointerClick(_)
+        | InputOperation::PointerScroll(_)
+        | InputOperation::Keyboard(_) => None,
     }
 }
 

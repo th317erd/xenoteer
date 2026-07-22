@@ -1,5 +1,118 @@
 {
   "$defs": {
+    "ClipboardPasteEvidence": {
+      "description": "Content-free evidence that an application requested temporary paste data.",
+      "properties": {
+        "postcondition_met": {
+          "description": "Optional independently evaluated semantic/visual postcondition.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "request_observed": {
+          "description": "At least one compatible SelectionRequest was observed.",
+          "type": "boolean"
+        },
+        "requested_targets": {
+          "description": "Ordered unique target names requested by the application.",
+          "items": {
+            "$ref": "#/$defs/ClipboardTarget"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "restoration": {
+          "$ref": "#/$defs/ClipboardRestorationEvidence",
+          "description": "Clipboard cleanup result."
+        },
+        "transfer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SelectionTransferEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Terminal transfer evidence when a compatible request was served. A\nfailed terminal preserves partial INCR progress without claiming success."
+        }
+      },
+      "required": [
+        "request_observed",
+        "requested_targets",
+        "restoration"
+      ],
+      "type": "object"
+    },
+    "ClipboardRestorationEvidence": {
+      "description": "Content-free clipboard restoration evidence.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ClipboardRestorationKind",
+          "description": "Honest restoration semantics; never claims original-owner restoration."
+        },
+        "preserved_bytes": {
+          "description": "Bytes copied within the preservation budget.",
+          "format": "uint64",
+          "maximum": 4194304,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "previous_owner_existed": {
+          "description": "Whether an owner existed before Xenoteer acquired CLIPBOARD.",
+          "type": "boolean"
+        },
+        "requested": {
+          "description": "Whether preservation was requested.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "requested",
+        "previous_owner_existed",
+        "preserved_bytes",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "ClipboardRestorationKind": {
+      "description": "Clipboard state left after temporary paste cleanup.",
+      "oneOf": [
+        {
+          "const": "not_requested",
+          "description": "Caller explicitly disabled preservation.",
+          "type": "string"
+        },
+        {
+          "const": "value_copy",
+          "description": "Xenoteer remains owner of a copied previous text value.",
+          "type": "string"
+        },
+        {
+          "const": "relinquished_no_owner",
+          "description": "No owner/value existed, so Xenoteer relinquished ownership.",
+          "type": "string"
+        },
+        {
+          "const": "partial_value_copy",
+          "description": "A bounded text value was restored but arbitrary formats were not.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "Restoration could not be proven.",
+          "type": "string"
+        }
+      ]
+    },
+    "ClipboardTarget": {
+      "description": "A bounded X11 target atom name.",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[!-~]+$",
+      "type": "string"
+    },
     "CommandId": {
       "description": "Deduplicates one client-authored command.",
       "format": "uuid",
@@ -54,7 +167,6 @@
       "description": "A successful command payload.",
       "oneOf": [
         {
-          "additionalProperties": false,
           "description": "A Phase-0 backend probe acknowledgment.",
           "properties": {
             "ready": {
@@ -73,7 +185,6 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
           "description": "A registered application profile launched successfully.",
           "properties": {
             "process": {
@@ -92,7 +203,6 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
           "description": "Current managed process status.",
           "properties": {
             "process": {
@@ -111,7 +221,6 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
           "description": "Managed termination completed and the child was reaped.",
           "properties": {
             "process": {
@@ -130,7 +239,6 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
           "description": "An operation completed without an additional payload.",
           "properties": {
             "type": {
@@ -140,6 +248,42 @@
           },
           "required": [
             "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A window operation completed with bounded observed evidence.",
+          "properties": {
+            "result": {
+              "$ref": "#/$defs/WindowControlResult",
+              "description": "Desired operation and observed postcondition."
+            },
+            "type": {
+              "const": "window_control",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Text insertion completed with content-free delivery evidence.",
+          "properties": {
+            "evidence": {
+              "$ref": "#/$defs/TextInsertEvidence",
+              "description": "Selected strategy and bounded completed counts."
+            },
+            "type": {
+              "const": "text_inserted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "evidence"
           ],
           "type": "object"
         }
@@ -227,6 +371,31 @@
       "format": "uuid",
       "type": "string"
     },
+    "CoordinateSpace": {
+      "description": "The reference frame used by a geometry value.",
+      "oneOf": [
+        {
+          "const": "root_physical",
+          "description": "Root-window physical pixels.",
+          "type": "string"
+        },
+        {
+          "const": "window_client",
+          "description": "Coordinates relative to a client window.",
+          "type": "string"
+        },
+        {
+          "const": "window_frame",
+          "description": "Coordinates relative to a window-manager frame.",
+          "type": "string"
+        },
+        {
+          "const": "atspi_screen",
+          "description": "AT-SPI screen coordinates after profile correlation.",
+          "type": "string"
+        }
+      ]
+    },
     "DesktopGeneration": {
       "description": "Identifies one X server/session lifetime.",
       "format": "uuid",
@@ -276,6 +445,21 @@
           "type": "string"
         },
         {
+          "const": "pointer_clicked",
+          "description": "One or more complete pointer clicks were confirmed.",
+          "type": "string"
+        },
+        {
+          "const": "pointer_dragged",
+          "description": "A complete press/move/release drag was confirmed.",
+          "type": "string"
+        },
+        {
+          "const": "pointer_scrolled",
+          "description": "One or more complete discrete scroll notches were confirmed.",
+          "type": "string"
+        },
+        {
           "const": "key_pressed",
           "description": "A physical key was pressed.",
           "type": "string"
@@ -283,6 +467,11 @@
         {
           "const": "key_released",
           "description": "A physical key was released.",
+          "type": "string"
+        },
+        {
+          "const": "keyboard_action_completed",
+          "description": "A complete key press, chord, or sequence was confirmed.",
           "type": "string"
         },
         {
@@ -308,6 +497,26 @@
         {
           "const": "postcondition_met",
           "description": "The requested postcondition was observed.",
+          "type": "string"
+        },
+        {
+          "const": "window_request_sent",
+          "description": "A window-manager or ICCCM request crossed its externally visible boundary.",
+          "type": "string"
+        },
+        {
+          "const": "window_state_changed",
+          "description": "The requested window postcondition was observed.",
+          "type": "string"
+        },
+        {
+          "const": "clipboard_ownership_changed",
+          "description": "Xenoteer acquired or relinquished X11 selection ownership.",
+          "type": "string"
+        },
+        {
+          "const": "text_inserted",
+          "description": "At least one text-insertion effect was emitted.",
           "type": "string"
         }
       ]
@@ -470,7 +679,6 @@
       ]
     },
     "LeaseStateView": {
-      "additionalProperties": false,
       "description": "A redaction-safe lease state response.",
       "properties": {
         "desktop_generation": {
@@ -589,7 +797,6 @@
       "type": "object"
     },
     "ProcessExit": {
-      "additionalProperties": false,
       "description": "Reaped Unix child status without unbounded output.",
       "properties": {
         "code": {
@@ -621,7 +828,6 @@
       "type": "object"
     },
     "ProcessRef": {
-      "additionalProperties": false,
       "description": "A reference safe against desktop restart and Linux PID reuse.",
       "properties": {
         "desktop_generation": {
@@ -679,7 +885,6 @@
       ]
     },
     "ProcessView": {
-      "additionalProperties": false,
       "description": "Current status of a managed application child.",
       "properties": {
         "exit": {
@@ -709,7 +914,6 @@
       "type": "object"
     },
     "ProtocolVersion": {
-      "additionalProperties": false,
       "description": "A negotiated protocol major/minor pair.",
       "properties": {
         "major": {
@@ -728,6 +932,36 @@
       "required": [
         "major",
         "minor"
+      ],
+      "type": "object"
+    },
+    "Rect": {
+      "description": "A signed origin and non-empty unsigned extent.",
+      "properties": {
+        "height": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "x": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "y": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
       ],
       "type": "object"
     },
@@ -761,6 +995,169 @@
         }
       ]
     },
+    "SelectionTransferEvidence": {
+      "description": "Content-free evidence that an X11 selection transfer reached a terminal state.",
+      "properties": {
+        "content_length": {
+          "description": "Exact accumulated payload bytes, never trusted from INCR advertisement.",
+          "format": "uint64",
+          "maximum": 16777216,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "owner_changed": {
+          "description": "Whether the selection owner changed during the transfer.",
+          "type": "boolean"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Content identity; content itself is absent from diagnostics/events."
+        },
+        "target": {
+          "$ref": "#/$defs/ClipboardTarget",
+          "description": "Representation actually transferred."
+        },
+        "terminal": {
+          "$ref": "#/$defs/SelectionTransferTerminal",
+          "description": "Completed or content-free failed terminal outcome."
+        },
+        "terminal_chunk_observed": {
+          "description": "Whether the required zero-length terminator was observed for INCR.",
+          "type": "boolean"
+        },
+        "transfer": {
+          "$ref": "#/$defs/SelectionTransferMode",
+          "description": "Direct or INCR wire path."
+        }
+      },
+      "required": [
+        "target",
+        "transfer",
+        "content_length",
+        "sha256",
+        "owner_changed",
+        "terminal_chunk_observed",
+        "terminal"
+      ],
+      "type": "object"
+    },
+    "SelectionTransferFailureReason": {
+      "description": "Why an observed selection transfer terminated before completion.",
+      "oneOf": [
+        {
+          "const": "timeout",
+          "description": "The bounded peer handshake deadline elapsed.",
+          "type": "string"
+        },
+        {
+          "const": "owner_changed",
+          "description": "Selection ownership changed during the transfer.",
+          "type": "string"
+        },
+        {
+          "const": "requestor_destroyed",
+          "description": "The requestor window disappeared.",
+          "type": "string"
+        },
+        {
+          "const": "protocol_violation",
+          "description": "The peer violated direct, MULTIPLE, or INCR framing semantics.",
+          "type": "string"
+        },
+        {
+          "const": "selection_too_large",
+          "description": "Accumulated bytes crossed the configured selection ceiling.",
+          "type": "string"
+        },
+        {
+          "const": "cancelled",
+          "description": "The enclosing command was cancelled before completion.",
+          "type": "string"
+        }
+      ]
+    },
+    "SelectionTransferMode": {
+      "description": "Direct versus ICCCM INCR transfer evidence.",
+      "oneOf": [
+        {
+          "description": "One ordinary property transfer.",
+          "properties": {
+            "mode": {
+              "const": "direct",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Property-delete handshake with one or more chunks and a zero-length terminator.",
+          "properties": {
+            "announced_minimum_bytes": {
+              "description": "Untrusted lower-bound byte count announced by the peer.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "chunks": {
+              "description": "Non-terminal content chunks processed.",
+              "format": "uint32",
+              "maximum": 4096,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "mode": {
+              "const": "incr",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "announced_minimum_bytes",
+            "chunks"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SelectionTransferTerminal": {
+      "description": "Terminal status of a direct or INCR selection transfer.",
+      "oneOf": [
+        {
+          "description": "The exact payload and, for INCR, its zero-length terminator were observed.",
+          "properties": {
+            "status": {
+              "const": "completed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A compatible request was observed but the transfer ended without success.",
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/SelectionTransferFailureReason",
+              "description": "Bounded content-free failure category."
+            },
+            "status": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "SequencedEvent": {
       "description": "One normalized event after global sequence assignment.",
       "properties": {
@@ -791,6 +1188,84 @@
         "payload"
       ],
       "type": "object"
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase hexadecimal SHA-256 content identity.",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "TextInsertEvidence": {
+      "description": "Content-free text insertion result metadata.",
+      "properties": {
+        "clipboard": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClipboardPasteEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Required exactly when clipboard strategy was selected."
+        },
+        "completed_scalars": {
+          "description": "Complete scalars delivered before success/failure/cancellation.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "selected_strategy": {
+          "$ref": "#/$defs/TextStrategy",
+          "description": "Concrete strategy selected after policy evaluation."
+        },
+        "unicode_scalars": {
+          "description": "Source Unicode scalar values, not grapheme clusters.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "utf8_bytes": {
+          "description": "Exact source UTF-8 bytes.",
+          "format": "uint64",
+          "maximum": 1048576,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "selected_strategy",
+        "utf8_bytes",
+        "unicode_scalars",
+        "completed_scalars"
+      ],
+      "type": "object"
+    },
+    "TextStrategy": {
+      "description": "Release-four exact text strategies.",
+      "oneOf": [
+        {
+          "const": "physical",
+          "description": "Current-layout XTEST keycodes only.",
+          "type": "string"
+        },
+        {
+          "const": "physical_extended",
+          "description": "Explicit global temporary-keymap strategy.",
+          "type": "string"
+        },
+        {
+          "const": "clipboard",
+          "description": "Temporary CLIPBOARD ownership plus an observed paste request.",
+          "type": "string"
+        },
+        {
+          "const": "auto",
+          "description": "Deterministic policy selection among available release-four strategies.",
+          "type": "string"
+        }
+      ]
     },
     "Timestamp": {
       "description": "A canonical RFC 3339 timestamp with an explicit UTC offset.",
@@ -923,6 +1398,1155 @@
       },
       "required": [
         "status"
+      ],
+      "type": "object"
+    },
+    "WindowActivateResult": {
+      "description": "Observed activation/focus evidence after an activation request.",
+      "properties": {
+        "converged": {
+          "type": "boolean"
+        },
+        "observed_active": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_focused": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requested": {
+          "$ref": "#/$defs/WindowRef"
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/WindowControlWarning"
+          },
+          "maxItems": 16,
+          "type": "array"
+        }
+      },
+      "required": [
+        "requested",
+        "converged",
+        "warnings"
+      ],
+      "type": "object"
+    },
+    "WindowAtomName": {
+      "description": "Bounded escaped X11 atom name safe for public metadata.",
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "WindowClass": {
+      "description": "Separately decoded ICCCM `WM_CLASS` components.",
+      "properties": {
+        "class": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Resource class component, if it could be recovered."
+        },
+        "instance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Resource instance component, if it could be recovered."
+        }
+      },
+      "type": "object"
+    },
+    "WindowCloseOutcome": {
+      "description": "Observed terminal state of a close request.",
+      "enum": [
+        "destroyed",
+        "unmapped",
+        "refused_or_timed_out",
+        "process_exited",
+        "request_sent"
+      ],
+      "type": "string"
+    },
+    "WindowCloseResult": {
+      "description": "Close evidence that never implies a force-kill operation.",
+      "properties": {
+        "final_snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Last usable observation when the original still exists."
+        },
+        "outcome": {
+          "$ref": "#/$defs/WindowCloseOutcome"
+        },
+        "requested": {
+          "$ref": "#/$defs/WindowRef"
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/WindowControlWarning"
+          },
+          "maxItems": 16,
+          "type": "array"
+        }
+      },
+      "required": [
+        "requested",
+        "outcome",
+        "warnings"
+      ],
+      "type": "object"
+    },
+    "WindowControlResult": {
+      "description": "Typed outcome ready to become one `CommandOutcome` variant at integration.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/WindowActivateResult",
+          "properties": {
+            "type": {
+              "const": "activated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/WindowCloseResult",
+          "properties": {
+            "type": {
+              "const": "closed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/WindowStateResult",
+          "properties": {
+            "type": {
+              "const": "state_changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/WindowStateResult",
+          "properties": {
+            "type": {
+              "const": "minimized",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/WindowMoveResizeResult",
+          "properties": {
+            "type": {
+              "const": "geometry_changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/WindowMoveToWorkspaceResult",
+          "properties": {
+            "type": {
+              "const": "workspace_changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/WindowStackResult",
+          "properties": {
+            "type": {
+              "const": "stacked",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WindowControlWarning": {
+      "description": "Safe bounded warning produced while observing an advisory WM operation.",
+      "enum": [
+        "used_set_input_focus_fallback",
+        "used_wm_delete_window_fallback",
+        "used_raw_stack_fallback",
+        "current_time_fallback",
+        "geometry_constrained",
+        "workspace_not_confirmed",
+        "partial_state_observed",
+        "focus_not_acquired",
+        "stacking_not_confirmed",
+        "target_unmapped"
+      ],
+      "type": "string"
+    },
+    "WindowFrameExtents": {
+      "description": "Advisory window-manager frame borders in root-physical pixels.",
+      "properties": {
+        "bottom": {
+          "format": "uint32",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "left": {
+          "format": "uint32",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "right": {
+          "format": "uint32",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "top": {
+          "format": "uint32",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "left",
+        "right",
+        "top",
+        "bottom"
+      ],
+      "type": "object"
+    },
+    "WindowGeometry": {
+      "description": "Bounded geometry projection with every rectangle expressed in root coordinates.",
+      "properties": {
+        "client_rect": {
+          "$ref": "#/$defs/WindowRect",
+          "description": "Top-level client geometry translated into root-physical coordinates."
+        },
+        "content_rect": {
+          "$ref": "#/$defs/WindowRect",
+          "description": "Proven content geometry; initially equal to the client geometry."
+        },
+        "frame_extents": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowFrameExtents"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Advisory `_NET_FRAME_EXTENTS`, when available."
+        },
+        "frame_rect": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowRect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Window-manager frame geometry, when a frame can be established."
+        }
+      },
+      "required": [
+        "client_rect",
+        "content_rect"
+      ],
+      "type": "object"
+    },
+    "WindowGeometryRequest": {
+      "description": "Partial desired geometry; omitted axes/extents retain the current value.",
+      "properties": {
+        "height": {
+          "format": "uint32",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "width": {
+          "format": "uint32",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "x": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "y": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "WindowGeometryTarget": {
+      "description": "Whether requested geometry describes the WM frame or top-level client.",
+      "enum": [
+        "frame",
+        "client"
+      ],
+      "type": "string"
+    },
+    "WindowIdentityHash": {
+      "description": "Fixed lowercase SHA-256 projection binding an XID birth to initial evidence.",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "WindowManagerState": {
+      "description": "Desired idempotent `_NET_WM_STATE` projection.",
+      "oneOf": [
+        {
+          "enum": [
+            "fullscreen",
+            "above",
+            "sticky"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "maximized",
+          "description": "Both vertical and horizontal maximize atoms as one public state.",
+          "type": "string"
+        }
+      ]
+    },
+    "WindowMapState": {
+      "description": "X server map/viewability state without guessing minimization semantics.",
+      "oneOf": [
+        {
+          "const": "unmapped",
+          "description": "The client is not mapped.",
+          "type": "string"
+        },
+        {
+          "const": "unviewable",
+          "description": "The client is mapped but not currently viewable.",
+          "type": "string"
+        },
+        {
+          "const": "viewable",
+          "description": "The client is mapped and viewable.",
+          "type": "string"
+        }
+      ]
+    },
+    "WindowMetadata": {
+      "description": "Bounded metadata that may originate from untrusted X11 client properties.",
+      "properties": {
+        "allowed_actions": {
+          "items": {
+            "$ref": "#/$defs/WindowAtomName"
+          },
+          "maxItems": 256,
+          "type": "array"
+        },
+        "class": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowClass"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "client_machine": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "icon_title": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocols": {
+          "items": {
+            "$ref": "#/$defs/WindowAtomName"
+          },
+          "maxItems": 256,
+          "type": "array"
+        },
+        "states": {
+          "items": {
+            "$ref": "#/$defs/WindowAtomName"
+          },
+          "maxItems": 256,
+          "type": "array"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "visible_title": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "window_types": {
+          "items": {
+            "$ref": "#/$defs/WindowAtomName"
+          },
+          "maxItems": 256,
+          "type": "array"
+        }
+      },
+      "required": [
+        "window_types",
+        "states",
+        "allowed_actions",
+        "protocols"
+      ],
+      "type": "object"
+    },
+    "WindowModelRevision": {
+      "description": "One non-zero actor-local model revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "WindowMoveResizeResult": {
+      "description": "Desired versus observed geometry after the WM quiet window.",
+      "properties": {
+        "constrained": {
+          "type": "boolean"
+        },
+        "converged": {
+          "type": "boolean"
+        },
+        "desired": {
+          "$ref": "#/$defs/WindowGeometryRequest"
+        },
+        "effective": {
+          "$ref": "#/$defs/WindowRect",
+          "description": "Full root-physical frame/client rectangle after live bounds/frame normalization."
+        },
+        "observed": {
+          "$ref": "#/$defs/WindowGeometry"
+        },
+        "observed_revision": {
+          "$ref": "#/$defs/WindowModelRevision"
+        },
+        "relative_to": {
+          "$ref": "#/$defs/WindowGeometryTarget"
+        },
+        "requested": {
+          "$ref": "#/$defs/WindowRef"
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/WindowControlWarning"
+          },
+          "maxItems": 16,
+          "type": "array"
+        }
+      },
+      "required": [
+        "requested",
+        "relative_to",
+        "desired",
+        "effective",
+        "observed",
+        "observed_revision",
+        "constrained",
+        "converged",
+        "warnings"
+      ],
+      "type": "object"
+    },
+    "WindowMoveToWorkspaceResult": {
+      "description": "Observed convergence after requesting a zero-based workspace assignment.",
+      "properties": {
+        "converged": {
+          "type": "boolean"
+        },
+        "desired_workspace": {
+          "format": "uint32",
+          "maximum": 4294967294,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "observed_revision": {
+          "$ref": "#/$defs/WindowModelRevision"
+        },
+        "observed_workspace": {
+          "description": "Last normalized `_NET_WM_DESKTOP` value, if the property was usable.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "requested": {
+          "$ref": "#/$defs/WindowRef"
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/WindowControlWarning"
+          },
+          "maxItems": 16,
+          "type": "array"
+        }
+      },
+      "required": [
+        "requested",
+        "desired_workspace",
+        "observed_revision",
+        "converged",
+        "warnings"
+      ],
+      "type": "object"
+    },
+    "WindowObservedState": {
+      "description": "Observed window-manager and focus state.",
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "focused": {
+          "type": "boolean"
+        },
+        "hidden": {
+          "type": "boolean"
+        },
+        "map_state": {
+          "$ref": "#/$defs/WindowMapState"
+        },
+        "minimized": {
+          "type": "boolean"
+        },
+        "modal": {
+          "type": "boolean"
+        },
+        "sticky": {
+          "type": "boolean"
+        },
+        "urgent": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "map_state",
+        "minimized",
+        "hidden",
+        "urgent",
+        "modal",
+        "sticky",
+        "active",
+        "focused"
+      ],
+      "type": "object"
+    },
+    "WindowProcessConfidence": {
+      "description": "Confidence attached to advisory process correlation.",
+      "enum": [
+        "none",
+        "low",
+        "medium",
+        "high"
+      ],
+      "type": "string"
+    },
+    "WindowProcessCorrelation": {
+      "description": "Explicitly advisory process correlation; never authorization evidence.",
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/WindowProcessConfidence",
+          "description": "Aggregate confidence reported by the correlation policy."
+        },
+        "conflict": {
+          "description": "Whether supplied PID evidence conflicts with stronger evidence.",
+          "type": "boolean"
+        },
+        "evidence": {
+          "description": "Bounded independent evidence used by the policy.",
+          "items": {
+            "$ref": "#/$defs/WindowProcessEvidence"
+          },
+          "maxItems": 8,
+          "type": "array"
+        },
+        "managed_process": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProcessRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact managed process identity when independently correlated."
+        },
+        "reported_pid": {
+          "description": "Client-supplied `_NET_WM_PID`, if present and non-zero.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "confidence",
+        "evidence",
+        "conflict"
+      ],
+      "type": "object"
+    },
+    "WindowProcessEvidence": {
+      "description": "Independent evidence used for process/window correlation.",
+      "enum": [
+        "net_wm_pid",
+        "proc_start_time",
+        "process_group",
+        "client_leader",
+        "wm_class",
+        "wm_command",
+        "client_machine",
+        "unique_candidate"
+      ],
+      "type": "string"
+    },
+    "WindowRect": {
+      "description": "One rectangle paired with its explicit coordinate reference frame.",
+      "properties": {
+        "coordinate_space": {
+          "$ref": "#/$defs/CoordinateSpace",
+          "description": "Reference frame used by `rect`."
+        },
+        "rect": {
+          "$ref": "#/$defs/Rect",
+          "description": "Checked non-empty rectangle."
+        }
+      },
+      "required": [
+        "coordinate_space",
+        "rect"
+      ],
+      "type": "object"
+    },
+    "WindowRef": {
+      "description": "Stable reference to exactly one observed XID birth in one desktop lifetime.",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration",
+          "description": "Exact X server/session lifetime that owns the XID."
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId",
+          "description": "Desktop resource that owns the window."
+        },
+        "identity_hash": {
+          "$ref": "#/$defs/WindowIdentityHash",
+          "description": "Server-generated binding to first-observed identity evidence."
+        },
+        "observed_generation": {
+          "description": "Per-XID birth marker incremented whenever an absent XID reappears.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "xid": {
+          "description": "Non-zero core X11 window identifier.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "desktop_id",
+        "desktop_generation",
+        "xid",
+        "observed_generation",
+        "identity_hash"
+      ],
+      "type": "object"
+    },
+    "WindowSnapshot": {
+      "description": "Complete bounded observation of one currently modeled window.",
+      "properties": {
+        "client_leader": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Client leader correlated to a live modeled window, when available."
+        },
+        "geometry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowGeometry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "group_leader": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Group leader correlated to a live modeled window, when available."
+        },
+        "has_accessibility_application": {
+          "description": "Whether an AT-SPI application correlation has been established.",
+          "type": "boolean"
+        },
+        "metadata": {
+          "$ref": "#/$defs/WindowMetadata"
+        },
+        "model_revision": {
+          "$ref": "#/$defs/WindowModelRevision",
+          "description": "Actor-local model revision that produced this snapshot."
+        },
+        "process": {
+          "$ref": "#/$defs/WindowProcessCorrelation"
+        },
+        "ref": {
+          "$ref": "#/$defs/WindowRef",
+          "description": "Stable identity for this exact XID birth."
+        },
+        "stacking_index": {
+          "description": "Zero-based position in the observed stacking order.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/WindowObservedState"
+        },
+        "transient_for": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Transient parent correlated to a live modeled window, when available."
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/WindowSnapshotWarning"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "workspace": {
+          "description": "Current fixed-workspace identifier, when reported by the WM.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "xid_hex": {
+          "description": "Canonical lowercase diagnostic XID, redundant by design.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref",
+        "xid_hex",
+        "model_revision",
+        "metadata",
+        "process",
+        "state",
+        "has_accessibility_application",
+        "warnings"
+      ],
+      "type": "object"
+    },
+    "WindowSnapshotWarning": {
+      "description": "Bounded diagnostic attached to an otherwise usable snapshot.",
+      "oneOf": [
+        {
+          "properties": {
+            "code": {
+              "const": "malformed_property",
+              "type": "string"
+            },
+            "property": {
+              "$ref": "#/$defs/WindowAtomName"
+            }
+          },
+          "required": [
+            "code",
+            "property"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "truncated_property",
+              "type": "string"
+            },
+            "property": {
+              "$ref": "#/$defs/WindowAtomName"
+            }
+          },
+          "required": [
+            "code",
+            "property"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "lossy_property_text",
+              "type": "string"
+            },
+            "property": {
+              "$ref": "#/$defs/WindowAtomName"
+            }
+          },
+          "required": [
+            "code",
+            "property"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "unsupported_property_encoding",
+              "type": "string"
+            },
+            "property": {
+              "$ref": "#/$defs/WindowAtomName"
+            }
+          },
+          "required": [
+            "code",
+            "property"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "process_evidence_conflict",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "frame_geometry_unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "frame_extents_unverified",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WindowStackMode": {
+      "description": "Advisory stacking operation; exact global z-order is never promised.",
+      "enum": [
+        "raise",
+        "lower",
+        "above",
+        "below"
+      ],
+      "type": "string"
+    },
+    "WindowStackResult": {
+      "description": "Best-effort stacking convergence evidence.",
+      "properties": {
+        "converged": {
+          "type": "boolean"
+        },
+        "mode": {
+          "$ref": "#/$defs/WindowStackMode"
+        },
+        "observed_revision": {
+          "$ref": "#/$defs/WindowModelRevision"
+        },
+        "observed_sibling_index": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "observed_stacking_index": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "requested": {
+          "$ref": "#/$defs/WindowRef"
+        },
+        "sibling": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/WindowControlWarning"
+          },
+          "maxItems": 16,
+          "type": "array"
+        }
+      },
+      "required": [
+        "requested",
+        "mode",
+        "observed_revision",
+        "converged",
+        "warnings"
+      ],
+      "type": "object"
+    },
+    "WindowStateObservation": {
+      "description": "Normalized observation of a desired boolean state.",
+      "oneOf": [
+        {
+          "enum": [
+            "enabled",
+            "disabled"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "partial",
+          "description": "Only part of a compound state, currently maximization, was observed.",
+          "type": "string"
+        }
+      ]
+    },
+    "WindowStateOperation": {
+      "description": "State operation named by an observed convergence result.",
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/WindowManagerState"
+            },
+            "type": {
+              "const": "manager_state",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "minimized",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WindowStateResult": {
+      "description": "Observed desired-state convergence for state/minimize operations.",
+      "properties": {
+        "converged": {
+          "type": "boolean"
+        },
+        "desired": {
+          "type": "boolean"
+        },
+        "final_snapshot": {
+          "$ref": "#/$defs/WindowSnapshot"
+        },
+        "observed": {
+          "$ref": "#/$defs/WindowStateObservation"
+        },
+        "operation": {
+          "$ref": "#/$defs/WindowStateOperation"
+        },
+        "requested": {
+          "$ref": "#/$defs/WindowRef"
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/WindowControlWarning"
+          },
+          "maxItems": 16,
+          "type": "array"
+        }
+      },
+      "required": [
+        "requested",
+        "operation",
+        "desired",
+        "observed",
+        "converged",
+        "final_snapshot",
+        "warnings"
+      ],
+      "type": "object"
+    },
+    "WindowText": {
+      "description": "Bounded observed text with explicit lossy-decoding evidence.",
+      "properties": {
+        "lossy": {
+          "description": "Whether invalid source bytes required replacement or fallback decoding.",
+          "type": "boolean"
+        },
+        "value": {
+          "description": "UTF-8 projection exposed to clients.",
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "lossy"
       ],
       "type": "object"
     }

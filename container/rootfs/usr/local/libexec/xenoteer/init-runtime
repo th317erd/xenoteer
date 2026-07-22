@@ -101,6 +101,7 @@ umask 077
 install -d -m 0755 "$root/run/xenoteer"
 install -d -m 0710 -o "$runtime_uid" -g "$runtime_gid" "$root/run/xenoteer/bus"
 install -d -m 0710 -o "$runtime_uid" -g "$runtime_gid" "$root/run/xenoteer/bus/at-spi"
+install -d -m 0700 -o "$daemon_uid" -g "$daemon_gid" "$root/run/xenoteer/artifacts"
 install -d -m 0750 -o "$broker_uid" -g "$daemon_gid" "$root/run/xenoteer/processd"
 install -d -m 0710 -o "$runtime_uid" -g "$runtime_gid" "$root/run/user/1000"
 install -d -m 0710 -o "$runtime_uid" -g "$runtime_gid" "$root/run/user/1000/at-spi"

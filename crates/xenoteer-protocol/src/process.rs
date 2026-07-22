@@ -140,7 +140,6 @@ impl<'de> Deserialize<'de> for ApplicationArgument {
 
 /// A reference safe against desktop restart and Linux PID reuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ProcessRef {
     /// Desktop lifetime that owns the child.
     pub desktop_generation: DesktopGeneration,
@@ -152,6 +151,43 @@ pub struct ProcessRef {
     pub proc_start_ticks: u64,
     /// Server-generated managed launch identity.
     pub launch_id: LaunchId,
+}
+
+/// Request-direction representation of [`ProcessRef`].
+///
+/// The public reference is also emitted in responses and therefore accepts
+/// additive output fields. Every request occurrence deserializes through this
+/// closed shape so a misspelled identity claim is never ignored.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "ProcessRef")]
+pub(crate) struct StrictProcessRef {
+    desktop_generation: DesktopGeneration,
+    #[schemars(range(min = 1))]
+    pid: u32,
+    #[schemars(range(min = 1))]
+    proc_start_ticks: u64,
+    launch_id: LaunchId,
+}
+
+impl From<StrictProcessRef> for ProcessRef {
+    fn from(value: StrictProcessRef) -> Self {
+        Self {
+            desktop_generation: value.desktop_generation,
+            pid: value.pid,
+            proc_start_ticks: value.proc_start_ticks,
+            launch_id: value.launch_id,
+        }
+    }
+}
+
+pub(crate) fn deserialize_strict_process_ref<'de, D>(
+    deserializer: D,
+) -> Result<ProcessRef, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    StrictProcessRef::deserialize(deserializer).map(Into::into)
 }
 
 impl ProcessRef {
@@ -193,6 +229,8 @@ impl ApplicationLaunchCommand {
 #[serde(deny_unknown_fields)]
 pub struct ProcessTerminateCommand {
     /// Exact managed process identity.
+    #[serde(deserialize_with = "deserialize_strict_process_ref")]
+    #[schemars(with = "StrictProcessRef")]
     pub process: ProcessRef,
     /// Optional SIGTERM grace before SIGKILL; omission selects profile policy.
     #[schemars(range(max = MAX_TERMINATION_GRACE_MS))]
@@ -218,6 +256,8 @@ impl ProcessTerminateCommand {
 #[serde(deny_unknown_fields)]
 pub struct ProcessStatusCommand {
     /// Exact managed process identity.
+    #[serde(deserialize_with = "deserialize_strict_process_ref")]
+    #[schemars(with = "StrictProcessRef")]
     pub process: ProcessRef,
 }
 
@@ -237,7 +277,6 @@ pub enum ProcessState {
 
 /// Reaped Unix child status without unbounded output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ProcessExit {
     /// Normal exit status, mutually exclusive with `signal`.
     pub code: Option<i32>,
@@ -263,7 +302,6 @@ impl ProcessExit {
 
 /// Current status of a managed application child.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ProcessView {
     /// Exact process reference.
     pub process: ProcessRef,
@@ -293,7 +331,6 @@ impl ProcessView {
 /// routing applies that audience before serialization, and neither captured
 /// stdout/stderr nor the identity of a termination requester is disclosed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ProcessExitedEvent {
     /// Stable image-owned application profile that produced the process.
     pub application: ApplicationId,

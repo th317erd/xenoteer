@@ -12,7 +12,7 @@
     },
     "ProtocolVersion": {
       "additionalProperties": false,
-      "description": "A negotiated protocol major/minor pair.",
+      "description": "Closed request-direction protocol-version object.",
       "properties": {
         "major": {
           "format": "uint16",

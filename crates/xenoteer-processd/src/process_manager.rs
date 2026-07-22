@@ -528,6 +528,24 @@ impl ProcessRef {
     }
 }
 
+/// One manager-internal PID correlation result in request order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ManagedPidCorrelation {
+    pub(crate) pid: u32,
+    pub(crate) evidence: ManagedPidCorrelationEvidence,
+}
+
+/// Non-authoritative identity evidence for one live PID.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ManagedPidCorrelationEvidence {
+    /// PID and `/proc` start time exactly match a managed leader.
+    Leader(ProcessRef),
+    /// The live PID belongs to a uniquely verified managed process group.
+    ProcessGroup(ProcessRef),
+    /// The live PID does not correlate to a retained running record.
+    NoMatch,
+}
+
 /// Bounded bytes captured from one child stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CapturedOutput {
@@ -718,6 +736,26 @@ impl ProcessManagerHandle {
             .map_err(|_| ProcessManagerError::ManagerUnavailable)?
     }
 
+    /// Correlates a bounded PID batch without granting process authority.
+    pub(crate) async fn correlate_pids(
+        &self,
+        desktop_generation: DesktopGeneration,
+        pids: Vec<u32>,
+    ) -> Result<Vec<ManagedPidCorrelation>, ProcessManagerError> {
+        let (reply, result) = oneshot::channel();
+        self.requests
+            .send(ManagerRequest::CorrelatePids {
+                desktop_generation,
+                pids,
+                reply,
+            })
+            .await
+            .map_err(|_| ProcessManagerError::ManagerUnavailable)?;
+        result
+            .await
+            .map_err(|_| ProcessManagerError::ManagerUnavailable)?
+    }
+
     /// Terminates only the verified group named by a manager-issued reference.
     pub(crate) async fn terminate(
         &self,
@@ -848,6 +886,11 @@ enum ManagerRequest {
         process: ProcessRef,
         reply: oneshot::Sender<Result<ProcessStatus, ProcessManagerError>>,
     },
+    CorrelatePids {
+        desktop_generation: DesktopGeneration,
+        pids: Vec<u32>,
+        reply: oneshot::Sender<Result<Vec<ManagedPidCorrelation>, ProcessManagerError>>,
+    },
     Terminate {
         process: ProcessRef,
         grace_override: Option<Duration>,
@@ -924,6 +967,14 @@ impl ProcessManagerActor {
             }
             ManagerRequest::Status { process, reply } => {
                 let result = self.status(&process);
+                let _ignored = reply.send(result);
+            }
+            ManagerRequest::CorrelatePids {
+                desktop_generation,
+                pids,
+                reply,
+            } => {
+                let result = self.correlate_pids(desktop_generation, pids).await;
                 let _ignored = reply.send(result);
             }
             ManagerRequest::Terminate {
@@ -1104,6 +1155,31 @@ impl ProcessManagerActor {
             return Ok(ProcessStatus::Exited(Arc::clone(&exit.exit)));
         }
         Err(ProcessManagerError::ProcessNotManaged)
+    }
+
+    async fn correlate_pids(
+        &self,
+        desktop_generation: DesktopGeneration,
+        pids: Vec<u32>,
+    ) -> Result<Vec<ManagedPidCorrelation>, ProcessManagerError> {
+        validate_correlation_batch(self.desktop_generation, desktop_generation, &pids)?;
+        let managed = self
+            .running
+            .values()
+            .map(|record| record.process.clone())
+            .collect::<Vec<_>>();
+        let manager_generation = self.desktop_generation;
+        tokio::task::spawn_blocking(move || {
+            correlate_pid_identities(
+                manager_generation,
+                desktop_generation,
+                &pids,
+                &managed,
+                read_proc_identity_sync,
+            )
+        })
+        .await
+        .map_err(|_| ProcessManagerError::FilesystemWorkerPanicked)?
     }
 
     fn request_termination(
@@ -1589,13 +1665,122 @@ impl From<ProcReadError> for ProcessManagerError {
 }
 
 async fn read_proc_identity(pid: u32) -> Result<ProcIdentity, ProcReadError> {
-    tokio::task::spawn_blocking(move || {
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat"))
-            .map_err(|_| ProcReadError::Unavailable)?;
-        parse_proc_stat(&stat)
-    })
-    .await
-    .map_err(|_| ProcReadError::Unavailable)?
+    tokio::task::spawn_blocking(move || read_proc_identity_sync(pid))
+        .await
+        .map_err(|_| ProcReadError::Unavailable)?
+}
+
+fn read_proc_identity_sync(pid: u32) -> Result<ProcIdentity, ProcReadError> {
+    let stat =
+        fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|_| ProcReadError::Unavailable)?;
+    parse_proc_stat(&stat)
+}
+
+fn validate_correlation_batch(
+    manager_generation: DesktopGeneration,
+    requested_generation: DesktopGeneration,
+    pids: &[u32],
+) -> Result<(), ProcessManagerError> {
+    if requested_generation.as_uuid().is_nil() || manager_generation.as_uuid().is_nil() {
+        return Err(ProcessManagerError::InvalidCorrelationBatch);
+    }
+    if requested_generation != manager_generation {
+        return Err(ProcessManagerError::WrongDesktopGeneration);
+    }
+    if pids.is_empty() || pids.len() > crate::MAX_PROCESS_CORRELATION_PIDS {
+        return Err(ProcessManagerError::InvalidCorrelationBatch);
+    }
+    let mut unique = BTreeSet::new();
+    if pids.iter().any(|pid| *pid == 0 || !unique.insert(*pid)) {
+        return Err(ProcessManagerError::InvalidCorrelationBatch);
+    }
+    Ok(())
+}
+
+fn correlate_pid_identities(
+    manager_generation: DesktopGeneration,
+    requested_generation: DesktopGeneration,
+    pids: &[u32],
+    managed: &[ProcessRef],
+    mut read_identity: impl FnMut(u32) -> Result<ProcIdentity, ProcReadError>,
+) -> Result<Vec<ManagedPidCorrelation>, ProcessManagerError> {
+    validate_correlation_batch(manager_generation, requested_generation, pids)?;
+    if managed
+        .iter()
+        .any(|process| process.desktop_generation != manager_generation)
+    {
+        return Err(ProcessManagerError::EventHistoryInvariant);
+    }
+    let mut correlations = Vec::with_capacity(pids.len());
+    for &pid in pids {
+        // Window PIDs are advisory and can disappear or become unreadable
+        // independently. Preserve request ordering and let other entries prove
+        // their own evidence instead of promoting one target-local race into a
+        // batch transport failure.
+        let identity = match read_identity(pid) {
+            Ok(identity) => identity,
+            Err(ProcReadError::Unavailable | ProcReadError::Malformed) => {
+                correlations.push(ManagedPidCorrelation {
+                    pid,
+                    evidence: ManagedPidCorrelationEvidence::NoMatch,
+                });
+                continue;
+            }
+        };
+        let exact = managed
+            .iter()
+            .filter(|process| {
+                process.pid == pid && process.proc_start_ticks == identity.start_ticks
+            })
+            .collect::<Vec<_>>();
+        if exact.len() > 1 {
+            return Err(ProcessManagerError::AmbiguousProcessGroup);
+        }
+        if let Some(process) = exact.first() {
+            correlations.push(ManagedPidCorrelation {
+                pid,
+                evidence: ManagedPidCorrelationEvidence::Leader((*process).clone()),
+            });
+            continue;
+        }
+
+        // A group leader whose start time does not match a managed record is a
+        // reused or unrelated PID, never a descendant of the stale numeric PGID.
+        if identity.process_group == pid {
+            correlations.push(ManagedPidCorrelation {
+                pid,
+                evidence: ManagedPidCorrelationEvidence::NoMatch,
+            });
+            continue;
+        }
+        let group = managed
+            .iter()
+            .filter(|process| process.pid == identity.process_group)
+            .collect::<Vec<_>>();
+        if group.len() > 1 {
+            return Err(ProcessManagerError::AmbiguousProcessGroup);
+        }
+        let evidence = if let Some(process) = group.first() {
+            // A stale managed leader cannot authorize a numeric process-group
+            // match. This invalidates only the requested PID; batch shape and
+            // manager-owned ambiguity remain genuine whole-request failures.
+            let leader = read_identity(process.pid);
+            if !matches!(
+                leader,
+                Ok(identity)
+                    if identity.start_ticks == process.proc_start_ticks
+                        && identity.process_group == process.pid
+            ) {
+                ManagedPidCorrelationEvidence::NoMatch
+            } else {
+                ManagedPidCorrelationEvidence::ProcessGroup((*process).clone())
+            }
+        } else {
+            ManagedPidCorrelationEvidence::NoMatch
+        };
+        correlations.push(ManagedPidCorrelation { pid, evidence });
+    }
+    Ok(correlations)
 }
 
 fn parse_proc_stat(stat: &str) -> Result<ProcIdentity, ProcReadError> {
@@ -1844,6 +2029,10 @@ pub(crate) enum ProcessManagerError {
     ProcessIdentityChanged,
     #[error("process reference belongs to a different desktop generation")]
     WrongDesktopGeneration,
+    #[error("process correlation batch is invalid")]
+    InvalidCorrelationBatch,
+    #[error("process correlation found ambiguous managed group ownership")]
+    AmbiguousProcessGroup,
     #[error("process reference fields do not match the managed launch")]
     ProcessReferenceMismatch,
     #[error("process reference is not managed or has left retained history")]
@@ -1875,6 +2064,10 @@ pub(crate) enum ProcessManagerError {
     #[error("managed process event history invariant failed")]
     EventHistoryInvariant,
 }
+
+#[cfg(test)]
+#[path = "process_manager/correlation_tests.rs"]
+mod correlation_tests;
 
 #[cfg(test)]
 mod tests {

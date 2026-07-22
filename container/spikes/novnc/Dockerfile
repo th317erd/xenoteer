@@ -28,7 +28,7 @@ USER root
 COPY container/spikes/novnc/packages.lock /tmp/novnc-spike/packages.lock
 COPY container/spikes/novnc/critical-assets.sha256 /tmp/novnc-spike/critical-assets.sha256
 RUN apt-get update \
-    && apt-get install --download-only -y --no-install-recommends \
+    && apt-get install --download-only --reinstall -y --no-install-recommends \
       chromium=150.0.7871.124-1~deb13u1 \
       chromium-sandbox=150.0.7871.124-1~deb13u1 \
       novnc=1:1.6.0-2 \

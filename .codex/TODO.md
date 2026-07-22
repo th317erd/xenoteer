@@ -28,23 +28,23 @@ Plan: `plans/15-phased-implementation.md`
 
 ## Phase 3 — raw control plane and process lifecycle
 
-- [ ] Coordinator, lease, ledger, deadlines, generation, event hub
-- [ ] Authenticated HTTP/WebSocket protocol and limits
-- [ ] Daemon-only bearer credential ingestion before exposing `/v1`: GUI
+- [x] Coordinator, lease, ledger, deadlines, generation, event hub
+- [x] Authenticated HTTP/WebSocket protocol and limits
+- [x] Daemon-only bearer credential ingestion before exposing `/v1`: GUI
       applications share UID 1000 for X11/D-Bus and must never receive or be
       able to reopen the API token file; use a root/external gateway handoff,
       close the plaintext source before app launch, and retain only a keyed hash
-- [ ] Managed application lifecycle
-- [ ] Raw input integration, black-box verification, and enforcement that
+- [x] Managed application lifecycle
+- [x] Raw input integration, black-box verification, and enforcement that
       temporary keyboard mappings require an exclusive controller lease plus
       server-side view-only viewer authority
 
 ## Phase 4 — observation, windows, clipboard, capture, viewer
 
-- [ ] X11 observation/window identity, query, control, waits
-- [ ] Clipboard and text strategy engine
-- [ ] Capture, DAMAGE, artifacts, and viewer gateway
-- [ ] Public APIs and phase verification
+- [x] X11 observation/window identity, query, control, waits
+- [x] Clipboard and text strategy engine
+- [x] Capture, DAMAGE, artifacts, and viewer gateway
+- [x] Public APIs and phase verification
 
 ## Phase 5 — AT-SPI semantic automation
 

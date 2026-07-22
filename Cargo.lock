@@ -2104,6 +2104,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "acf4d1bc32aa46eec18caa634ec3cf4c05bfa151f12b93b510b15190f69a1ca8"
 
 [[package]]
+name = "xenoteer-artifacts"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "nix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "xenoteer-atspi"
 version = "0.1.0"
 dependencies = [
@@ -2120,7 +2133,10 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "proptest",
+ "regex-automata",
  "serde",
+ "serde_json",
+ "sha2",
  "thiserror",
  "tokio",
  "toml",
@@ -2147,9 +2163,12 @@ dependencies = [
 name = "xenoteer-protocol"
 version = "0.1.0"
 dependencies = [
+ "http",
+ "regex-automata",
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "time",
  "uuid",
@@ -2176,6 +2195,7 @@ name = "xenoteer-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "bytes",
  "futures-util",
  "getrandom 0.4.3",
  "hmac",
@@ -2187,6 +2207,7 @@ dependencies = [
  "subtle",
  "thiserror",
  "tokio",
+ "tokio-tungstenite",
  "tower",
  "tower-http",
  "tracing",
@@ -2205,9 +2226,11 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "tokio",
  "tokio-util",
+ "tracing",
  "x11rb",
  "xenoteer-core",
  "xenoteer-protocol",
@@ -2227,7 +2250,11 @@ name = "xenoteerd"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
+ "bytes",
  "clap",
+ "futures-util",
+ "getrandom 0.4.3",
  "nix",
  "serde_json",
  "sha2",
@@ -2238,6 +2265,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "x11rb",
+ "xenoteer-artifacts",
  "xenoteer-atspi",
  "xenoteer-core",
  "xenoteer-processd",

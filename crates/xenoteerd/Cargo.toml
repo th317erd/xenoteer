@@ -10,7 +10,12 @@ license = "BUSL-1.1"
 publish = false
 
 [dependencies]
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
 clap.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
 nix.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -20,6 +25,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+xenoteer-artifacts = { version = "=0.1.0", path = "../xenoteer-artifacts" }
 xenoteer-atspi = { version = "=0.1.0", path = "../xenoteer-atspi", features = ["live-atspi"] }
 xenoteer-core = { version = "=0.1.0", path = "../xenoteer-core" }
 xenoteer-protocol = { version = "=0.1.0", path = "../xenoteer-protocol" }
@@ -33,3 +39,4 @@ workspace = true
 [dev-dependencies]
 axum.workspace = true
 tower.workspace = true
+x11rb = { version = "=0.14.0", default-features = false }

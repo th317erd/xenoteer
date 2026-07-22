@@ -6,6 +6,38 @@
 //! never blocks that owner: overflow drops/coalesces events behind exactly one
 //! `ResyncRequired` marker.
 
+mod actor;
+pub(crate) mod atoms;
+mod damage;
+mod events;
+pub(crate) mod focus;
+pub(crate) mod geometry;
+mod inventory;
+pub(crate) mod property;
+mod snapshot;
+
+pub use actor::{
+    DEFAULT_OBSERVATION_EVENT_CAPACITY, DEFAULT_OBSERVATION_REQUEST_CAPACITY,
+    ObservationActorEvent, ObservationActorEventReceiver, ObservationActorExit,
+    ObservationActorFailure, ObservationActorFailureKind, ObservationActorHandle,
+    ObservationActorHealth, ObservationActorJoin, ObservationActorState,
+    ObservationActorSubmitError, ObservationReply, spawn_observation_actor,
+};
+pub use atoms::KnownAtom;
+pub use damage::{
+    DAMAGE_COALESCE_INTERVAL, MAX_DAMAGE_REGIONS, RootDamageBatch, RootDamageCoverage,
+    RootDamageHint, RootDamageRect,
+};
+pub use events::{ReconcileDecision, WindowRefresh};
+pub use focus::{FocusAncestryInput, FocusAncestryStatus, MAX_FOCUS_ANCESTRY_DEPTH};
+pub use geometry::RootGeometryInput;
+pub use inventory::{InventorySource, InventoryWarning, MAX_ROOT_WINDOWS, RootInventory};
+pub use property::PropertyWarning;
+pub use snapshot::{
+    MAX_SNAPSHOT_INPUT_WARNINGS, ObservedAtom, ObservedPropertyWarning, RootWindowEvidenceInput,
+    WindowAttributeInput, WindowPropertyInput, WindowSnapshotInput,
+};
+
 use std::io;
 use std::os::fd::AsRawFd;
 use std::sync::{
@@ -54,6 +86,29 @@ pub enum PollThreadEvent {
         /// Destroyed child XID.
         window: u32,
     },
+    /// A window property changed or was deleted.
+    Property {
+        /// Window whose property changed.
+        window: u32,
+        /// Changed property atom.
+        atom: u32,
+        /// Whether the property was deleted.
+        deleted: bool,
+    },
+    /// A window's position, size, border, or stacking relation changed.
+    Configure {
+        /// Configured window XID.
+        window: u32,
+        /// Sibling immediately below this window, or zero.
+        above_sibling: u32,
+    },
+    /// Core X focus entered or left a window.
+    Focus {
+        /// Focus event window XID.
+        window: u32,
+        /// True for `FocusIn`, false for `FocusOut`.
+        focused: bool,
+    },
     /// Pointer motion was delivered.
     Motion {
         /// Event window XID.
@@ -62,6 +117,11 @@ pub enum PollThreadEvent {
         root_x: i16,
         /// Root Y coordinate.
         root_y: i16,
+    },
+    /// Root drawable pixels changed according to the X DAMAGE extension.
+    RootDamage {
+        /// Conservative root-coordinate dirty-region evidence.
+        hint: RootDamageHint,
     },
     /// An event outside this spike's normalized subset was observed.
     Other {
@@ -337,11 +397,50 @@ fn normalize_event(event: Event) -> PollThreadEvent {
         Event::DestroyNotify(event) => PollThreadEvent::Destroy {
             window: event.window,
         },
+        Event::PropertyNotify(event) => PollThreadEvent::Property {
+            window: event.window,
+            atom: event.atom,
+            deleted: event.state == x11rb::protocol::xproto::Property::DELETE,
+        },
+        Event::ConfigureNotify(event) => PollThreadEvent::Configure {
+            window: event.window,
+            above_sibling: event.above_sibling,
+        },
+        Event::FocusIn(event) => PollThreadEvent::Focus {
+            window: event.event,
+            focused: true,
+        },
+        Event::FocusOut(event) => PollThreadEvent::Focus {
+            window: event.event,
+            focused: false,
+        },
         Event::MotionNotify(event) => PollThreadEvent::Motion {
             window: event.event,
             root_x: event.root_x,
             root_y: event.root_y,
         },
+        Event::DamageNotify(event) => {
+            let area = RootDamageRect::new(
+                i32::from(event.area.x),
+                i32::from(event.area.y),
+                u32::from(event.area.width),
+                u32::from(event.area.height),
+            );
+            let root_region = RootDamageRect::new(
+                i32::from(event.geometry.x),
+                i32::from(event.geometry.y),
+                u32::from(event.geometry.width),
+                u32::from(event.geometry.height),
+            );
+            match area.zip(root_region) {
+                Some((area, root_region)) => PollThreadEvent::RootDamage {
+                    hint: RootDamageHint { area, root_region },
+                },
+                None => PollThreadEvent::Other {
+                    response_type: event.response_type,
+                },
+            }
+        }
         other => PollThreadEvent::Other {
             response_type: other.response_type(),
         },
@@ -493,3 +592,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod actor_tests;

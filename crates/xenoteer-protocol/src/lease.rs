@@ -4,6 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::version::{StrictProtocolVersion, deserialize_strict_protocol_version};
 use crate::{ControlLeaseId, DesktopGeneration, DesktopId, ProtocolVersion, RequestId, Timestamp};
 
 /// Protocol ceiling for a requested controller-lease TTL.
@@ -14,6 +15,8 @@ pub const MAX_LEASE_TTL_MS: u32 = 3_600_000;
 #[serde(deny_unknown_fields)]
 pub struct LeaseAcquireRequest {
     /// Requested protocol version.
+    #[serde(deserialize_with = "deserialize_strict_protocol_version")]
+    #[schemars(with = "StrictProtocolVersion")]
     pub protocol_version: ProtocolVersion,
     /// Transport request correlation identifier.
     pub request_id: RequestId,
@@ -44,6 +47,8 @@ impl LeaseAcquireRequest {
 #[serde(deny_unknown_fields)]
 pub struct LeaseRenewRequest {
     /// Requested protocol version.
+    #[serde(deserialize_with = "deserialize_strict_protocol_version")]
+    #[schemars(with = "StrictProtocolVersion")]
     pub protocol_version: ProtocolVersion,
     /// Transport request correlation identifier.
     pub request_id: RequestId,
@@ -79,6 +84,8 @@ impl LeaseRenewRequest {
 #[serde(deny_unknown_fields)]
 pub struct LeaseReleaseRequest {
     /// Requested protocol version.
+    #[serde(deserialize_with = "deserialize_strict_protocol_version")]
+    #[schemars(with = "StrictProtocolVersion")]
     pub protocol_version: ProtocolVersion,
     /// Transport request correlation identifier.
     pub request_id: RequestId,
@@ -124,7 +131,6 @@ pub enum LeaseAvailability {
 
 /// A redaction-safe lease state response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct LeaseStateView {
     /// Target desktop.
     pub desktop_id: DesktopId,

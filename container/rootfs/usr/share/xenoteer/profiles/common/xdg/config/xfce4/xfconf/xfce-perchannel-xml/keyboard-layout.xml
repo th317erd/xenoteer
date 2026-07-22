@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="keyboard-layout" version="1.0">
   <property name="Default" type="empty">
-    <property name="XkbDisable" type="bool" value="false"/>
+    <!-- Xenoteer applies the deterministic server layout before XFCE starts.
+         Prevent xfsettingsd from replacing the complete XKB map several
+         seconds after the control plane has become ready. -->
+    <property name="XkbDisable" type="bool" value="true"/>
     <property name="XkbLayout" type="string" value="us"/>
     <property name="XkbModel" type="string" value="pc105"/>
     <property name="XkbVariant" type="string" value=""/>
     <property name="XkbOptions" type="string" value=""/>
   </property>
 </channel>
-

@@ -65,6 +65,9 @@ impl KeyboardModelFault {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ModelPreflight {
     pub(super) generation: u64,
+    pub(super) mapping_invalidations: usize,
+    pub(super) structural_set_map_invalidations: usize,
+    pub(super) keymap_fingerprint: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +123,30 @@ impl CapturedKeyBinding {
             && self.layout == other.layout
             && self.level == other.level
             && self.generation == other.generation
+            && self.is_modifier == other.is_modifier
+            && self.required_modifiers.len() == other.required_modifiers.len()
+            && self
+                .required_modifiers
+                .iter()
+                .zip(&other.required_modifiers)
+                .all(|(left, right)| left.key == right.key)
+    }
+
+    /// Whether a freshly resolved binding retains the same physical meaning
+    /// across a mapping-generation boundary.
+    ///
+    /// Xorg's first XTEST keyboard request can initialize the XTEST keyboard
+    /// device by publishing a structural XKB map replacement. The generation
+    /// must still advance and the model must still rebuild, but a complete
+    /// atomic chord can be confirmed when every used binding resolves to the
+    /// same physical key, layout, level, modifier role, and providers in the
+    /// rebuilt generation.
+    pub(super) fn physically_equivalent_across_generation(&self, other: &Self) -> bool {
+        self.identifier == other.identifier
+            && self.key == other.key
+            && self.concrete_named_key == other.concrete_named_key
+            && self.layout == other.layout
+            && self.level == other.level
             && self.is_modifier == other.is_modifier
             && self.required_modifiers.len() == other.required_modifiers.len()
             && self
@@ -305,6 +332,15 @@ impl NativeActorKeyboardModel {
             .map(|model| Self { model })
             .map_err(|error| BackendFault::new(BackendFaultKind::Capability, error.to_string()))
     }
+
+    fn project_preflight(&self, preflight: crate::keyboard::KeyboardPreflight) -> ModelPreflight {
+        ModelPreflight {
+            generation: preflight.generation,
+            mapping_invalidations: preflight.drained.mapping_invalidations,
+            structural_set_map_invalidations: preflight.drained.structural_set_map_invalidations,
+            keymap_fingerprint: Some(self.model.identity().fingerprint().value()),
+        }
+    }
 }
 
 #[cfg(feature = "native-xkbcommon")]
@@ -318,12 +354,11 @@ impl ActorKeyboardModel for NativeActorKeyboardModel {
     }
 
     fn synchronize_preflight(&mut self) -> Result<ModelPreflight, KeyboardModelFault> {
-        self.model
+        let preflight = self
+            .model
             .synchronize_preflight()
-            .map(|preflight| ModelPreflight {
-                generation: preflight.generation,
-            })
-            .map_err(map_native_x11_error)
+            .map_err(map_native_x11_error)?;
+        Ok(self.project_preflight(preflight))
     }
 
     fn resolve_synchronized(
@@ -371,12 +406,11 @@ impl ActorKeyboardModel for NativeActorKeyboardModel {
         let BindingToken::Native(binding) = &binding.token else {
             return Err(KeyboardModelFault::new(KeyboardModelFaultKind::Unsafe));
         };
-        self.model
+        let preflight = self
+            .model
             .validate_binding_synchronized(binding, context)
-            .map(|preflight| ModelPreflight {
-                generation: preflight.generation,
-            })
-            .map_err(map_native_model_error)
+            .map_err(map_native_model_error)?;
+        Ok(self.project_preflight(preflight))
     }
 
     fn reserve_unused_keycode(&mut self) -> Result<KeyboardReservation, KeyboardModelFault> {
@@ -420,12 +454,11 @@ impl ActorKeyboardModel for NativeActorKeyboardModel {
         let ReservationToken::Native(reservation) = &reservation.token else {
             return Err(KeyboardModelFault::new(KeyboardModelFaultKind::Unsafe));
         };
-        self.model
+        let preflight = self
+            .model
             .validate_reservation(reservation)
-            .map(|preflight| ModelPreflight {
-                generation: preflight.generation,
-            })
-            .map_err(map_native_model_error)
+            .map_err(map_native_model_error)?;
+        Ok(self.project_preflight(preflight))
     }
 }
 

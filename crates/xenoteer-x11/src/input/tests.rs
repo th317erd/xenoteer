@@ -115,32 +115,37 @@ struct MockState {
     keyboard_mapping_read_failures: BTreeMap<usize, BackendFaultKind>,
     keyboard_mapping_write_failures: BTreeMap<usize, BackendFaultKind>,
     keyboard_mapping_read_overrides: BTreeMap<usize, CoreKeyboardMapping>,
+    window_geometry: Option<xenoteer_core::window_geometry::WindowGeometryContext>,
+    window_geometries: VecDeque<xenoteer_core::window_geometry::WindowGeometryContext>,
+    window_geometry_calls: usize,
     delay_on_drain_call: Option<(usize, Duration)>,
     delay_on_pointer_call: Option<(usize, Duration)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum MockOperation {
+pub(super) enum MockOperation {
     Event(BackendEvent),
+    Delay(Duration),
     MappingWrite(CoreKeyboardMapping),
 }
 
 #[derive(Clone, Debug)]
-struct MockBackend {
+pub(super) struct MockBackend {
     state: Arc<Mutex<MockState>>,
     gate: Arc<SendGate>,
 }
 
 #[derive(Debug)]
-struct MockCookie {
+pub(super) struct MockCookie {
     state: Arc<Mutex<MockState>>,
 }
 
 #[derive(Debug)]
 struct MockKeyboardState {
     generation: u64,
+    fingerprint: u64,
     synchronize_calls: usize,
-    synchronized_generations: VecDeque<u64>,
+    synchronized_preflights: VecDeque<MockSynchronizedPreflight>,
     synchronize_faults: BTreeMap<usize, KeyboardModelFaultKind>,
     resolve_faults: VecDeque<KeyboardModelFaultKind>,
     validate_calls: usize,
@@ -153,6 +158,15 @@ struct MockKeyboardState {
     resolve_calls: usize,
     cancel_on_resolve: Option<(usize, CancellationToken)>,
     reservation_faults: VecDeque<KeyboardModelFaultKind>,
+    remapped_enter: Option<(u64, u8)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MockSynchronizedPreflight {
+    generation: u64,
+    fingerprint: u64,
+    mapping_invalidations: usize,
+    structural_set_map_invalidations: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -165,8 +179,9 @@ impl MockKeyboardModel {
         Self {
             state: Arc::new(Mutex::new(MockKeyboardState {
                 generation: 1,
+                fingerprint: 17,
                 synchronize_calls: 0,
-                synchronized_generations: VecDeque::new(),
+                synchronized_preflights: VecDeque::new(),
                 synchronize_faults: BTreeMap::new(),
                 resolve_faults: VecDeque::new(),
                 validate_calls: 0,
@@ -179,6 +194,7 @@ impl MockKeyboardModel {
                 resolve_calls: 0,
                 cancel_on_resolve: None,
                 reservation_faults: VecDeque::new(),
+                remapped_enter: None,
             })),
         }
     }
@@ -215,8 +231,42 @@ impl MockKeyboardModel {
 
     fn enqueue_synchronized_generation(&self, generation: u64) {
         lock(&self.state)
-            .synchronized_generations
-            .push_back(generation);
+            .synchronized_preflights
+            .push_back(MockSynchronizedPreflight {
+                generation,
+                fingerprint: generation.wrapping_mul(17),
+                mapping_invalidations: 1,
+                structural_set_map_invalidations: 0,
+            });
+    }
+
+    fn enqueue_xtest_initialization_generation(&self, generation: u64) {
+        let mut state = lock(&self.state);
+        let fingerprint = state.fingerprint;
+        state
+            .synchronized_preflights
+            .push_back(MockSynchronizedPreflight {
+                generation,
+                fingerprint,
+                mapping_invalidations: 1,
+                structural_set_map_invalidations: 1,
+            });
+    }
+
+    fn enqueue_xtest_like_generation(
+        &self,
+        generation: u64,
+        fingerprint: u64,
+        mapping_invalidations: usize,
+    ) {
+        lock(&self.state)
+            .synchronized_preflights
+            .push_back(MockSynchronizedPreflight {
+                generation,
+                fingerprint,
+                mapping_invalidations,
+                structural_set_map_invalidations: mapping_invalidations,
+            });
     }
 
     fn allow_reserved_scalar(&self) {
@@ -240,6 +290,10 @@ impl MockKeyboardModel {
     fn fail_next_reservation(&self, kind: KeyboardModelFaultKind) {
         lock(&self.state).reservation_faults.push_back(kind);
     }
+
+    fn remap_enter_on_generation(&self, generation: u64, keycode: u8) {
+        lock(&self.state).remapped_enter = Some((generation, keycode));
+    }
 }
 
 impl ActorKeyboardModel for MockKeyboardModel {
@@ -248,7 +302,7 @@ impl ActorKeyboardModel for MockKeyboardModel {
         KeyboardModelDiagnostics {
             availability: KeyboardModelAvailability::Available,
             generation: Some(state.generation),
-            keymap_fingerprint: Some(state.generation.wrapping_mul(17)),
+            keymap_fingerprint: Some(state.fingerprint),
         }
     }
 
@@ -259,11 +313,17 @@ impl ActorKeyboardModel for MockKeyboardModel {
         if let Some(kind) = state.synchronize_faults.remove(&call) {
             return Err(KeyboardModelFault::new(kind));
         }
-        if let Some(generation) = state.synchronized_generations.pop_front() {
-            state.generation = generation;
+        let evidence = state.synchronized_preflights.pop_front();
+        if let Some(evidence) = evidence {
+            state.generation = evidence.generation;
+            state.fingerprint = evidence.fingerprint;
         }
         Ok(ModelPreflight {
             generation: state.generation,
+            mapping_invalidations: evidence.map_or(0, |value| value.mapping_invalidations),
+            structural_set_map_invalidations: evidence
+                .map_or(0, |value| value.structural_set_map_invalidations),
+            keymap_fingerprint: Some(state.fingerprint),
         })
     }
 
@@ -289,7 +349,14 @@ impl ActorKeyboardModel for MockKeyboardModel {
         let generation = state.generation;
         let duplicate_shift = state.duplicate_shift_provider;
         let (keycode, is_modifier, needs_shift) = match identifier {
-            KeyIdentifier::Named(NamedKey::Enter) => (36, false, false),
+            KeyIdentifier::Named(NamedKey::Enter) => (
+                state
+                    .remapped_enter
+                    .filter(|(remapped_generation, _)| *remapped_generation == generation)
+                    .map_or(36, |(_, keycode)| keycode),
+                false,
+                false,
+            ),
             KeyIdentifier::Named(NamedKey::Escape) => (9, false, false),
             KeyIdentifier::Named(NamedKey::Shift | NamedKey::ShiftLeft) => (50, true, false),
             KeyIdentifier::Named(NamedKey::Control | NamedKey::ControlLeft) => (37, true, false),
@@ -374,6 +441,9 @@ impl ActorKeyboardModel for MockKeyboardModel {
         }
         Ok(ModelPreflight {
             generation: state.generation,
+            mapping_invalidations: 0,
+            structural_set_map_invalidations: 0,
+            keymap_fingerprint: Some(state.fingerprint),
         })
     }
 
@@ -414,14 +484,18 @@ impl ActorKeyboardModel for MockKeyboardModel {
         if reservation.test_token() != Some(1) {
             return Err(KeyboardModelFault::new(KeyboardModelFaultKind::Unsafe));
         }
+        let state = lock(&self.state);
         Ok(ModelPreflight {
-            generation: lock(&self.state).generation,
+            generation: state.generation,
+            mapping_invalidations: 0,
+            structural_set_map_invalidations: 0,
+            keymap_fingerprint: Some(state.fingerprint),
         })
     }
 }
 
 impl MockBackend {
-    fn new(pointer: RootPoint) -> Self {
+    pub(super) fn new(pointer: RootPoint) -> Self {
         Self {
             state: Arc::new(Mutex::new(MockState {
                 pointer,
@@ -457,6 +531,9 @@ impl MockBackend {
                 keyboard_mapping_read_failures: BTreeMap::new(),
                 keyboard_mapping_write_failures: BTreeMap::new(),
                 keyboard_mapping_read_overrides: BTreeMap::new(),
+                window_geometry: None,
+                window_geometries: VecDeque::new(),
+                window_geometry_calls: 0,
                 delay_on_drain_call: None,
                 delay_on_pointer_call: None,
             })),
@@ -534,16 +611,34 @@ impl MockBackend {
             });
     }
 
-    fn counts(&self) -> (usize, usize, usize) {
+    pub(super) fn counts(&self) -> (usize, usize, usize) {
         let state = lock(&self.state);
         (state.events.len(), state.check_calls, state.pointer_calls)
     }
 
-    fn events(&self) -> Vec<BackendEvent> {
+    pub(super) fn events(&self) -> Vec<BackendEvent> {
         lock(&self.state).events.clone()
     }
 
-    fn operations(&self) -> Vec<MockOperation> {
+    pub(super) fn set_window_geometry(
+        &self,
+        geometry: xenoteer_core::window_geometry::WindowGeometryContext,
+    ) {
+        lock(&self.state).window_geometry = Some(geometry);
+    }
+
+    pub(super) fn push_window_geometry(
+        &self,
+        geometry: xenoteer_core::window_geometry::WindowGeometryContext,
+    ) {
+        lock(&self.state).window_geometries.push_back(geometry);
+    }
+
+    pub(super) fn window_geometry_calls(&self) -> usize {
+        lock(&self.state).window_geometry_calls
+    }
+
+    pub(super) fn operations(&self) -> Vec<MockOperation> {
         lock(&self.state).operations.clone()
     }
 
@@ -676,6 +771,26 @@ impl InputBackend for MockBackend {
             .map_or(Ok(pressed), |kind| {
                 Err(BackendFault::new(kind, "injected key observation failure"))
             })
+    }
+
+    fn wait_for_input_delay(&self, duration: Duration) {
+        lock(&self.state)
+            .operations
+            .push(MockOperation::Delay(duration));
+    }
+
+    fn observe_window_geometry(
+        &self,
+        _window: u32,
+    ) -> Result<xenoteer_core::window_geometry::WindowGeometryContext, BackendFault> {
+        let mut state = lock(&self.state);
+        state.window_geometry_calls = state.window_geometry_calls.saturating_add(1);
+        if let Some(geometry) = state.window_geometries.pop_front() {
+            return Ok(geometry);
+        }
+        state.window_geometry.clone().ok_or_else(|| {
+            BackendFault::new(BackendFaultKind::Capability, "missing test window geometry")
+        })
     }
 
     fn read_keyboard_mapping(&self, key: PhysicalKey) -> Result<CoreKeyboardMapping, BackendFault> {
@@ -1727,6 +1842,25 @@ fn control_backend_panic_is_typed_and_join_panics() -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+#[test]
+fn probe_synchronizes_delayed_keyboard_mapping_before_reporting_health()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = MockBackend::new(RootPoint::new(0, 0)?);
+    let keyboard = MockKeyboardModel::new();
+    let mut engine = InputEngine::new_with_keyboard(backend, keyboard.boxed())?;
+    let synchronize_calls_before_probe = lock(&keyboard.state).synchronize_calls;
+
+    keyboard.enqueue_synchronized_generation(2);
+    let snapshot = engine.probe()?;
+
+    assert_eq!(snapshot.keyboard_model.generation, Some(2));
+    assert_eq!(
+        lock(&keyboard.state).synchronize_calls,
+        synchronize_calls_before_probe + 1
+    );
+    Ok(())
+}
+
 fn execute_keyboard_action(
     engine: &mut InputEngine<MockBackend>,
     action: KeyboardAction,
@@ -2173,6 +2307,7 @@ fn keyboard_debug_output_never_contains_scalar_content() -> Result<(), Box<dyn s
     let command = InputCommand {
         context: context(),
         operation: operation.clone(),
+        precondition: None,
         cancellation: CancellationToken::new(),
         reply,
     };
@@ -2566,7 +2701,7 @@ fn query_keymap_connection_failure_is_terminal_without_false_recovery()
 }
 
 #[test]
-fn mapping_change_before_and_after_keyboard_effects_are_distinct()
+fn equivalent_mapping_generation_change_after_complete_effect_is_accepted()
 -> Result<(), Box<dyn std::error::Error>> {
     let before_backend = MockBackend::new(RootPoint::new(0, 0)?);
     let before_keyboard = MockKeyboardModel::new();
@@ -2587,9 +2722,26 @@ fn mapping_change_before_and_after_keyboard_effects_are_distinct()
     let after_keyboard = MockKeyboardModel::new();
     let mut after_engine =
         InputEngine::new_with_keyboard(after_backend.clone(), after_keyboard.boxed())?;
-    after_keyboard.enqueue_synchronized_generation(2);
-    let after = failed(execute_keyboard_action(
+    after_keyboard.enqueue_xtest_initialization_generation(2);
+    let after = execute_keyboard_action(
         &mut after_engine,
+        KeyboardAction::press(KeyIdentifier::Named(NamedKey::Enter), 0)?,
+    )?;
+    assert_eq!(after.events_emitted, 2);
+    assert_eq!(after.completed_units, 1);
+    Ok(())
+}
+
+#[test]
+fn remapped_binding_after_complete_effect_remains_nonretryable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = MockBackend::new(RootPoint::new(0, 0)?);
+    let keyboard = MockKeyboardModel::new();
+    let mut engine = InputEngine::new_with_keyboard(backend.clone(), keyboard.boxed())?;
+    keyboard.remap_enter_on_generation(2, 35);
+    keyboard.enqueue_xtest_initialization_generation(2);
+    let after = failed(execute_keyboard_action(
+        &mut engine,
         KeyboardAction::press(KeyIdentifier::Named(NamedKey::Enter), 0)?,
     ))?;
     assert_eq!(
@@ -2603,6 +2755,85 @@ fn mapping_change_before_and_after_keyboard_effects_are_distinct()
             .as_ref()
             .is_some_and(|cleanup| cleanup.succeeded())
     );
+    Ok(())
+}
+
+#[test]
+fn ordinary_finally_equivalent_mapping_change_after_effect_is_not_exempted()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = MockBackend::new(RootPoint::new(0, 0)?);
+    let keyboard = MockKeyboardModel::new();
+    let mut engine = InputEngine::new_with_keyboard(backend, keyboard.boxed())?;
+    keyboard.enqueue_synchronized_generation(2);
+    let failure = failed(execute_keyboard_action(
+        &mut engine,
+        KeyboardAction::press(KeyIdentifier::Named(NamedKey::Enter), 0)?,
+    ))?;
+    assert_eq!(
+        failure.kind,
+        InputFailureKind::KeyboardMappingChangedAfterEffect
+    );
+    Ok(())
+}
+
+#[test]
+fn repeated_or_semantically_changed_xtest_shaped_invalidations_are_not_exempted()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (fingerprint, invalidations) in [(17, 2), (99, 1)] {
+        let backend = MockBackend::new(RootPoint::new(0, 0)?);
+        let keyboard = MockKeyboardModel::new();
+        let mut engine = InputEngine::new_with_keyboard(backend, keyboard.boxed())?;
+        keyboard.enqueue_xtest_like_generation(2, fingerprint, invalidations);
+        let failure = failed(execute_keyboard_action(
+            &mut engine,
+            KeyboardAction::press(KeyIdentifier::Named(NamedKey::Enter), 0)?,
+        ))?;
+        assert_eq!(
+            failure.kind,
+            InputFailureKind::KeyboardMappingChangedAfterEffect
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn xtest_shaped_invalidation_after_first_keyboard_effect_is_not_exempted()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = MockBackend::new(RootPoint::new(0, 0)?);
+    let keyboard = MockKeyboardModel::new();
+    let mut engine = InputEngine::new_with_keyboard(backend, keyboard.boxed())?;
+    execute_keyboard_action(
+        &mut engine,
+        KeyboardAction::press(KeyIdentifier::Named(NamedKey::Escape), 0)?,
+    )?;
+    keyboard.enqueue_xtest_initialization_generation(2);
+    let failure = failed(execute_keyboard_action(
+        &mut engine,
+        KeyboardAction::press(KeyIdentifier::Named(NamedKey::Enter), 0)?,
+    ))?;
+    assert_eq!(
+        failure.kind,
+        InputFailureKind::KeyboardMappingChangedAfterEffect
+    );
+    Ok(())
+}
+
+#[test]
+fn first_key_down_survives_exact_xtest_initialization_and_releases_capture()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = MockBackend::new(RootPoint::new(0, 0)?);
+    let keyboard = MockKeyboardModel::new();
+    let mut engine = InputEngine::new_with_keyboard(backend.clone(), keyboard.boxed())?;
+    keyboard.enqueue_xtest_initialization_generation(2);
+    execute_keyboard_action(
+        &mut engine,
+        KeyboardAction::down(KeyIdentifier::Named(NamedKey::ControlLeft))?,
+    )?;
+    execute_keyboard_action(
+        &mut engine,
+        KeyboardAction::up(KeyIdentifier::Named(NamedKey::ControlLeft))?,
+    )?;
+    assert_eq!(key_events(&backend.events()), vec![(37, true), (37, false)]);
     Ok(())
 }
 

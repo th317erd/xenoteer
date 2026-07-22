@@ -1,0 +1,569 @@
+{
+  "$defs": {
+    "ArtifactContentType": {
+      "description": "A validated HTTP media type without attacker-controlled control characters.",
+      "maxLength": 128,
+      "minLength": 3,
+      "pattern": "^[!#$&^_.+A-Za-z0-9-]+/[!#$&^_.+A-Za-z0-9-]+(?:;[ -~]+)?$",
+      "type": "string"
+    },
+    "ArtifactId": {
+      "description": "Identifies a bounded server-side artifact.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ArtifactPurpose": {
+      "description": "Why an immutable object exists and which capability authorizes it.",
+      "oneOf": [
+        {
+          "const": "clipboard_input",
+          "description": "Private caller upload consumed only as clipboard command input.",
+          "type": "string"
+        },
+        {
+          "const": "clipboard_output",
+          "description": "Private output produced by a clipboard read.",
+          "type": "string"
+        },
+        {
+          "const": "screenshot",
+          "description": "Screenshot bytes produced by an explicit capture request.",
+          "type": "string"
+        },
+        {
+          "const": "action_trace",
+          "description": "Bounded action-trace evidence.",
+          "type": "string"
+        },
+        {
+          "const": "support_bundle",
+          "description": "Explicitly requested diagnostic support material.",
+          "type": "string"
+        }
+      ]
+    },
+    "ArtifactRef": {
+      "description": "An immutable artifact reference; possession alone never grants access.",
+      "properties": {
+        "artifact_id": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Opaque object identifier."
+        },
+        "content_length": {
+          "description": "Exact immutable body length.",
+          "format": "uint64",
+          "maximum": 33554432,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "content_type": {
+          "$ref": "#/$defs/ArtifactContentType",
+          "description": "Validated response media type."
+        },
+        "created_at": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "Publication time."
+        },
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration",
+          "description": "Exact desktop lifetime owning the object."
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId",
+          "description": "Desktop owning the object."
+        },
+        "expires_at": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "Time after which the object is no longer usable."
+        },
+        "purpose": {
+          "$ref": "#/$defs/ArtifactPurpose",
+          "description": "Capability-defining object purpose."
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Digest rechecked whenever an artifact is consumed by a command."
+        }
+      },
+      "required": [
+        "artifact_id",
+        "purpose",
+        "desktop_id",
+        "desktop_generation",
+        "content_type",
+        "content_length",
+        "sha256",
+        "created_at",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    "CoordinateSpace": {
+      "description": "The reference frame used by a geometry value.",
+      "oneOf": [
+        {
+          "const": "root_physical",
+          "description": "Root-window physical pixels.",
+          "type": "string"
+        },
+        {
+          "const": "window_client",
+          "description": "Coordinates relative to a client window.",
+          "type": "string"
+        },
+        {
+          "const": "window_frame",
+          "description": "Coordinates relative to a window-manager frame.",
+          "type": "string"
+        },
+        {
+          "const": "atspi_screen",
+          "description": "AT-SPI screen coordinates after profile correlation.",
+          "type": "string"
+        }
+      ]
+    },
+    "CursorCaptureEvidence": {
+      "description": "Evidence about the deliberately non-atomic framebuffer/cursor snapshot.",
+      "properties": {
+        "composited": {
+          "description": "Whether a cursor image intersected and was composited into the result.",
+          "type": "boolean"
+        },
+        "moved_during_capture": {
+          "description": "Whether position or serial changed across the weak snapshot.",
+          "type": "boolean"
+        },
+        "requested": {
+          "description": "Whether composition was requested.",
+          "type": "boolean"
+        },
+        "serial_after": {
+          "description": "XFIXES cursor serial observed immediately after framebuffer capture.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "serial_before": {
+          "description": "XFIXES cursor serial observed immediately before framebuffer capture.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "requested",
+        "composited",
+        "moved_during_capture"
+      ],
+      "type": "object"
+    },
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "RawAlphaMode": {
+      "description": "Closed raw alpha semantics.",
+      "oneOf": [
+        {
+          "const": "unpremultiplied",
+          "description": "Unpremultiplied alpha; ordinary root visuals are normalized to 255.",
+          "type": "string"
+        }
+      ]
+    },
+    "RawBgraMetadata": {
+      "description": "Exact raw output channel and stride declaration.",
+      "properties": {
+        "alpha_mode": {
+          "$ref": "#/$defs/RawAlphaMode",
+          "description": "Alpha is an ordinary unpremultiplied byte."
+        },
+        "channel_order": {
+          "$ref": "#/$defs/RawChannelOrder",
+          "description": "Channels are blue, green, red, alpha in byte order."
+        },
+        "size": {
+          "$ref": "#/$defs/Size",
+          "description": "Output pixel dimensions."
+        },
+        "stride_bytes": {
+          "description": "Bytes between consecutive rows. Release one requires tightly packed width*4.",
+          "format": "uint32",
+          "minimum": 4,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "size",
+        "stride_bytes",
+        "channel_order",
+        "alpha_mode"
+      ],
+      "type": "object"
+    },
+    "RawChannelOrder": {
+      "description": "Closed raw channel order.",
+      "oneOf": [
+        {
+          "const": "bgra8",
+          "description": "Blue, green, red, alpha bytes.",
+          "type": "string"
+        }
+      ]
+    },
+    "Rect": {
+      "description": "A signed origin and non-empty unsigned extent.",
+      "properties": {
+        "height": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "x": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "y": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
+    "ScreenshotDelivery": {
+      "description": "How screenshot bytes are delivered outside routine JSON/event messages.",
+      "oneOf": [
+        {
+          "description": "Bytes are the HTTP response body, not embedded in this JSON object.",
+          "properties": {
+            "content_length": {
+              "description": "Exact body length.",
+              "format": "uint64",
+              "maximum": 33554432,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "delivery": {
+              "const": "inline_body",
+              "type": "string"
+            }
+          },
+          "required": [
+            "delivery",
+            "content_length"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Bytes are retained in a private authenticated artifact.",
+          "properties": {
+            "artifact": {
+              "$ref": "#/$defs/ArtifactRef",
+              "description": "Purpose-bound screenshot artifact."
+            },
+            "delivery": {
+              "const": "artifact",
+              "type": "string"
+            }
+          },
+          "required": [
+            "delivery",
+            "artifact"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ScreenshotFormat": {
+      "description": "Public screenshot representation.",
+      "oneOf": [
+        {
+          "const": "png",
+          "description": "Lossless PNG body.",
+          "type": "string"
+        },
+        {
+          "const": "raw_bgra",
+          "description": "Tightly packed unpremultiplied BGRA8 body with explicit metadata.",
+          "type": "string"
+        }
+      ]
+    },
+    "ScreenshotSourceLimitation": {
+      "description": "Truthful limitation of the X11 pixel source used for one screenshot.",
+      "oneOf": [
+        {
+          "const": "root_visible_framebuffer",
+          "description": "The root framebuffer contains only pixels visible at capture time.",
+          "type": "string"
+        },
+        {
+          "const": "window_visible_includes_occluders",
+          "description": "A window-shaped root crop remains affected by overlapping windows.",
+          "type": "string"
+        },
+        {
+          "const": "window_drawable_obscured_undefined",
+          "description": "Obscured client-drawable pixels depend on X11 backing-store behavior.",
+          "type": "string"
+        }
+      ]
+    },
+    "ScreenshotTarget": {
+      "description": "What X11 pixels a screenshot represents.",
+      "oneOf": [
+        {
+          "description": "Current visible root framebuffer. Occlusion is represented truthfully.",
+          "properties": {
+            "kind": {
+              "const": "root",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Root-framebuffer crop of a current window rectangle; occluders remain visible.",
+          "properties": {
+            "coordinate_space": {
+              "$ref": "#/$defs/WindowCaptureSpace",
+              "description": "Which observed window rectangle defines target-local region coordinates."
+            },
+            "kind": {
+              "const": "window_visible",
+              "type": "string"
+            },
+            "window": {
+              "$ref": "#/$defs/WindowRef",
+              "description": "Generation-bound window identity revalidated near capture."
+            }
+          },
+          "required": [
+            "kind",
+            "window",
+            "coordinate_space"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Core GetImage of the viewable client drawable; obscured backing is undefined.",
+          "properties": {
+            "kind": {
+              "const": "window_drawable",
+              "type": "string"
+            },
+            "window": {
+              "$ref": "#/$defs/WindowRef",
+              "description": "Generation-bound window identity revalidated near capture."
+            }
+          },
+          "required": [
+            "kind",
+            "window"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase hexadecimal SHA-256 content identity.",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "Size": {
+      "description": "A non-empty unsigned size.",
+      "properties": {
+        "height": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
+    "Timestamp": {
+      "description": "A canonical RFC 3339 timestamp with an explicit UTC offset.",
+      "format": "date-time",
+      "type": "string"
+    },
+    "WindowCaptureSpace": {
+      "description": "Window-relative space used to interpret a `window_visible` region.",
+      "oneOf": [
+        {
+          "const": "client",
+          "description": "Rectangle relative to the ICCCM client window.",
+          "type": "string"
+        },
+        {
+          "const": "frame",
+          "description": "Rectangle relative to the window-manager frame, including decorations.",
+          "type": "string"
+        }
+      ]
+    },
+    "WindowIdentityHash": {
+      "description": "Fixed lowercase SHA-256 projection binding an XID birth to initial evidence.",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "WindowRect": {
+      "description": "One rectangle paired with its explicit coordinate reference frame.",
+      "properties": {
+        "coordinate_space": {
+          "$ref": "#/$defs/CoordinateSpace",
+          "description": "Reference frame used by `rect`."
+        },
+        "rect": {
+          "$ref": "#/$defs/Rect",
+          "description": "Checked non-empty rectangle."
+        }
+      },
+      "required": [
+        "coordinate_space",
+        "rect"
+      ],
+      "type": "object"
+    },
+    "WindowRef": {
+      "description": "Stable reference to exactly one observed XID birth in one desktop lifetime.",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration",
+          "description": "Exact X server/session lifetime that owns the XID."
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId",
+          "description": "Desktop resource that owns the window."
+        },
+        "identity_hash": {
+          "$ref": "#/$defs/WindowIdentityHash",
+          "description": "Server-generated binding to first-observed identity evidence."
+        },
+        "observed_generation": {
+          "description": "Per-XID birth marker incremented whenever an absent XID reappears.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "xid": {
+          "description": "Non-zero core X11 window identifier.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "desktop_id",
+        "desktop_generation",
+        "xid",
+        "observed_generation",
+        "identity_hash"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Safe metadata returned alongside screenshot bytes or an artifact reference.",
+  "properties": {
+    "cursor": {
+      "$ref": "#/$defs/CursorCaptureEvidence",
+      "description": "Weak-snapshot cursor evidence."
+    },
+    "delivery": {
+      "$ref": "#/$defs/ScreenshotDelivery",
+      "description": "Body or artifact delivery."
+    },
+    "format": {
+      "$ref": "#/$defs/ScreenshotFormat",
+      "description": "Actual output format."
+    },
+    "limitation": {
+      "$ref": "#/$defs/ScreenshotSourceLimitation",
+      "description": "Deliberate visibility/occlusion limitation of the selected X11 source."
+    },
+    "raw": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RawBgraMetadata"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Present exactly for raw BGRA output."
+    },
+    "sha256": {
+      "$ref": "#/$defs/Sha256Digest",
+      "description": "Identity of the exact encoded/raw response body."
+    },
+    "size": {
+      "$ref": "#/$defs/Size",
+      "description": "Actual output pixel dimensions."
+    },
+    "source_region": {
+      "$ref": "#/$defs/WindowRect",
+      "description": "Exact pre-scale source rectangle expressed in root-physical coordinates."
+    },
+    "source_size": {
+      "$ref": "#/$defs/Size",
+      "description": "Exact pre-scale source dimensions, equal to `source_region.rect`'s size."
+    },
+    "target": {
+      "$ref": "#/$defs/ScreenshotTarget",
+      "description": "Semantics actually captured."
+    }
+  },
+  "required": [
+    "target",
+    "source_region",
+    "source_size",
+    "limitation",
+    "format",
+    "size",
+    "cursor",
+    "sha256",
+    "delivery"
+  ],
+  "title": "ScreenshotResult",
+  "type": "object"
+}

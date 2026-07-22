@@ -164,3 +164,176 @@
   without user confirmation, per the implementation workflow.
 - Every phase adds tests and preserves all earlier gates.
 - Record environmental verification gaps as gaps, never as successful gates.
+- Keep Rust builds at a maximum of four jobs and tests at a maximum of four test
+  threads. Run CPU/I/O-heavy commands under `nice -n 15 ionice -c 3` with an
+  explicit timeout so Xenoteer work does not starve other host processes.
+- Parallel lanes must additionally serialize heavy Cargo build/test/Clippy/doc
+  commands with `flock /tmp/codex/xenoteer-heavy-build.lock`; otherwise three
+  independent `--jobs 4` checks would still become an accidental 12-job build.
+- Phase 3 is committed locally as `90b0781`; Phase 4 is the active implementation
+  boundary and remains uncommitted until its cross-crate integrations and gates
+  are complete.
+
+## Phase 4 active boundaries
+
+- Window identity/query logic lives in `xenoteer-core`; raw X11 observation
+  contains no desktop identity or authorization; authenticated projection is a
+  server concern; `xenoteerd` is the sole composition/integration layer.
+- The server now has an unavailable-by-default artifact service seam and a
+  tested authenticated artifact upload/read/delete transport. The private
+  immutable filesystem implementation lives in `xenoteer-artifacts`.
+- The server now has an unavailable-by-default viewer-ticket service plus a
+  bounded HMAC-digest-only, 32-byte CSPRNG, single-use registry and strict
+  authenticated issuance route. The daemon composes it with the authenticated
+  view-only gateway; viewer readiness is advertised only while the fixed
+  loopback websockify/RFB chain passes its bounded probe.
+- Viewer ticket wire timestamps use wall time, but security expiry is measured
+  from a private monotonic origin; wall-clock rollback cannot extend a ticket
+  and a forward clock correction cannot expire it early.
+- Artifact GET supports exactly one bounded byte range and returns hardened
+  content/range/digest/disposition/no-store headers; duplicate, multi-range,
+  malformed, and unsatisfiable requests return an empty 416 after authorization.
+- Pagination/reference tokens bind principal, desktop generation,
+  revision/query/order, and expiry; observation waits use atomic
+  check-register-recheck; old WindowRefs never retarget after XID reuse even
+  after bounded tombstone/history expiry.
+- A loss-triggered observation resync is an identity discontinuity: all prior
+  live births must be invalidated and every still-observed XID must receive a
+  fresh birth/reference unless event-sequence continuity is positively proven.
+  Preserving by XID or matching metadata would let an old serialized reference
+  retarget after a hidden destroy/recreate cycle. QueryTree inventory order is
+  fallback discovery order, not EWMH stacking truth, and therefore must not
+  populate `stacking_index`.
+- Raw observed X11 atoms retain both the numeric atom identifier and an optional
+  reviewed `KnownAtom`; unknown atoms remain diagnostic hexadecimal values.
+  Root snapshots separately carry active-window, focused-window, and current-
+  workspace evidence so daemon normalization does not invent those states.
+- X11 focus evidence now distinguishes the raw focused child from a bounded
+  (64-parent) QueryTree ancestry proof that focus belongs to one observed top-
+  level target. Activation convergence requires both `_NET_ACTIVE_WINDOW` and
+  that descendant-focus proof; raw XID equality is insufficient for real apps.
+- Request JSON/schema objects are recursively closed, including strict wrappers
+  for authority-bearing shared DTOs. Response JSON/schema objects are
+  recursively additive. Window discovery responses carry
+  `WindowSnapshotEntry { snapshot, reference_token }` so token-only resource
+  routes are actually reachable without client token construction.
+- Phase-4 public reachability is now integrated for window control (including
+  move-to-workspace), clipboard read/write/paste, screenshot capture/artifact
+  persistence, process correlation, normalized events, and the view-only
+  gateway. Compound atomic input, complete geometry policies, live
+  capabilities, and the fixture matrix are implemented; the remaining Phase 4
+  closure is the final adversarial/gate pass and local boundary commit tracked
+  in TODO.
+- Managed window/process correlation must be broker-authenticated and bounded,
+  not a trust upgrade applied directly to client-controlled `_NET_WM_PID`.
+  Processd can batch-read `/proc/<reported-pid>/stat`, match either the exact
+  manager leader PID/start-time or its verified process group against at most
+  the configured live-process ceiling, and return only exact `ProcessRef`
+  claims plus typed evidence. The daemon then applies fenced asynchronous model
+  enrichment; exact leader evidence maps to `NetWmPid + ProcStartTime`, a
+  descendant maps to `NetWmPid + ProcessGroup`, and a uniquely correlated
+  client-leader window can add `ClientLeader`. Missing evidence stays low/none,
+  and disagreement with stronger client-leader/group evidence sets `conflict`
+  rather than silently selecting the reported PID.
+- The public viewer transports a single-use ticket in a dedicated WebSocket
+  subprotocol while selecting only `binary`; the URL path/query, logs, close
+  reasons, and backend handshake never receive ticket bytes. Admission order is
+  route/origin/protocol and capacity, atomic ticket consume, then the fixed
+  loopback websockify connection. Invalid, replayed, or wrong-origin tickets
+  therefore cause zero backend accepts; a backend failure after consume is a
+  fail-closed spent ticket and callers must mint another.
+- Clipboard actor event backpressure latches a content-free resync barrier.
+  Once the bounded queue fills, later incremental events are discarded until
+  the consumer drains the pre-loss prefix and observes that barrier; daemon
+  normalization then requests a global model/event resynchronization.
+- Capture prefers MIT-SHM 1.2 using one exact-size server-created segment per
+  in-flight owner-thread request. It waits for the image reply, reads only the
+  reported bounded body, checks detach, and never reuses a segment. Any SHM
+  protocol/segment failure disables SHM for that actor, falls back to core
+  `GetImage`, and records successful fallback in content-free health counters;
+  no unsafe Rust or
+  persistent browser-competing shared-memory pool is introduced.
+- Ubuntu Xorg/Xvfb 21.1.12 emits exactly one structural XKB SetMap
+  `KEYCODES|GEOMETRY` notification on the first XTEST keyboard request, even on
+  bare Xvfb. The input actor exempts only that first, single generation+1 event
+  when its negotiated opcode/device/range match, a complete serialized-keymap
+  fingerprint is unchanged, every used binding is physically equivalent, and
+  a final zero-invalidation bracket passes. All ordinary/repeated/semantic or
+  post-first-effect mapping changes remain fail-closed.
+- Browser clipboard paste can perform a compatible probe and the conversion
+  consumed by the renderer on separate event-loop turns. Temporary ownership
+  now remains for a 250 ms quiet interval after the latest request or transfer;
+  restoring after the old first-transfer-only 50 ms interval caused Chromium
+  to paste the preserved clipboard value. The watcher has deterministic clock
+  coverage and the live browser postcondition proves the fix.
+- A strict window-relative multi-click is not one long-lived authorization:
+  after each host-side dwell/interval, the input owner thread drains X11,
+  resolves the live client/frame geometry and pointer again, and rechecks the
+  exact observed birth plus focus immediately before each zero-delay
+  `ButtonPress`. Focus loss, XID reuse, or geometry drift before press two
+  suppresses that press and returns partial-effect evidence for press one.
+- Command cancellation uses one shared mutation-grant vocabulary at REST,
+  WebSocket, and daemon boundaries. Window and selection mutations are ordinary
+  cancellable completions rather than identity-preserving atomic completions;
+  a stop observed before actor admission has `BeforeEffect` evidence, while a
+  stop after the final X11/clipboard boundary waits for bounded evidence and
+  reports `AfterEffect` conservatively without re-executing an exact retry.
+- The Phase 4 live fixture uses GTK's multiline `GtkTextView` for its 384-KiB
+  INCR case because `GtkEntryBuffer` silently truncates at 65,534 characters.
+  Clipboard restoration evidence is honestly `partial_value_copy`: exact
+  bounded text is independently verified, but the prior owner identity and
+  arbitrary non-text targets cannot be reconstructed.
+- Two consecutive capped live matrices passed GTK3, Qt6, Chromium, Firefox,
+  and QtWebEngine direct/INCR paste, byte-exact value-copy restoration, root
+  plus five window captures, move/resize, and minimize. The cached diagnostic
+  image predates processd; the final Phase 4 gate still requires a coherent
+  current-image rebuild and all static/security/workspace checks.
+- All external desktop-event ingress now treats a lost X11 or process-event
+  batch as one shared epoch boundary, not merely a model rebuild request. Odd
+  atomic epochs coalesce loss; producers admitted on an even epoch stamp bounded
+  queue entries; the sole relay claims the next even epoch before publishing
+  `history_lost` and drops any entry whose admission epoch differs. This closes
+  load-before-gap/enqueue-after-claim, select-before-gap/publish-after-barrier,
+  and cross-relay process-gap races without blocking X11 producers, and the live
+  flood gate proves a pre-gap reference is rejected while a still-live reused
+  XID is reminted afterward.
+- WebSocket unsubscription acknowledgement is ordered with respect to the
+  control stream, not ahead of already queued events. The event-flood fixture
+  therefore drains only valid events for the replacement subscription while it
+  waits for the correlated acknowledgement, with strict message and time
+  bounds; unrelated events and resynchronization still fail the proof.
+- The viewer acceptance path traverses ticket issuance, the authenticated
+  public gateway, websockify, X0tigervnc, and an independent RFB observer. It
+  proves keyboard, pointer, clipboard, and resize messages cannot affect the
+  desktop, proves one-use replay rejection, and bounds aggregate fragmented
+  WebSocket/RFB buffering as well as individual frames.
+- The first coherent-image run caught a stale pinned noVNC module closure:
+  Debian noVNC 1.6 places DES under `core/crypto/` and `core/rfb.js` now imports
+  additional crypto and decoder modules. The gateway allowlist now matches the
+  recursively resolved ES-module closure rooted at `core/rfb.js`; startup still
+  rejects any missing, symlinked, empty, oversized, or over-budget module.
+- A derived noVNC spike must download pinned archives even when the coherent
+  base image already has one of those packages installed. Its checksum stage
+  uses `apt-get --download-only --reinstall`; without `--reinstall`, APT can
+  omit an installed package's archive and make the supply-chain proof depend on
+  base-image cache state. Spike build/runtime CPU and memory are capped at two
+  CPUs and 6 GiB, and the resulting real-browser/RFB gate remains view-only.
+- Hardened-container repetition exposed a normal X11 lifetime race: an XFCE
+  window can disappear between the root inventory, checked event subscription,
+  and detailed snapshot. Reconciliation now retries a failed snapshot once,
+  omits only a repeatedly vanished member, records `VanishedMember`, and commits
+  the coherent surviving inventory. A transient `BadWindow` no longer poisons
+  the observation service or shuts down otherwise healthy physical automation.
+- Parallel process-level SIGTERM tests exposed a separate lifecycle race: an
+  observation event selected before shutdown could fail after the shutdown
+  request and be misclassified as fatal model poison. The model loop now stops
+  admitting events once shutdown is visible and lets requested shutdown win an
+  already-selected failure, while the same failure before shutdown remains
+  fatal. A forced interleaving and 20 parallel process-suite repetitions cover
+  both the classification and the real daemon teardown path.
+- The concurrent host-X11 proof must launch Xvfb with `-noreset`. Otherwise the
+  server resets when one test binary closes the final client, and the next
+  binary can receive `ECONNRESET` during its opening handshake. Two parallel
+  harnesses reproduced that gap at the same poll-flood test; keeping each
+  authenticated, isolated Xvfb alive until explicit harness cleanup removes the
+  lifecycle race without changing production observation behavior.

@@ -1,0 +1,426 @@
+{
+  "$defs": {
+    "ArtifactContentType": {
+      "description": "A validated HTTP media type without attacker-controlled control characters.",
+      "maxLength": 128,
+      "minLength": 3,
+      "pattern": "^[!#$&^_.+A-Za-z0-9-]+/[!#$&^_.+A-Za-z0-9-]+(?:;[ -~]+)?$",
+      "type": "string"
+    },
+    "ArtifactId": {
+      "description": "Identifies a bounded server-side artifact.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ArtifactPurpose": {
+      "description": "Why an immutable object exists and which capability authorizes it.",
+      "oneOf": [
+        {
+          "const": "clipboard_input",
+          "description": "Private caller upload consumed only as clipboard command input.",
+          "type": "string"
+        },
+        {
+          "const": "clipboard_output",
+          "description": "Private output produced by a clipboard read.",
+          "type": "string"
+        },
+        {
+          "const": "screenshot",
+          "description": "Screenshot bytes produced by an explicit capture request.",
+          "type": "string"
+        },
+        {
+          "const": "action_trace",
+          "description": "Bounded action-trace evidence.",
+          "type": "string"
+        },
+        {
+          "const": "support_bundle",
+          "description": "Explicitly requested diagnostic support material.",
+          "type": "string"
+        }
+      ]
+    },
+    "ArtifactRef": {
+      "description": "An immutable artifact reference; possession alone never grants access.",
+      "properties": {
+        "artifact_id": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Opaque object identifier."
+        },
+        "content_length": {
+          "description": "Exact immutable body length.",
+          "format": "uint64",
+          "maximum": 33554432,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "content_type": {
+          "$ref": "#/$defs/ArtifactContentType",
+          "description": "Validated response media type."
+        },
+        "created_at": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "Publication time."
+        },
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration",
+          "description": "Exact desktop lifetime owning the object."
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId",
+          "description": "Desktop owning the object."
+        },
+        "expires_at": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "Time after which the object is no longer usable."
+        },
+        "purpose": {
+          "$ref": "#/$defs/ArtifactPurpose",
+          "description": "Capability-defining object purpose."
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Digest rechecked whenever an artifact is consumed by a command."
+        }
+      },
+      "required": [
+        "artifact_id",
+        "purpose",
+        "desktop_id",
+        "desktop_generation",
+        "content_type",
+        "content_length",
+        "sha256",
+        "created_at",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    "ClipboardReadDelivery": {
+      "description": "Authorized clipboard-read output, inline only below the ordinary message bound.",
+      "oneOf": [
+        {
+          "description": "Valid UTF-8 body carried inline.",
+          "properties": {
+            "delivery": {
+              "const": "inline_text",
+              "type": "string"
+            },
+            "text": {
+              "$ref": "#/$defs/SecretInlineText",
+              "description": "Secret text bytes."
+            }
+          },
+          "required": [
+            "delivery",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Binary response carried as checked base64.",
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/SecretInlineBinary",
+              "description": "Secret binary body."
+            },
+            "delivery": {
+              "const": "inline_binary",
+              "type": "string"
+            }
+          },
+          "required": [
+            "delivery",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Larger private output fetched through the artifact API.",
+          "properties": {
+            "artifact": {
+              "$ref": "#/$defs/ArtifactRef",
+              "description": "Must have purpose `clipboard_output`."
+            },
+            "delivery": {
+              "const": "artifact",
+              "type": "string"
+            }
+          },
+          "required": [
+            "delivery",
+            "artifact"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ClipboardTarget": {
+      "description": "A bounded X11 target atom name.",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[!-~]+$",
+      "type": "string"
+    },
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "SecretInlineBinary": {
+      "description": "Base64-encoded inline binary data with independently checked length/hash.",
+      "properties": {
+        "base64": {
+          "type": "string"
+        },
+        "decoded_length": {
+          "format": "uint32",
+          "maximum": 262144,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "base64",
+        "decoded_length",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "SecretInlineText": {
+      "description": "Inline UTF-8 content whose diagnostics expose only byte/scalar counts.",
+      "maxLength": 262144,
+      "type": "string"
+    },
+    "SelectionName": {
+      "description": "Independently owned X11 selections supported for release one writes.",
+      "oneOf": [
+        {
+          "const": "clipboard",
+          "description": "Explicit clipboard selection.",
+          "type": "string"
+        },
+        {
+          "const": "primary",
+          "description": "Pointer-selection convention; never mirrored automatically.",
+          "type": "string"
+        }
+      ]
+    },
+    "SelectionTransferEvidence": {
+      "description": "Content-free evidence that an X11 selection transfer reached a terminal state.",
+      "properties": {
+        "content_length": {
+          "description": "Exact accumulated payload bytes, never trusted from INCR advertisement.",
+          "format": "uint64",
+          "maximum": 16777216,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "owner_changed": {
+          "description": "Whether the selection owner changed during the transfer.",
+          "type": "boolean"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Content identity; content itself is absent from diagnostics/events."
+        },
+        "target": {
+          "$ref": "#/$defs/ClipboardTarget",
+          "description": "Representation actually transferred."
+        },
+        "terminal": {
+          "$ref": "#/$defs/SelectionTransferTerminal",
+          "description": "Completed or content-free failed terminal outcome."
+        },
+        "terminal_chunk_observed": {
+          "description": "Whether the required zero-length terminator was observed for INCR.",
+          "type": "boolean"
+        },
+        "transfer": {
+          "$ref": "#/$defs/SelectionTransferMode",
+          "description": "Direct or INCR wire path."
+        }
+      },
+      "required": [
+        "target",
+        "transfer",
+        "content_length",
+        "sha256",
+        "owner_changed",
+        "terminal_chunk_observed",
+        "terminal"
+      ],
+      "type": "object"
+    },
+    "SelectionTransferFailureReason": {
+      "description": "Why an observed selection transfer terminated before completion.",
+      "oneOf": [
+        {
+          "const": "timeout",
+          "description": "The bounded peer handshake deadline elapsed.",
+          "type": "string"
+        },
+        {
+          "const": "owner_changed",
+          "description": "Selection ownership changed during the transfer.",
+          "type": "string"
+        },
+        {
+          "const": "requestor_destroyed",
+          "description": "The requestor window disappeared.",
+          "type": "string"
+        },
+        {
+          "const": "protocol_violation",
+          "description": "The peer violated direct, MULTIPLE, or INCR framing semantics.",
+          "type": "string"
+        },
+        {
+          "const": "selection_too_large",
+          "description": "Accumulated bytes crossed the configured selection ceiling.",
+          "type": "string"
+        },
+        {
+          "const": "cancelled",
+          "description": "The enclosing command was cancelled before completion.",
+          "type": "string"
+        }
+      ]
+    },
+    "SelectionTransferMode": {
+      "description": "Direct versus ICCCM INCR transfer evidence.",
+      "oneOf": [
+        {
+          "description": "One ordinary property transfer.",
+          "properties": {
+            "mode": {
+              "const": "direct",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Property-delete handshake with one or more chunks and a zero-length terminator.",
+          "properties": {
+            "announced_minimum_bytes": {
+              "description": "Untrusted lower-bound byte count announced by the peer.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "chunks": {
+              "description": "Non-terminal content chunks processed.",
+              "format": "uint32",
+              "maximum": 4096,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "mode": {
+              "const": "incr",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "announced_minimum_bytes",
+            "chunks"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SelectionTransferTerminal": {
+      "description": "Terminal status of a direct or INCR selection transfer.",
+      "oneOf": [
+        {
+          "description": "The exact payload and, for INCR, its zero-length terminator were observed.",
+          "properties": {
+            "status": {
+              "const": "completed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A compatible request was observed but the transfer ended without success.",
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/SelectionTransferFailureReason",
+              "description": "Bounded content-free failure category."
+            },
+            "status": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase hexadecimal SHA-256 content identity.",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "Timestamp": {
+      "description": "A canonical RFC 3339 timestamp with an explicit UTC offset.",
+      "format": "date-time",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One completed clipboard read.",
+  "properties": {
+    "content": {
+      "$ref": "#/$defs/ClipboardReadDelivery",
+      "description": "Inline authorized body or private output artifact."
+    },
+    "evidence": {
+      "$ref": "#/$defs/SelectionTransferEvidence",
+      "description": "Wire transfer evidence."
+    },
+    "revision": {
+      "description": "Actor-local monotonic selection revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "selection": {
+      "$ref": "#/$defs/SelectionName",
+      "description": "Selection converted."
+    }
+  },
+  "required": [
+    "selection",
+    "revision",
+    "evidence",
+    "content"
+  ],
+  "title": "ClipboardReadResult",
+  "type": "object"
+}

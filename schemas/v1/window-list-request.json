@@ -1,0 +1,99 @@
+{
+  "$defs": {
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "WindowOrder": {
+      "description": "Stable ordering applied before limit/cursor projection.",
+      "oneOf": [
+        {
+          "const": "creation_ascending",
+          "description": "First-observed revision, then exact window-birth identity.",
+          "type": "string"
+        },
+        {
+          "const": "creation_descending",
+          "description": "Reverse first-observed revision, then exact window-birth identity.",
+          "type": "string"
+        },
+        {
+          "const": "stacking_bottom_to_top",
+          "description": "Observed stacking index with unlisted windows last, then birth identity.",
+          "type": "string"
+        },
+        {
+          "const": "stacking_top_to_bottom",
+          "description": "Reverse observed stacking index with unlisted windows last, then birth identity.",
+          "type": "string"
+        },
+        {
+          "const": "title_ascending",
+          "description": "Unicode scalar-value title order; missing titles last, then birth identity.",
+          "type": "string"
+        },
+        {
+          "const": "title_descending",
+          "description": "Reverse Unicode scalar-value title order; missing titles last, then birth identity.",
+          "type": "string"
+        },
+        {
+          "const": "xid_ascending",
+          "description": "Numeric XID, then observed generation and identity hash.",
+          "type": "string"
+        }
+      ]
+    },
+    "WindowPageCursor": {
+      "description": "Opaque, short-lived cursor bound to principal, generation, revision, query, and order.",
+      "maxLength": 1024,
+      "minLength": 16,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Bounded list request authorized by `desktop:observe`.",
+  "properties": {
+    "cursor": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WindowPageCursor"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "desktop_generation": {
+      "$ref": "#/$defs/DesktopGeneration"
+    },
+    "desktop_id": {
+      "$ref": "#/$defs/DesktopId"
+    },
+    "limit": {
+      "default": 50,
+      "format": "uint16",
+      "maximum": 200,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "order": {
+      "$ref": "#/$defs/WindowOrder"
+    }
+  },
+  "required": [
+    "desktop_id",
+    "desktop_generation",
+    "order"
+  ],
+  "title": "WindowListRequest",
+  "type": "object"
+}

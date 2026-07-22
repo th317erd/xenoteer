@@ -16,12 +16,25 @@ rfb_resize_ready=$fixture_dir/rfb-resize-processed.json
 rfb_resize_continue=$fixture_dir/rfb-resize-continue
 rfb_output=$fixture_dir/rfb-client-result.json
 rfb_errors=$fixture_dir/rfb-client.err
+gateway_ready=$fixture_dir/gateway-client-ready
+gateway_continue=$fixture_dir/gateway-client-continue
+gateway_resize_ready=$fixture_dir/gateway-resize-processed.json
+gateway_resize_continue=$fixture_dir/gateway-resize-continue
+gateway_output=$fixture_dir/gateway-client-result.json
+gateway_errors=$fixture_dir/gateway-client.err
+gateway_replay_errors=$fixture_dir/gateway-replay.err
+gateway_ticket=$fixture_dir/gateway-ticket
+gateway_metadata=$fixture_dir/gateway-metadata.json
+api_token_file=/run/secrets/xenoteer_api_token
+viewer_origin=http://127.0.0.1:8080
 
 cleanup() {
   docker exec "$container" sh -c '
     pkill -TERM -u 1000 -f "^/run/xenoteer/viewer-denial/x11-event-recorder --focus-before-ready$" 2>/dev/null || true
     pkill -TERM -u 1000 -f "^/run/xenoteer/viewer-denial/x11-selection-sentinel --canary-file /run/xenoteer/viewer-denial/server-clipboard-canary$" 2>/dev/null || true
     pkill -TERM -f "^python3 /run/xenoteer/viewer-denial/rfb_websocket_probe.py rfb " 2>/dev/null || true
+    rm -f /run/xenoteer/viewer-denial/gateway-ticket \
+      /run/xenoteer/viewer-denial/gateway-metadata.json
   ' >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -33,8 +46,17 @@ cargo_args=(
   --bin x11-input-driver
   --bin x11-selection-sentinel
 )
+if [[ ! -d /tmp/codex ]]; then
+  install -d -m 1777 /tmp/codex
+fi
+fixture_build_runner=(
+  timeout --signal=TERM --kill-after=15s 10m
+  nice -n 15
+  ionice -c 3
+  flock --wait 120 /tmp/codex/xenoteer-heavy-build.lock
+)
 if command -v cargo >/dev/null 2>&1; then
-  cargo "${cargo_args[@]}"
+  "${fixture_build_runner[@]}" cargo "${cargo_args[@]}"
 elif [[ -n ${SUDO_UID:-} && $SUDO_UID != 0 ]]; then
   invoking_home=$(getent passwd "$SUDO_UID" | cut -d: -f6)
   invoking_cargo="$invoking_home/.cargo/bin/cargo"
@@ -42,7 +64,8 @@ elif [[ -n ${SUDO_UID:-} && $SUDO_UID != 0 ]]; then
     printf 'cargo is unavailable for invoking UID %s\n' "$SUDO_UID" >&2
     exit 77
   fi
-  sudo -H -u "#$SUDO_UID" "$invoking_cargo" "${cargo_args[@]}"
+  "${fixture_build_runner[@]}" \
+    sudo -H -u "#$SUDO_UID" "$invoking_cargo" "${cargo_args[@]}"
 else
   printf 'cargo is required to build the X11 denial fixtures\n' >&2
   exit 77
@@ -64,6 +87,10 @@ docker exec "$container" rm -f \
   "$events" "$event_errors" "$selections" "$selection_errors" \
   "$rfb_ready" "$rfb_continue" "$rfb_resize_ready" "$rfb_resize_continue" \
   "$rfb_output" "$rfb_errors" \
+  "$gateway_ready" "$gateway_continue" \
+  "$gateway_resize_ready" "$gateway_resize_continue" \
+  "$gateway_output" "$gateway_errors" "$gateway_replay_errors" \
+  "$gateway_ticket" "$gateway_metadata" \
   "$clipboard_canary_file"
 
 clipboard_canary="xenoteer-viewer-egress-secret-$(tr -d '-' </proc/sys/kernel/random/uuid)"
@@ -244,8 +271,154 @@ docker exec "$container" cat "$rfb_output" | jq -e \
   and .server_cut_text_messages == 0
   and .forbidden_server_bytes_seen == false
   and .forbidden_server_bytes_sha256 == $canary_sha256
+  and .gateway_authenticated == false
   and .resize_rejection == $resize
 ' >/dev/null
+
+# Exercise the complete public chain with a real API-authenticated, origin-
+# bound, one-use ticket. The probe reads both bearer values from root-only
+# files so neither secret appears in argv, stdout, or diagnostics.
+mint_evidence=$(timeout --signal=TERM --kill-after=2s 15s \
+  docker exec "$container" env PYTHONDONTWRITEBYTECODE=1 \
+  python3 "$fixture_dir/rfb_websocket_probe.py" mint-ticket \
+  --host 127.0.0.1 --port 8080 --origin "$viewer_origin" \
+  --api-token-file "$api_token_file" \
+  --ticket-file "$gateway_ticket" --metadata-file "$gateway_metadata")
+jq -e '.authenticated_api == true and .ticket_minted == true' \
+  <<<"$mint_evidence" >/dev/null
+gateway_path=$(docker exec "$container" cat "$gateway_metadata" \
+  | jq -er '.gateway_path')
+case "$gateway_path" in
+  /v1/desktops/*/generations/*/viewer/ws) ;;
+  *) printf 'authenticated viewer metadata contained an invalid gateway path\n' >&2; exit 1 ;;
+esac
+docker exec "$container" sh -eu -c '
+  test "$(stat -c %a:%u:%g "$1")" = 600:0:0
+  test "$(stat -c %a:%u:%g "$2")" = 600:0:0
+' sh "$gateway_ticket" "$gateway_metadata"
+
+# shellcheck disable=SC2016 # Expands inside the container's positional-argument shell.
+timeout --signal=TERM --kill-after=2s 10s docker exec --detach "$container" sh -c '
+  exec env PYTHONDONTWRITEBYTECODE=1 python3 "$1" rfb \
+    --host 127.0.0.1 --port 8080 --path "$2" --origin "$3" \
+    --gateway-ticket-file "$4" \
+    --width 1920 --height 1080 --skip-framebuffer-proof \
+    --ready-file "$5" --continue-file "$6" --observe-seconds 1 \
+    --forbidden-server-bytes-file "$7" \
+    --resize-ready-file "$8" --resize-continue-file "$9" >"${10}" 2>"${11}"
+' sh "$fixture_dir/rfb_websocket_probe.py" "$gateway_path" "$viewer_origin" \
+  "$gateway_ticket" "$gateway_ready" "$gateway_continue" \
+  "$clipboard_canary_file" "$gateway_resize_ready" "$gateway_resize_continue" \
+  "$gateway_output" "$gateway_errors"
+for _ in {1..100}; do
+  docker exec "$container" test -s "$gateway_ready" 2>/dev/null && break
+  sleep 0.1
+done
+if ! docker exec "$container" grep -Fxq 'rfb_client_ready' "$gateway_ready"; then
+  docker exec "$container" cat "$gateway_errors" >&2 || true
+  printf 'authenticated viewer gateway did not complete RFB negotiation\n' >&2
+  exit 1
+fi
+
+docker exec "$container" touch "$gateway_continue"
+for _ in {1..150}; do
+  docker exec "$container" test -s "$gateway_resize_ready" 2>/dev/null && break
+  sleep 0.1
+done
+if ! docker exec "$container" test -s "$gateway_resize_ready"; then
+  docker exec "$container" cat "$gateway_errors" >&2 || true
+  printf 'authenticated viewer gateway produced no ordered resize response\n' >&2
+  exit 1
+fi
+gateway_resize_evidence=$(docker exec "$container" cat "$gateway_resize_ready")
+jq -e '
+  .ordered_protocol_barrier == "extended_desktop_size"
+  and .reason == "client" and .reason_code == 1
+  and .result == "prohibited" and .result_code == 1
+  and .requested_geometry == "1024x768"
+  and .server_init_geometry == "1920x1080"
+  and .response_geometry == .server_init_geometry
+  and any(.screens[];
+    .x == 0 and .y == 0 and .width == 1920 and .height == 1080)
+' <<<"$gateway_resize_evidence" >/dev/null
+
+# Re-run every independent negative observation while the authenticated client
+# is held at the ordered post-resize barrier. This proves the public gateway
+# did not merely return denial-shaped RFB bytes while effects reached X11.
+docker exec "$container" /command/s6-envdir /run/xenoteer/env \
+  /command/s6-setuidgid xenoteer \
+  "$fixture_dir/x11-input-driver" --query-only --x 1800 --y 1000 \
+  --expected-window 0 --skip-window-check \
+  --expected-focus-window "$recorder_window" >/dev/null
+docker exec "$container" /command/s6-envdir /run/xenoteer/env \
+  /command/s6-setuidgid xenoteer xdpyinfo \
+  | grep -F 'dimensions:    1920x1080 pixels' >/dev/null
+if docker exec "$container" grep -Eq \
+  '"type":"(motion|button_press|button_release|key_press|key_release)"' "$events"; then
+  printf 'authenticated viewer gateway changed focused X11 input state\n' >&2
+  docker exec "$container" cat "$events" >&2
+  exit 1
+fi
+docker exec "$container" sh -eu -c '
+  pgrep -u 1000 -f "^/run/xenoteer/viewer-denial/x11-selection-sentinel --canary-file /run/xenoteer/viewer-denial/server-clipboard-canary$" >/dev/null
+  ! grep -Fq "\"type\":\"selection_clear\"" /run/user/1000/viewer-denial-selections.jsonl
+'
+gateway_selection_evidence=$(docker exec "$container" cat "$selections")
+jq -se --argjson canary_bytes "${#clipboard_canary}" '
+  any(.[]; .type == "ready" and .canary_bytes == $canary_bytes)
+  and all(.[]; if .type == "selection_request" then .served_canary == false else true end)
+' <<<"$gateway_selection_evidence" >/dev/null
+
+docker exec "$container" touch "$gateway_resize_continue"
+for _ in {1..100}; do
+  docker exec "$container" test -s "$gateway_output" 2>/dev/null && break
+  sleep 0.1
+done
+if ! docker exec "$container" test -s "$gateway_output"; then
+  docker exec "$container" cat "$gateway_errors" >&2 || true
+  printf 'authenticated viewer denial probe did not complete\n' >&2
+  exit 1
+fi
+docker exec "$container" cat "$gateway_output" | jq -e \
+  --arg canary_sha256 "$canary_sha256" \
+  --argjson resize "$gateway_resize_evidence" '
+  (.sent_input_attempts | sort)
+    == (["client_cut_text", "key", "pointer", "set_desktop_size"] | sort)
+  and .server_cut_text_observation_seconds >= 1
+  and .server_cut_text_messages == 0
+  and .forbidden_server_bytes_seen == false
+  and .forbidden_server_bytes_sha256 == $canary_sha256
+  and .gateway_authenticated == true
+  and .resize_rejection == $resize
+' >/dev/null
+
+# The successful upgrade atomically consumed the ticket. A replay must fail
+# before RFB negotiation and its safe diagnostic must not contain the ticket.
+set +e
+# shellcheck disable=SC2016 # Expands inside the container's positional-argument shell.
+timeout --signal=TERM --kill-after=2s 10s docker exec "$container" sh -c '
+  exec env PYTHONDONTWRITEBYTECODE=1 python3 "$1" rfb \
+    --host 127.0.0.1 --port 8080 --path "$2" --origin "$3" \
+    --gateway-ticket-file "$4" --width 1920 --height 1080 \
+    --skip-framebuffer-proof > /dev/null 2>"$5"
+' sh "$fixture_dir/rfb_websocket_probe.py" "$gateway_path" "$viewer_origin" \
+  "$gateway_ticket" "$gateway_replay_errors"
+gateway_replay_status=$?
+set -e
+if [[ $gateway_replay_status -eq 0 || $gateway_replay_status -eq 124 ]]; then
+  printf 'consumed viewer ticket replay did not fail promptly\n' >&2
+  exit 1
+fi
+docker exec "$container" grep -Fq \
+  'WebSocket upgrade failed: HTTP/1.1 403' "$gateway_replay_errors"
+docker exec "$container" sh -eu -c '
+  ! grep -F -f "$1" "$2" >/dev/null
+' sh "$gateway_ticket" "$gateway_replay_errors"
+if docker logs "$container" 2>&1 \
+  | docker exec --interactive "$container" grep -F -f "$gateway_ticket" >/dev/null; then
+  printf 'viewer ticket appeared in container logs\n' >&2
+  exit 1
+fi
 
 # Positive XTEST control: move into the recorder and require a resulting
 # MotionNotify. This proves the recorder and its log were capable of observing

@@ -4,16 +4,23 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::geometry::{StrictPoint, deserialize_strict_point};
+use crate::version::{StrictProtocolVersion, deserialize_strict_protocol_version};
 use crate::{
-    ApplicationLaunchCommand, CommandId, ControlLeaseId, DesktopGeneration, DesktopId, Point,
-    ProcessStatusCommand, ProcessTerminateCommand, ProtocolVersion, RequestId, Timestamp,
+    ApplicationLaunchCommand, CommandId, ControlLeaseId, DesktopGeneration, DesktopId,
+    InputValidationError, KeyboardChordCommand, KeyboardPressCommand, KeyboardSequenceCommand,
+    Point, PointerClickCommand, PointerCurve, PointerDragCommand, PointerMoveRelativeCommand,
+    PointerScrollCommand, ProcessStatusCommand, ProcessTerminateCommand, ProtocolVersion,
+    RequestId, SelectionClearCommand, SelectionSetCommand, TextInsertCommand, Timestamp,
+    WindowActivateCommand, WindowCloseCommand, WindowMinimizeCommand, WindowMoveResizeCommand,
+    WindowMoveToWorkspaceCommand, WindowSetStateCommand, WindowStackCommand,
 };
 
 /// Maximum delay accepted by one XTEST-timed primitive.
 pub const MAX_XTEST_DELAY_MS: u32 = 10_000;
 
 /// Maximum duration carried by a single pointer motion primitive.
-pub const MAX_POINTER_MOVE_DURATION_MS: u32 = MAX_XTEST_DELAY_MS;
+pub use crate::input::MAX_POINTER_MOVE_DURATION_MS;
 
 /// Smallest structurally valid core X11 physical keycode.
 pub const MIN_PHYSICAL_KEYCODE: u8 = 8;
@@ -28,23 +35,13 @@ pub enum TracePolicy {
     Detailed,
 }
 
-/// Interpolation curve for a pointer movement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PointerCurve {
-    /// Move directly to the endpoint with no intermediate samples.
-    Instant,
-    /// Use equally spaced samples.
-    Linear,
-    /// Use an ease-in/ease-out smoothstep curve.
-    Smooth,
-}
-
 /// A physical pointer movement request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PointerMoveCommand {
     /// Target root-physical coordinate.
+    #[serde(deserialize_with = "deserialize_strict_point")]
+    #[schemars(with = "StrictPoint")]
     pub target: Point,
     /// Requested whole-path duration. Omission selects the configured default.
     #[schemars(range(max = MAX_POINTER_MOVE_DURATION_MS))]
@@ -126,6 +123,14 @@ pub enum Command {
     DesktopProbe(DesktopProbeCommand),
     /// Move the global physical pointer.
     PointerMove(PointerMoveCommand),
+    /// Move the global pointer relative to its execution-time position.
+    PointerMoveRelative(PointerMoveRelativeCommand),
+    /// Execute a complete FIFO-atomic click sequence.
+    PointerClick(PointerClickCommand),
+    /// Execute a complete FIFO-atomic press/move/release drag.
+    PointerDrag(PointerDragCommand),
+    /// Execute bounded discrete scroll notches.
+    PointerScroll(PointerScrollCommand),
     /// Press one raw physical pointer button.
     PointerButtonDown(PointerButtonCommand),
     /// Release one raw physical pointer button.
@@ -134,6 +139,12 @@ pub enum Command {
     KeyboardKeyDown(KeyboardKeyCommand),
     /// Release one raw physical core-X11 keycode.
     KeyboardKeyUp(KeyboardKeyCommand),
+    /// Press and release one named, scalar, or raw key.
+    KeyboardPress(KeyboardPressCommand),
+    /// Press a modifier-first chord and release it in reverse order.
+    KeyboardChord(KeyboardChordCommand),
+    /// Execute complete keyboard units without FIFO interleaving.
+    KeyboardSequence(KeyboardSequenceCommand),
     /// Conservatively release only input owned by Xenoteer.
     InputReset(InputResetCommand),
     /// Launch a configured application profile without a shell.
@@ -142,6 +153,26 @@ pub enum Command {
     ProcessTerminate(ProcessTerminateCommand),
     /// Read current status for an exact managed process reference.
     ProcessStatus(ProcessStatusCommand),
+    /// Ask the window manager to activate one exact window birth.
+    WindowActivate(WindowActivateCommand),
+    /// Ask the window manager or ICCCM client to close one exact window birth.
+    WindowClose(WindowCloseCommand),
+    /// Add or remove one idempotent window-manager state.
+    WindowSetState(WindowSetStateCommand),
+    /// Request a desired minimized state.
+    WindowMinimize(WindowMinimizeCommand),
+    /// Request bounded programmatic window geometry.
+    WindowMoveResize(WindowMoveResizeCommand),
+    /// Move one exact window birth to a zero-based workspace.
+    WindowMoveToWorkspace(WindowMoveToWorkspaceCommand),
+    /// Request a best-effort stacking relationship.
+    WindowStack(WindowStackCommand),
+    /// Acquire and serve one X11 selection value.
+    SelectionSet(SelectionSetCommand),
+    /// Relinquish Xenoteer's ownership of one X11 selection.
+    SelectionClear(SelectionClearCommand),
+    /// Insert exact UTF-8 through one bounded strategy.
+    TextInsert(TextInsertCommand),
 }
 
 impl Command {
@@ -150,12 +181,70 @@ impl Command {
         match self {
             Self::DesktopProbe(_) => Ok(()),
             Self::PointerMove(command) => command.validate(),
+            Self::PointerMoveRelative(command) => command.validate().map_err(Into::into),
+            Self::PointerClick(command) => command.validate().map_err(Into::into),
+            Self::PointerDrag(command) => command.validate().map_err(Into::into),
+            Self::PointerScroll(command) => command.validate().map_err(Into::into),
             Self::PointerButtonDown(command) | Self::PointerButtonUp(command) => command.validate(),
             Self::KeyboardKeyDown(command) | Self::KeyboardKeyUp(command) => command.validate(),
+            Self::KeyboardPress(command) => command.validate().map_err(Into::into),
+            Self::KeyboardChord(command) => command.validate().map_err(Into::into),
+            Self::KeyboardSequence(command) => command.validate().map_err(Into::into),
             Self::InputReset(_) => Ok(()),
             Self::ApplicationLaunch(command) => command.validate().map_err(Into::into),
             Self::ProcessTerminate(command) => command.validate().map_err(Into::into),
             Self::ProcessStatus(command) => command.process.validate().map_err(Into::into),
+            Self::WindowActivate(command) => command.validate().map_err(Into::into),
+            Self::WindowClose(command) => command.validate().map_err(Into::into),
+            Self::WindowSetState(command) => command.validate().map_err(Into::into),
+            Self::WindowMinimize(command) => command.validate().map_err(Into::into),
+            Self::WindowMoveResize(command) => command.validate().map_err(Into::into),
+            Self::WindowMoveToWorkspace(command) => command.validate().map_err(Into::into),
+            Self::WindowStack(command) => command.validate().map_err(Into::into),
+            Self::SelectionSet(command) => command.validate().map_err(Into::into),
+            Self::SelectionClear(_) => Ok(()),
+            Self::TextInsert(command) => command.validate().map_err(Into::into),
+        }
+    }
+
+    fn validate_for_desktop(
+        &self,
+        desktop_id: DesktopId,
+        desktop_generation: DesktopGeneration,
+    ) -> Result<(), EnvelopeValidationError> {
+        self.validate()?;
+        let window = match self {
+            Self::WindowActivate(command) => Some(&command.window),
+            Self::WindowClose(command) => Some(&command.window),
+            Self::WindowSetState(command) => Some(&command.window),
+            Self::WindowMinimize(command) => Some(&command.window),
+            Self::WindowMoveResize(command) => Some(&command.window),
+            Self::WindowMoveToWorkspace(command) => Some(&command.window),
+            Self::WindowStack(command) => Some(&command.window),
+            Self::PointerClick(command) => command.target.window(),
+            _ => None,
+        };
+        if window.is_some_and(|window| {
+            window.desktop_id != desktop_id || window.desktop_generation != desktop_generation
+        }) {
+            return Err(EnvelopeValidationError::ReferenceScope);
+        }
+        match self {
+            Self::WindowStack(command)
+                if command.sibling.as_ref().is_some_and(|sibling| {
+                    sibling.desktop_id != desktop_id
+                        || sibling.desktop_generation != desktop_generation
+                }) =>
+            {
+                Err(EnvelopeValidationError::ReferenceScope)
+            }
+            Self::SelectionSet(command) => command
+                .validate_for_desktop(desktop_id, desktop_generation)
+                .map_err(Into::into),
+            Self::TextInsert(command) => command
+                .validate_for_desktop(desktop_id, desktop_generation)
+                .map_err(Into::into),
+            _ => Ok(()),
         }
     }
 
@@ -165,11 +254,19 @@ impl Command {
         matches!(
             self,
             Self::PointerMove(_)
+                | Self::PointerMoveRelative(_)
+                | Self::PointerClick(_)
+                | Self::PointerDrag(_)
+                | Self::PointerScroll(_)
                 | Self::PointerButtonDown(_)
                 | Self::PointerButtonUp(_)
                 | Self::KeyboardKeyDown(_)
                 | Self::KeyboardKeyUp(_)
+                | Self::KeyboardPress(_)
+                | Self::KeyboardChord(_)
+                | Self::KeyboardSequence(_)
                 | Self::InputReset(_)
+                | Self::TextInsert(_)
         )
     }
 }
@@ -184,6 +281,8 @@ pub struct DesktopProbeCommand {}
 #[serde(deny_unknown_fields)]
 pub struct CommandEnvelope {
     /// Requested protocol version.
+    #[serde(deserialize_with = "deserialize_strict_protocol_version")]
+    #[schemars(with = "StrictProtocolVersion")]
     pub protocol_version: ProtocolVersion,
     /// Transport request correlation identifier.
     pub request_id: RequestId,
@@ -293,7 +392,8 @@ impl CommandEnvelope {
         if self.command.requires_control_lease() && self.lease_id.is_none() {
             return Err(EnvelopeValidationError::LeaseRequired);
         }
-        self.command.validate()
+        self.command
+            .validate_for_desktop(self.desktop_id, self.desktop_generation)
     }
 }
 
@@ -324,9 +424,21 @@ pub enum EnvelopeValidationError {
     /// Core X11 keycodes below eight are reserved.
     #[error("physical keycode is outside the core X11 range")]
     InvalidPhysicalKeycode,
+    /// A compound physical-input command failed strict validation.
+    #[error("physical input command is invalid: {0}")]
+    Input(#[from] InputValidationError),
     /// A registered-application/process command failed validation.
     #[error("managed process command is invalid: {0}")]
     Process(#[from] crate::ProcessValidationError),
+    /// A window command failed shape or geometry validation.
+    #[error("window command is invalid: {0}")]
+    Window(#[from] crate::WindowControlValidationError),
+    /// A clipboard or text command failed bounded-content validation.
+    #[error("clipboard command is invalid: {0}")]
+    Clipboard(#[from] crate::ClipboardValidationError),
+    /// A nested reference belongs to another desktop lifetime.
+    #[error("command reference belongs to another desktop lifetime")]
+    ReferenceScope,
 }
 
 #[cfg(test)]
@@ -427,5 +539,110 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn phase_four_references_are_bound_to_the_envelope_desktop_lifetime()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let envelope_desktop = DesktopId::new();
+        let envelope_generation = DesktopGeneration::new();
+        let command = Command::WindowActivate(WindowActivateCommand {
+            window: crate::WindowRef {
+                desktop_id: DesktopId::new(),
+                desktop_generation: envelope_generation,
+                xid: 42,
+                observed_generation: 1,
+                identity_hash: crate::WindowIdentityHash::new("a".repeat(64))?,
+            },
+            switch_workspace: false,
+            fallback: crate::WindowFocusFallback::EwmhOnly,
+        });
+        assert_eq!(
+            CommandEnvelope::new(
+                ProtocolVersion::V1_0,
+                RequestId::new(),
+                CommandId::new(),
+                envelope_desktop,
+                envelope_generation,
+                command,
+            ),
+            Err(EnvelopeValidationError::ReferenceScope)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn move_to_workspace_is_strict_and_bound_to_the_envelope_lifetime()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let desktop_id = DesktopId::new();
+        let generation = DesktopGeneration::new();
+        let command = Command::WindowMoveToWorkspace(WindowMoveToWorkspaceCommand {
+            window: crate::WindowRef {
+                desktop_id,
+                desktop_generation: generation,
+                xid: 43,
+                observed_generation: 1,
+                identity_hash: crate::WindowIdentityHash::new("b".repeat(64))?,
+            },
+            workspace: 3,
+        });
+        CommandEnvelope::new(
+            ProtocolVersion::V1_0,
+            RequestId::new(),
+            CommandId::new(),
+            desktop_id,
+            generation,
+            command,
+        )?;
+
+        let unknown = serde_json::json!({
+            "type": "window_move_to_workspace",
+            "window": {
+                "desktop_id": desktop_id,
+                "desktop_generation": generation,
+                "xid": 43,
+                "observed_generation": 1,
+                "identity_hash": "b".repeat(64)
+            },
+            "workspace": 3,
+            "sticky": true
+        });
+        assert!(serde_json::from_value::<Command>(unknown).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn text_insertion_requires_the_physical_controller_lease()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let desktop_id = DesktopId::new();
+        let desktop_generation = DesktopGeneration::new();
+        let command = Command::TextInsert(TextInsertCommand {
+            text: crate::TextSource::Inline {
+                text: crate::SecretInlineText::new("hello")?,
+            },
+            target: crate::TextTarget::Window {
+                window: crate::WindowRef {
+                    desktop_id,
+                    desktop_generation,
+                    xid: 7,
+                    observed_generation: 1,
+                    identity_hash: crate::WindowIdentityHash::new("b".repeat(64))?,
+                },
+            },
+            strategy: crate::TextStrategy::Physical,
+            clipboard_options: None,
+        });
+        assert_eq!(
+            CommandEnvelope::new(
+                ProtocolVersion::V1_0,
+                RequestId::new(),
+                CommandId::new(),
+                desktop_id,
+                desktop_generation,
+                command,
+            ),
+            Err(EnvelopeValidationError::LeaseRequired)
+        );
+        Ok(())
     }
 }

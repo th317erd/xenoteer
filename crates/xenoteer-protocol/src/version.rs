@@ -1,17 +1,35 @@
 //! Protocol version types and negotiation.
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 /// A negotiated protocol major/minor pair.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(deny_unknown_fields)]
 pub struct ProtocolVersion {
     major: u16,
     minor: u16,
+}
+
+/// Closed request-direction protocol-version object.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "ProtocolVersion")]
+pub(crate) struct StrictProtocolVersion {
+    major: u16,
+    minor: u16,
+}
+
+pub(crate) fn deserialize_strict_protocol_version<'de, D>(
+    deserializer: D,
+) -> Result<ProtocolVersion, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = StrictProtocolVersion::deserialize(deserializer)?;
+    Ok(ProtocolVersion::new(value.major, value.minor))
 }
 
 impl ProtocolVersion {

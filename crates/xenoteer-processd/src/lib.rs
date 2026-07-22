@@ -12,8 +12,9 @@ mod process_manager;
 
 pub use ipc::{
     BrokerClient, BrokerClientError, BrokerConfig, BrokerErrorCode, BrokerEventReplay,
-    BrokerEventStream, BrokerEventSubscription, BrokerLiveEvent, BrokerProcessEvent, BrokerServer,
-    BrokerServerError, DEFAULT_BROKER_SOCKET,
+    BrokerEventStream, BrokerEventSubscription, BrokerLiveEvent, BrokerPidCorrelation,
+    BrokerPidCorrelationEvidence, BrokerProcessEvent, BrokerServer, BrokerServerError,
+    DEFAULT_BROKER_SOCKET,
 };
 
 use std::{collections::BTreeMap, env, path::PathBuf};
@@ -31,6 +32,8 @@ pub const DESKTOP_GID: u32 = 1_000;
 pub const DAEMON_UID: u32 = 1_001;
 /// Dedicated daemon primary group ID owning the private broker socket.
 pub const DAEMON_GID: u32 = 1_001;
+/// Maximum PIDs accepted by one non-authoritative process-correlation query.
+pub const MAX_PROCESS_CORRELATION_PIDS: usize = 32;
 
 /// Builds the immutable application registry compiled into the image.
 fn image_profiles() -> Result<Vec<ApplicationProfile>, ProcessManagerError> {

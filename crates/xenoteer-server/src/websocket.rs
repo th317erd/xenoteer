@@ -26,11 +26,10 @@ use tokio::{
     task::{AbortHandle, JoinHandle, JoinSet},
 };
 use xenoteer_protocol::{
-    ClientHello, Command, CommandEnvelope, CommandId, CommandResult, ConnectionId,
-    DesktopGeneration, DesktopId, ErrorCode, EventResumeStatus, EventResyncReason, EventTopic,
-    LeaseAcquireRequest, LeaseReleaseRequest, LeaseRenewRequest, LeaseStateView, MAX_EVENT_TOPICS,
-    ProtocolVersion, RequestId, SequencedEvent, VersionRange,
-    WebSocketClientMessage as ClientMessage,
+    ClientHello, CommandEnvelope, CommandId, CommandResult, ConnectionId, DesktopGeneration,
+    DesktopId, ErrorCode, EventResumeStatus, EventResyncReason, EventTopic, LeaseAcquireRequest,
+    LeaseReleaseRequest, LeaseRenewRequest, LeaseStateView, MAX_EVENT_TOPICS, ProtocolVersion,
+    RequestId, SequencedEvent, VersionRange, ViewerOrigin, WebSocketClientMessage as ClientMessage,
 };
 
 use crate::{
@@ -60,22 +59,14 @@ impl AllowedOrigins {
     pub fn exact(origins: impl IntoIterator<Item = String>) -> Result<Self, OriginPolicyError> {
         let mut exact = BTreeSet::new();
         for origin in origins {
-            let authority = origin
-                .strip_prefix("https://")
-                .or_else(|| origin.strip_prefix("http://"));
-            let valid_authority = authority.is_some_and(|authority| {
-                !authority.is_empty()
-                    && !authority
-                        .bytes()
-                        .any(|byte| matches!(byte, b'/' | b'?' | b'#' | b'@'))
-                    && authority.parse::<http::uri::Authority>().is_ok()
-            });
-            if origin.len() > 512 || !valid_authority {
-                return Err(OriginPolicyError::InvalidOrigin);
-            }
-            exact.insert(origin);
+            let origin = ViewerOrigin::new(origin).map_err(|_| OriginPolicyError::InvalidOrigin)?;
+            exact.insert(origin.as_str().to_owned());
         }
         Ok(Self { exact })
+    }
+
+    pub(crate) fn permits_origin(&self, origin: &ViewerOrigin) -> bool {
+        self.exact.contains(origin.as_str())
     }
 
     fn permits(&self, headers: &HeaderMap) -> bool {
@@ -96,7 +87,7 @@ impl AllowedOrigins {
 /// Invalid browser-Origin configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum OriginPolicyError {
-    /// Origins must be bounded exact HTTP(S) origins without a path slash.
+    /// Origins must use the protocol's bounded canonical HTTP(S) representation.
     #[error("WebSocket origin allowlist entry is invalid")]
     InvalidOrigin,
 }
@@ -1059,7 +1050,7 @@ async fn handle_command_submit(
         )
         .await;
     }
-    if !principal.has_grant(required_submit_grant(&command.command)) {
+    if !principal.satisfies(crate::command_grant_requirement(&command.command)) {
         return send_permission_denied(outbound, request_id).await;
     }
     if command.validate().is_err() {
@@ -1234,9 +1225,9 @@ async fn handle_command_cancel(
 ) -> Result<(), ()> {
     if request_id.as_uuid().is_nil()
         || command_id.as_uuid().is_nil()
-        || !has_cancel_grant(principal)
+        || !principal.has_command_cancellation_grant()
     {
-        if !has_cancel_grant(principal) {
+        if !principal.has_command_cancellation_grant() {
             return send_permission_denied(outbound, request_id).await;
         }
         return send_invalid_request(outbound, request_id).await;
@@ -1845,26 +1836,6 @@ fn validate_target(
     }
 }
 
-fn required_submit_grant(command: &Command) -> Grant {
-    match command {
-        Command::PointerMove(_)
-        | Command::PointerButtonDown(_)
-        | Command::PointerButtonUp(_)
-        | Command::KeyboardKeyDown(_)
-        | Command::KeyboardKeyUp(_)
-        | Command::InputReset(_) => Grant::InputControl,
-        Command::ApplicationLaunch(_) => Grant::ApplicationLaunch,
-        Command::ProcessTerminate(_) => Grant::ApplicationTerminate,
-        Command::DesktopProbe(_) | Command::ProcessStatus(_) => Grant::DesktopObserve,
-    }
-}
-
-fn has_cancel_grant(principal: &Principal) -> bool {
-    principal.has_grant(Grant::InputControl)
-        || principal.has_grant(Grant::ApplicationLaunch)
-        || principal.has_grant(Grant::ApplicationTerminate)
-}
-
 fn valid_result(result: &CommandResult, command_id: CommandId) -> bool {
     result.command_id() == command_id && result.validate().is_ok()
 }
@@ -2091,8 +2062,8 @@ mod tests {
     };
     use tower::ServiceExt;
     use xenoteer_protocol::{
-        ApplicationId, ApplicationLaunchCommand, DesktopProbeCommand, EventResumeRequest, LaunchId,
-        Point, PointerCurve, PointerMoveCommand, ProcessRef, ProcessTerminateCommand,
+        ApplicationId, ApplicationLaunchCommand, Command, DesktopProbeCommand, EventResumeRequest,
+        LaunchId, Point, PointerCurve, PointerMoveCommand, ProcessRef, ProcessTerminateCommand,
         WebSocketClientDescriptor,
     };
 
@@ -2213,6 +2184,7 @@ mod tests {
             limits,
             origins: AllowedOrigins::default(),
             control: Arc::new(UnavailableControlPlane),
+            observation: Arc::new(crate::observation::UnavailableObservationPlane),
             abuse: crate::abuse::AbuseControls::new(),
             long_polls: crate::limits::LongPollAdmission::new(limits),
         })
@@ -3027,6 +2999,80 @@ mod tests {
             assert_permission_denied_before_control(&state, &principal, &control, message).await?;
         }
         assert_eq!(control.calls.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_accepts_each_command_mutation_grant_and_rejects_non_command_grants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let desktop_id = DesktopId::new();
+        let generation = DesktopGeneration::new();
+
+        for grant in [
+            Grant::InputControl,
+            Grant::ApplicationLaunch,
+            Grant::ApplicationTerminate,
+            Grant::WindowControl,
+            Grant::ClipboardWrite,
+        ] {
+            let command_id = CommandId::new();
+            let control = Arc::new(CountingControl::default());
+            let state = test_state_with_control(desktop_id, generation, Arc::clone(&control))?;
+            let principal = Principal::new("command-mutation", [grant])?;
+            let message = ClientMessage::CommandCancel {
+                request_id: RequestId::new(),
+                desktop_id,
+                desktop_generation: generation,
+                command_id,
+            };
+            let (outbound, mut receiver) = OutboundQueues::bounded(4, 4);
+            let mut watches = WatchSet::new();
+            let mut event_watch = EventWatch::new();
+
+            handle_text(
+                &outbound,
+                &state,
+                &principal,
+                &mut watches,
+                &mut event_watch,
+                &serde_json::to_string(&message)?,
+            )
+            .await
+            .map_err(|()| std::io::Error::other("cancellation closed the session"))?;
+
+            let response = receiver
+                .recv()
+                .await
+                .ok_or_else(|| std::io::Error::other("missing cancellation response"))?;
+            let Message::Text(response) = response else {
+                return Err(std::io::Error::other("cancellation response was not JSON").into());
+            };
+            let response: serde_json::Value = serde_json::from_str(response.as_str())?;
+            assert_eq!(response["code"], "capability_unavailable", "{grant:?}");
+            assert_eq!(control.calls.load(Ordering::SeqCst), 1, "{grant:?}");
+        }
+
+        for grant in [
+            Grant::DesktopStatus,
+            Grant::DesktopObserve,
+            Grant::ClipboardRead,
+            Grant::CaptureRead,
+            Grant::ArtifactRead,
+            Grant::ArtifactDelete,
+            Grant::ViewerRead,
+        ] {
+            let control = Arc::new(CountingControl::default());
+            let state = test_state_with_control(desktop_id, generation, Arc::clone(&control))?;
+            let principal = Principal::new("non-command-grant", [grant])?;
+            let message = ClientMessage::CommandCancel {
+                request_id: RequestId::new(),
+                desktop_id,
+                desktop_generation: generation,
+                command_id: CommandId::new(),
+            };
+
+            assert_permission_denied_before_control(&state, &principal, &control, &message).await?;
+        }
         Ok(())
     }
 

@@ -18,7 +18,7 @@ use super::keyboard_model::unavailable_keyboard_model;
 use super::{
     ActionContext, ActorThreadState, ControlOutcome, InputCleanupEvidence, InputCommand,
     InputFailure, InputFailureKind, InputHealthSnapshot, InputOperation, InputOutcome,
-    KeyboardAction, PointerMoveRequest,
+    InputPrecondition, KeyboardAction, PointerMoveRequest,
 };
 use crate::{Result, X11Error};
 
@@ -165,6 +165,7 @@ impl InputActorHandle {
             .try_send(InputCommand {
                 context,
                 operation: InputOperation::PointerMove(request),
+                precondition: None,
                 cancellation,
                 reply,
             })
@@ -192,6 +193,7 @@ impl InputActorHandle {
         let command = InputCommand {
             context,
             operation: InputOperation::Pointer(action),
+            precondition: None,
             cancellation,
             reply,
         };
@@ -222,6 +224,82 @@ impl InputActorHandle {
             .try_send(InputCommand {
                 context,
                 operation: InputOperation::Keyboard(action),
+                precondition: None,
+                cancellation,
+                reply,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => InputSubmitError::QueueFull,
+                mpsc::error::TrySendError::Closed(_) => InputSubmitError::Closed,
+            })?;
+        Ok(receiver)
+    }
+
+    /// Attempts immediate FIFO admission of any validated compound operation.
+    pub fn try_submit_operation(
+        &self,
+        context: ActionContext,
+        operation: InputOperation,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<
+        oneshot::Receiver<std::result::Result<InputOutcome, InputFailure>>,
+        InputSubmitError,
+    > {
+        self.try_submit_operation_inner(context, operation, None, cancellation)
+    }
+
+    /// Admits an operation with a one-shot owner-thread near-effect validator.
+    pub fn try_submit_operation_with_precondition(
+        &self,
+        context: ActionContext,
+        operation: InputOperation,
+        precondition: InputPrecondition,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<
+        oneshot::Receiver<std::result::Result<InputOutcome, InputFailure>>,
+        InputSubmitError,
+    > {
+        self.try_submit_operation_inner(context, operation, Some(precondition), cancellation)
+    }
+
+    /// Admits keyboard work with an exact-target/focus check in the same FIFO item.
+    pub fn try_submit_keyboard_with_precondition(
+        &self,
+        context: ActionContext,
+        action: KeyboardAction,
+        precondition: InputPrecondition,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<
+        oneshot::Receiver<std::result::Result<InputOutcome, InputFailure>>,
+        InputSubmitError,
+    > {
+        self.try_submit_operation_inner(
+            context,
+            InputOperation::Keyboard(action),
+            Some(precondition),
+            cancellation,
+        )
+    }
+
+    fn try_submit_operation_inner(
+        &self,
+        context: ActionContext,
+        operation: InputOperation,
+        precondition: Option<InputPrecondition>,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<
+        oneshot::Receiver<std::result::Result<InputOutcome, InputFailure>>,
+        InputSubmitError,
+    > {
+        if !self.accepting.load(Ordering::Acquire) {
+            return Err(InputSubmitError::Closed);
+        }
+        let (reply, receiver) = oneshot::channel();
+        self.ordinary
+            .try_send(InputCommand {
+                context,
+                operation,
+                precondition,
                 cancellation,
                 reply,
             })
@@ -519,10 +597,21 @@ async fn run_actor<B: InputBackend>(
             command = ordinary.recv() => {
                 match command {
                     Some(command) => {
-                        let InputCommand { context, operation, cancellation, reply } = command;
+                        let InputCommand {
+                            context,
+                            operation,
+                            precondition,
+                            cancellation,
+                            reply,
+                        } = command;
                         let requested_pointer = requested_pointer(&operation);
                         let result = catch_unwind(AssertUnwindSafe(|| {
-                            engine.execute_operation(context, operation, &cancellation)
+                            engine.execute_operation_with_precondition(
+                                context,
+                                operation,
+                                precondition,
+                                &cancellation,
+                            )
                         }));
                         match result {
                             Ok(result) => {

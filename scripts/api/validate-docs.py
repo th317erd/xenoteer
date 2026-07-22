@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -17,7 +18,7 @@ API_ROOT = REPO_ROOT / "docs" / "api" / "v1"
 OPENAPI_PATH = API_ROOT / "openapi.json"
 EXAMPLES_ROOT = API_ROOT / "examples"
 
-EXPECTED_PATHS = {
+IMPLEMENTED_BASE_PATHS = {
     "/livez",
     "/readyz",
     "/v1/status",
@@ -30,6 +31,52 @@ EXPECTED_PATHS = {
     "/v1/desktops/{desktop_id}/commands/{command_id}/wait",
     "/v1/ws",
 }
+
+PHASE4_ROUTE_SOURCES = (
+    "observation.rs",
+    "clipboard_read.rs",
+    "screenshot.rs",
+    "artifacts.rs",
+    "viewer.rs",
+    "viewer_gateway.rs",
+)
+
+
+def implemented_phase4_routes() -> dict[str, set[str]]:
+    """Extract literal Axum paths and methods from the Phase-4 route modules."""
+    server_root = REPO_ROOT / "crates" / "xenoteer-server" / "src"
+    routes: dict[str, set[str]] = {}
+    for source_name in PHASE4_ROUTE_SOURCES:
+        source = server_root / source_name
+        try:
+            text = source.read_text(encoding="utf-8")
+        except OSError as error:
+            raise ValidationError(f"cannot read route source {source}: {error}") from error
+        text = text.partition("\n#[cfg(test)]")[0]
+        for match in re.finditer(r'\.route\(\s*"([^"]+)"', text):
+            # Axum's catch-all marker is not part of the OpenAPI path-template
+            # parameter name.
+            route = match.group(1).replace("{*asset}", "{asset}")
+            opening = text.find("(", match.start(), match.end())
+            depth = 0
+            closing = None
+            for index in range(opening, len(text)):
+                if text[index] == "(":
+                    depth += 1
+                elif text[index] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        closing = index + 1
+                        break
+            if closing is None:
+                raise ValidationError(f"unterminated route call in {source}: {route}")
+            methods = set(
+                re.findall(r"(?<!:)\b(get|post|delete)\s*\(", text[opening:closing])
+            )
+            if not methods:
+                raise ValidationError(f"route has no recognized method in {source}: {route}")
+            routes.setdefault(route, set()).update(methods)
+    return routes
 
 EXPECTED_CURRENT_WS_TYPES = {
     "client.hello",
@@ -140,13 +187,44 @@ def validate_openapi(document: Any) -> set[Path]:
     if info.get("license", {}).get("identifier") != "Apache-2.0":
         raise ValidationError("public OpenAPI license must be Apache-2.0")
     paths = document.get("paths")
-    if not isinstance(paths, dict) or set(paths) != EXPECTED_PATHS:
-        raise ValidationError("OpenAPI path set differs from implemented Phase 3 routes")
+    phase4_routes = implemented_phase4_routes()
+    implemented_paths = IMPLEMENTED_BASE_PATHS | set(phase4_routes)
+    documented_paths = set(paths) if isinstance(paths, dict) else set()
+    if documented_paths != implemented_paths:
+        missing = sorted(implemented_paths - documented_paths)
+        extra = sorted(documented_paths - implemented_paths)
+        raise ValidationError(
+            f"OpenAPI path set differs from implemented routes; missing={missing}, extra={extra}"
+        )
+    for path, implemented_methods in phase4_routes.items():
+        documented_methods = {
+            method for method in ("get", "post", "delete") if method in paths[path]
+        }
+        if documented_methods != implemented_methods:
+            raise ValidationError(
+                f"OpenAPI method set differs for {path}; "
+                f"implemented={sorted(implemented_methods)}, "
+                f"documented={sorted(documented_methods)}"
+            )
     if document.get("security") != [{"bearerAuth": []}]:
         raise ValidationError("OpenAPI must require Bearer auth globally")
     for public_path in ("/livez", "/readyz"):
         if paths[public_path]["get"].get("security") != []:
             raise ValidationError(f"{public_path} must explicitly override global auth")
+    public_viewer_paths = {
+        "/viewer/{desktop_id}/{desktop_generation}/",
+        "/viewer/assets/viewer.css",
+        "/viewer/assets/viewer.mjs",
+        "/viewer/vendor/{asset}",
+    }
+    for public_path in public_viewer_paths:
+        if paths[public_path]["get"].get("security") != []:
+            raise ValidationError(f"{public_path} must explicitly override global auth")
+    viewer_gateway = paths[
+        "/v1/desktops/{desktop_id}/generations/{desktop_generation}/viewer/ws"
+    ]["get"]
+    if viewer_gateway.get("security") != [{"viewerTicketSubprotocol": []}]:
+        raise ValidationError("viewer gateway must declare only one-time ticket auth")
 
     operation_ids: list[str] = []
     for path_item in paths.values():

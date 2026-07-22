@@ -1,4 +1,5 @@
 # pattern	SPDX expression	license evidence
+AGENTS.md	BUSL-1.1	LICENSE
 .dockerignore	BUSL-1.1	LICENSE
 .editorconfig	BUSL-1.1	LICENSE
 .gitattributes	BUSL-1.1	LICENSE
@@ -13,6 +14,7 @@ LICENSE	BUSL-1.1	LICENSE
 NOTICE	BUSL-1.1	LICENSE
 PLAN.md	BUSL-1.1	LICENSE
 README.md	BUSL-1.1	LICENSE
+TODO.md	BUSL-1.1	LICENSE
 compose*.yml	BUSL-1.1	LICENSE
 container/spikes/browser/docker-default-seccomp.json	Apache-2.0	container/spikes/browser/licenses/moby/LICENSE|container/spikes/browser/licenses/moby/NOTICE
 container/spikes/browser/seccomp_profile.json	Apache-2.0	container/spikes/browser/licenses/moby/LICENSE|container/spikes/browser/licenses/moby/NOTICE|container/spikes/browser/licenses/playwright/LICENSE|container/spikes/browser/licenses/playwright/NOTICE

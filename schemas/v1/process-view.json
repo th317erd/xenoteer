@@ -11,7 +11,6 @@
       "type": "string"
     },
     "ProcessExit": {
-      "additionalProperties": false,
       "description": "Reaped Unix child status without unbounded output.",
       "properties": {
         "code": {
@@ -43,7 +42,6 @@
       "type": "object"
     },
     "ProcessRef": {
-      "additionalProperties": false,
       "description": "A reference safe against desktop restart and Linux PID reuse.",
       "properties": {
         "desktop_generation": {
@@ -102,7 +100,6 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "additionalProperties": false,
   "description": "Current status of a managed application child.",
   "properties": {
     "exit": {

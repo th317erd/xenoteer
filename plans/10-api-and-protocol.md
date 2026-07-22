@@ -140,9 +140,10 @@ Complex selectors use POST query bodies even though read-only, to avoid URL
 length/encoding limits. Reference-token is a short URL-safe serialization or a
 server-issued lookup token; full refs can also be supplied in command JSON.
 
-### Capture/artifacts/viewer
+### Clipboard read/capture/artifacts/viewer
 
 ```text
+POST   /v1/desktops/{desktop_id}/clipboard/read?desktop_generation={generation}
 POST   /v1/desktops/{desktop_id}/screenshots
 POST   /v1/artifacts?purpose=clipboard_input
 GET    /v1/artifacts/{artifact_id}
@@ -151,6 +152,14 @@ POST   /v1/desktops/{desktop_id}/viewer-tickets
 GET    /viewer/
 GET    /v1/viewer/ws?ticket=...
 ```
+
+Clipboard read is an authenticated `clipboard:read`-only POST because its
+strict body carries the selection, ordered target preferences, and binary
+fallback policy. The required query generation fences the read to the desktop
+lifetime named by the path; the response is validated against both and carries
+`Cache-Control: private, no-store`. Inline response content is never logged,
+while larger output is returned as a desktop/generation-scoped
+`clipboard_output` artifact reference.
 
 Screenshot POST can return image bytes directly for small synchronous requests
 or `202` artifact reference. The `Accept` header selects `image/png` or JSON

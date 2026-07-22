@@ -43,8 +43,15 @@ required=(
   scripts/container/assert-idle-runtime.sh
   scripts/container/test-phase3-control-plane.sh
   scripts/container/test-phase3-websocket.py
+  scripts/container/test-phase4-event-flood.py
+  scripts/container/test-phase4-event-flood.sh
+  scripts/container/test-phase4-live-fixtures.py
+  fixtures/x11/src/bin/x11-window-churn.rs
+  container/rootfs/usr/share/xenoteer/fixtures/desktop-apps/phase4-atspi-text.py
+  container/rootfs/usr/share/xenoteer/fixtures/desktop-apps/phase4-clipboard.py
   scripts/container/test-idle-soak.sh
   scripts/container/test-viewer-denial.sh
+  container/spikes/novnc/tests/test_rfb_websocket_probe.py
   scripts/licenses/generate-debian-installed-manifest.sh
 )
 
@@ -61,6 +68,45 @@ grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
 python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/container/test-phase3-websocket.py").read_text())'
 grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
   scripts/container/test-phase3-websocket.py
+for phase4_python in \
+  scripts/container/test-phase4-event-flood.py \
+  scripts/container/test-phase4-live-fixtures.py \
+  container/rootfs/usr/share/xenoteer/fixtures/desktop-apps/phase4-atspi-text.py \
+  container/rootfs/usr/share/xenoteer/fixtures/desktop-apps/phase4-clipboard.py; do
+  python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \
+    "$phase4_python"
+  grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' "$phase4_python"
+done
+bash -n scripts/container/test-phase4-event-flood.sh
+grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
+  scripts/container/test-phase4-event-flood.sh
+sh -n tests/platform/run-x11-spikes.sh
+grep -Fq -- '-nolisten tcp -noreset -auth' tests/platform/run-x11-spikes.sh
+bash -n scripts/container/test-viewer-denial.sh
+python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("container/spikes/novnc/rfb_websocket_probe.py").read_text())'
+python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("container/spikes/novnc/tests/test_rfb_websocket_probe.py").read_text())'
+timeout 10s env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
+  container/spikes/novnc/tests/test_rfb_websocket_probe.py
+grep -Fq '"--cpus",' scripts/container/test-phase4-live-fixtures.py
+grep -Fq '"2",' scripts/container/test-phase4-live-fixtures.py
+grep -Fq 'f"{self.daemon_override}:/usr/local/bin/xenoteerd:ro"' \
+  scripts/container/test-phase4-live-fixtures.py
+grep -Fq 'if os.geteuid() == 0 and daemon_override is not None:' \
+  scripts/container/test-phase4-live-fixtures.py
+grep -Fq 'os.chown(token_file, 1000, 1000)' \
+  scripts/container/test-phase4-live-fixtures.py
+grep -Fq 'scripts/container/test-phase4-live-fixtures.py xenoteer:desktop-apps-test' \
+  .github/workflows/ci.yml
+grep -Fq 'scripts/container/test-phase4-event-flood.sh xenoteer:phase2' \
+  .github/workflows/ci.yml
+grep -Fq 'timeout-minutes: 10' .github/workflows/ci.yml
+grep -Fq 'build --quiet --release --locked --jobs 4' \
+  scripts/container/test-phase4-event-flood.sh
+grep -Fq -- '--cpus 2' scripts/container/test-phase4-event-flood.sh
+if grep -Fq 'XENOTEERD_BINARY_OVERRIDE' .github/workflows/ci.yml; then
+  printf 'CI event-flood acceptance must test the exact immutable image\n' >&2
+  exit 1
+fi
 grep -Fq 'for binary in xenoteerd xenoteer-processd; do' \
   scripts/licenses/inventory-image-first-party.sh
 grep -Fq 'for config in /etc/at-spi2/accessibility.conf /etc/dbus-1/session-local.conf; do' \

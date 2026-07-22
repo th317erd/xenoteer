@@ -12,7 +12,11 @@ pub use actor::{
     DEFAULT_INPUT_QUEUE_CAPACITY, InputActorExit, InputActorHandle, InputActorJoin,
     InputSubmitError, spawn_input_actor,
 };
-pub use command::{ActionContext, InputCommand, InputOperation, PointerMoveRequest};
+pub use command::{
+    ActionContext, InputCommand, InputOperation, InputPrecondition, InputPreconditionFailure,
+    PointerClickRequest, PointerDragRequest, PointerEndpoint, PointerMoveRelativeRequest,
+    PointerMoveRequest, WindowPointerBoundsPolicy, WindowPointerClickRequest,
+};
 pub use keyboard_action::{
     KeyboardAction, KeyboardActionError, KeyboardSequenceStep, MAX_KEYBOARD_ACTION_EVENTS,
     MAX_KEYBOARD_CHORD_KEYS, MAX_KEYBOARD_DELAY_MS, MAX_KEYBOARD_SEQUENCE_STEPS,
@@ -24,5 +28,7 @@ pub use outcome::{
     KeyboardBindingEvidence, KeyboardModelDiagnostics, KeyboardOutcomeEvidence,
 };
 
+#[cfg(test)]
+mod public_input_tests;
 #[cfg(test)]
 mod tests;

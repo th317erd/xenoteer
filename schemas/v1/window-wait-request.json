@@ -1,0 +1,1016 @@
+{
+  "$defs": {
+    "CoordinateSpace": {
+      "description": "The reference frame used by a geometry value.",
+      "oneOf": [
+        {
+          "const": "root_physical",
+          "description": "Root-window physical pixels.",
+          "type": "string"
+        },
+        {
+          "const": "window_client",
+          "description": "Coordinates relative to a client window.",
+          "type": "string"
+        },
+        {
+          "const": "window_frame",
+          "description": "Coordinates relative to a window-manager frame.",
+          "type": "string"
+        },
+        {
+          "const": "atspi_screen",
+          "description": "AT-SPI screen coordinates after profile correlation.",
+          "type": "string"
+        }
+      ]
+    },
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "LaunchId": {
+      "description": "Identifies one managed application launch.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Point": {
+      "additionalProperties": false,
+      "description": "Closed request-direction point object.",
+      "properties": {
+        "x": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "y": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "ProcessRef": {
+      "additionalProperties": false,
+      "description": "Request-direction representation of [`ProcessRef`].\n\nThe public reference is also emitted in responses and therefore accepts\nadditive output fields. Every request occurrence deserializes through this\nclosed shape so a misspelled identity claim is never ignored.",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration"
+        },
+        "launch_id": {
+          "$ref": "#/$defs/LaunchId"
+        },
+        "pid": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "proc_start_ticks": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "desktop_generation",
+        "pid",
+        "proc_start_ticks",
+        "launch_id"
+      ],
+      "type": "object"
+    },
+    "Rect": {
+      "additionalProperties": false,
+      "description": "Closed request-direction rectangle object.",
+      "properties": {
+        "height": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "x": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "y": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
+    "WindowAtomName": {
+      "description": "Bounded escaped X11 atom name safe for public metadata.",
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "WindowCountComparison": {
+      "description": "Closed comparison operation for selector-count waits.",
+      "enum": [
+        "exactly",
+        "at_least",
+        "at_most"
+      ],
+      "type": "string"
+    },
+    "WindowCountPredicate": {
+      "additionalProperties": false,
+      "description": "Bounded selector-count predicate.",
+      "properties": {
+        "comparison": {
+          "$ref": "#/$defs/WindowCountComparison"
+        },
+        "count": {
+          "format": "uint32",
+          "maximum": 10000,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "comparison",
+        "count"
+      ],
+      "type": "object"
+    },
+    "WindowGeometryArea": {
+      "description": "Stable geometry projection selected by a wait predicate.",
+      "enum": [
+        "client",
+        "frame",
+        "content"
+      ],
+      "type": "string"
+    },
+    "WindowGeometryPredicate": {
+      "description": "Bounded geometry relation evaluated against root-physical model data.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "area": {
+              "$ref": "#/$defs/WindowGeometryArea"
+            },
+            "expected": {
+              "$ref": "#/$defs/WindowRect"
+            },
+            "type": {
+              "const": "equals",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "area",
+            "expected"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "area": {
+              "$ref": "#/$defs/WindowGeometryArea"
+            },
+            "region": {
+              "$ref": "#/$defs/WindowRect"
+            },
+            "type": {
+              "const": "intersects",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "area",
+            "region"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "area": {
+              "$ref": "#/$defs/WindowGeometryArea"
+            },
+            "bounds": {
+              "$ref": "#/$defs/WindowRect"
+            },
+            "type": {
+              "const": "contained_by",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "area",
+            "bounds"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "area": {
+              "$ref": "#/$defs/WindowGeometryArea"
+            },
+            "point": {
+              "$ref": "#/$defs/Point"
+            },
+            "type": {
+              "const": "contains_point",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "area",
+            "point"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WindowIdentityHash": {
+      "description": "Fixed lowercase SHA-256 projection binding an XID birth to initial evidence.",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "WindowMapState": {
+      "description": "X server map/viewability state without guessing minimization semantics.",
+      "oneOf": [
+        {
+          "const": "unmapped",
+          "description": "The client is not mapped.",
+          "type": "string"
+        },
+        {
+          "const": "unviewable",
+          "description": "The client is mapped but not currently viewable.",
+          "type": "string"
+        },
+        {
+          "const": "viewable",
+          "description": "The client is mapped and viewable.",
+          "type": "string"
+        }
+      ]
+    },
+    "WindowModelRevision": {
+      "description": "One non-zero actor-local model revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "WindowPredicate": {
+      "description": "One safe leaf predicate over the bounded window model.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "$ref": "#/$defs/WindowTextField"
+            },
+            "matcher": {
+              "$ref": "#/$defs/WindowStringMatch"
+            },
+            "type": {
+              "const": "text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "field",
+            "matcher"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "process": {
+              "$ref": "#/$defs/ProcessRef"
+            },
+            "type": {
+              "const": "managed_process",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "process"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "pid": {
+              "format": "uint32",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "type": {
+              "const": "reported_pid",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "pid"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "window_type",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/WindowAtomName"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "present": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "state",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/WindowAtomName"
+            }
+          },
+          "required": [
+            "type",
+            "value",
+            "present"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "map_state",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/WindowMapState"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "workspace",
+              "type": "string"
+            },
+            "workspace": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type",
+            "workspace"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "active",
+              "type": "string"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "focused",
+              "type": "string"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "transient_for",
+              "type": "string"
+            },
+            "window": {
+              "$ref": "#/$defs/WindowRef"
+            }
+          },
+          "required": [
+            "type",
+            "window"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "group_leader",
+              "type": "string"
+            },
+            "window": {
+              "$ref": "#/$defs/WindowRef"
+            }
+          },
+          "required": [
+            "type",
+            "window"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "has_accessibility_application",
+              "type": "string"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "model_revision": {
+              "$ref": "#/$defs/WindowModelRevision"
+            },
+            "type": {
+              "const": "created_after",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "model_revision"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WindowRect": {
+      "additionalProperties": false,
+      "description": "Closed request-direction coordinate-tagged rectangle.",
+      "properties": {
+        "coordinate_space": {
+          "$ref": "#/$defs/CoordinateSpace"
+        },
+        "rect": {
+          "$ref": "#/$defs/Rect"
+        }
+      },
+      "required": [
+        "coordinate_space",
+        "rect"
+      ],
+      "type": "object"
+    },
+    "WindowRef": {
+      "additionalProperties": false,
+      "description": "Closed request-direction representation of [`WindowRef`].",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration"
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId"
+        },
+        "identity_hash": {
+          "$ref": "#/$defs/WindowIdentityHash"
+        },
+        "observed_generation": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "xid": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "desktop_id",
+        "desktop_generation",
+        "xid",
+        "observed_generation",
+        "identity_hash"
+      ],
+      "type": "object"
+    },
+    "WindowSelector": {
+      "description": "Recursively composed selector with explicit depth/node/predicate budgets.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "predicate": {
+              "$ref": "#/$defs/WindowPredicate"
+            },
+            "type": {
+              "const": "predicate",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "predicate"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "selectors": {
+              "items": {
+                "$ref": "#/$defs/WindowSelector"
+              },
+              "maxItems": 128,
+              "minItems": 1,
+              "type": "array"
+            },
+            "type": {
+              "const": "all",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "selectors"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "selectors": {
+              "items": {
+                "$ref": "#/$defs/WindowSelector"
+              },
+              "maxItems": 128,
+              "minItems": 1,
+              "type": "array"
+            },
+            "type": {
+              "const": "any",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "selectors"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "selector": {
+              "$ref": "#/$defs/WindowSelector"
+            },
+            "type": {
+              "const": "not",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "selector"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WindowStringMatch": {
+      "description": "Bounded locale-independent match expression.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case_sensitive": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "exact",
+              "type": "string"
+            },
+            "value": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value",
+            "case_sensitive"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case_sensitive": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "contains",
+              "type": "string"
+            },
+            "value": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value",
+            "case_sensitive"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case_sensitive": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "prefix",
+              "type": "string"
+            },
+            "value": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value",
+            "case_sensitive"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case_sensitive": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "suffix",
+              "type": "string"
+            },
+            "value": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value",
+            "case_sensitive"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Pattern compiled only by the bounded linear-time selector backend.",
+          "properties": {
+            "case_sensitive": {
+              "type": "boolean"
+            },
+            "pattern": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": {
+              "const": "regex",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "pattern",
+            "case_sensitive"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WindowTextField": {
+      "description": "Observed text field selected by a string matcher.",
+      "enum": [
+        "title",
+        "visible_title",
+        "icon_title",
+        "class_instance",
+        "class",
+        "client_machine"
+      ],
+      "type": "string"
+    },
+    "WindowWaitPredicate": {
+      "description": "Race-free state predicate evaluated from a captured model revision.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "exists",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "closed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/WindowMapState"
+            },
+            "type": {
+              "const": "map_state",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "desired": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "active",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "desired"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "desired": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "focused",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "desired"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "predicate": {
+              "$ref": "#/$defs/WindowGeometryPredicate"
+            },
+            "type": {
+              "const": "geometry",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "predicate"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "predicate": {
+              "$ref": "#/$defs/WindowCountPredicate"
+            },
+            "type": {
+              "const": "count",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "predicate"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WindowWaitSelectorQuantifier": {
+      "description": "Explicit semantics for applying one state predicate to selector matches.",
+      "oneOf": [
+        {
+          "const": "any",
+          "description": "Satisfied when at least one selected window satisfies the predicate.",
+          "type": "string"
+        },
+        {
+          "const": "all",
+          "description": "Satisfied when the selected set is non-empty and every window satisfies it.",
+          "type": "string"
+        },
+        {
+          "const": "exactly_one",
+          "description": "Satisfied only when the selector resolves to one window and it satisfies it.",
+          "type": "string"
+        }
+      ]
+    },
+    "WindowWaitTarget": {
+      "description": "Reference or selector whose state is evaluated atomically inside the actor.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "reference",
+              "type": "string"
+            },
+            "window": {
+              "$ref": "#/$defs/WindowRef"
+            }
+          },
+          "required": [
+            "type",
+            "window"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "quantifier": {
+              "$ref": "#/$defs/WindowWaitSelectorQuantifier",
+              "description": "Quantifier for state predicates. `all` is false for an empty set."
+            },
+            "selector": {
+              "$ref": "#/$defs/WindowSelector"
+            },
+            "type": {
+              "const": "selector",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "selector",
+            "quantifier"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Observation-actor wait registration authorized by `desktop:observe`.",
+  "properties": {
+    "after_revision": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WindowModelRevision"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional client-observed lower boundary for transition-oriented waits.\n\nThe actor must still capture its current revision, evaluate, register\nthe waiter, and re-evaluate atomically. This field never permits a\ncheck-then-subscribe implementation."
+    },
+    "desktop_generation": {
+      "$ref": "#/$defs/DesktopGeneration"
+    },
+    "desktop_id": {
+      "$ref": "#/$defs/DesktopId"
+    },
+    "predicate": {
+      "$ref": "#/$defs/WindowWaitPredicate"
+    },
+    "target": {
+      "$ref": "#/$defs/WindowWaitTarget"
+    },
+    "timeout_ms": {
+      "format": "uint32",
+      "maximum": 300000,
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "desktop_id",
+    "desktop_generation",
+    "target",
+    "predicate",
+    "timeout_ms"
+  ],
+  "title": "WindowWaitRequest",
+  "type": "object"
+}

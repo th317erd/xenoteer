@@ -73,6 +73,9 @@ rg -F -- '--shm-size 4g' "$0" >/dev/null
 "$repository_root/scripts/container/test-browser-seccomp.sh"
 
 docker build \
+    --cpu-quota 200000 \
+    --cpu-period 100000 \
+    --memory 6g \
     --file "$repository_root/container/spikes/novnc/Dockerfile" \
     --build-arg "SPIKE_BASE_IMAGE=$base_image" \
     --tag "$image" \
@@ -95,6 +98,8 @@ esac
 
 docker run --rm \
     --network none \
+    --cpus 2 \
+    --memory 6g \
     --security-opt "seccomp=$seccomp_profile" \
     --shm-size 4g \
     --pids-limit 256 \

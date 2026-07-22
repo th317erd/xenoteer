@@ -1,0 +1,183 @@
+{
+  "$defs": {
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Timestamp": {
+      "description": "A canonical RFC 3339 timestamp with an explicit UTC offset.",
+      "format": "date-time",
+      "type": "string"
+    },
+    "ViewerBackendState": {
+      "description": "Replaceable viewer backend availability exposed without socket details.",
+      "oneOf": [
+        {
+          "const": "available",
+          "description": "Backend passed its bounded RFB/WebSocket probe.",
+          "type": "string"
+        },
+        {
+          "const": "degraded",
+          "description": "Backend is restarting or has exhausted its restart budget.",
+          "type": "string"
+        },
+        {
+          "const": "disabled",
+          "description": "Operator policy disabled viewing.",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "Required backend is unavailable.",
+          "type": "string"
+        }
+      ]
+    },
+    "ViewerMode": {
+      "description": "Closed release-one viewer control mode.",
+      "oneOf": [
+        {
+          "const": "view_only",
+          "description": "Human observation only; key, pointer, resize, and clipboard are disabled.",
+          "type": "string"
+        }
+      ]
+    },
+    "ViewerOrigin": {
+      "description": "Exact HTTP(S) browser origin to which a viewer ticket is bound.",
+      "maxLength": 512,
+      "minLength": 8,
+      "pattern": "^https?://[^/?#@\\s]+$",
+      "type": "string"
+    },
+    "ViewerPrincipalId": {
+      "description": "Stable authenticated identity copied into a viewer ticket claim.",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._:@-]+$",
+      "type": "string"
+    },
+    "ViewerSessionEndReason": {
+      "description": "Why an authenticated viewer session ended.",
+      "oneOf": [
+        {
+          "const": "client_closed",
+          "description": "Browser closed normally.",
+          "type": "string"
+        },
+        {
+          "const": "backend_unavailable",
+          "description": "Upstream RFB adapter disappeared.",
+          "type": "string"
+        },
+        {
+          "const": "generation_changed",
+          "description": "Desktop generation changed and stale pixels must not remain live.",
+          "type": "string"
+        },
+        {
+          "const": "policy_revoked",
+          "description": "Origin/ticket/session policy failed after establishment.",
+          "type": "string"
+        },
+        {
+          "const": "server_draining",
+          "description": "Server began bounded shutdown.",
+          "type": "string"
+        }
+      ]
+    },
+    "ViewerTicketAudience": {
+      "description": "Closed service audience for viewer bearer material.",
+      "oneOf": [
+        {
+          "const": "viewer_websocket",
+          "description": "Browser viewer WebSocket upgrade endpoint only.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Content-free lifecycle evidence for an authenticated view-only session.",
+  "properties": {
+    "audience": {
+      "$ref": "#/$defs/ViewerTicketAudience",
+      "description": "Endpoint audience authenticated at consumption."
+    },
+    "backend_state": {
+      "$ref": "#/$defs/ViewerBackendState",
+      "description": "Backend state at session establishment/end."
+    },
+    "desktop_generation": {
+      "$ref": "#/$defs/DesktopGeneration",
+      "description": "Exact desktop lifetime."
+    },
+    "desktop_id": {
+      "$ref": "#/$defs/DesktopId",
+      "description": "Exact desktop resource."
+    },
+    "end_reason": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ViewerSessionEndReason"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Terminal reason, present exactly when `ended_at` is present."
+    },
+    "ended_at": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Terminal instant, absent while active."
+    },
+    "established_at": {
+      "$ref": "#/$defs/Timestamp",
+      "description": "Session establishment instant."
+    },
+    "mode": {
+      "$ref": "#/$defs/ViewerMode",
+      "description": "Always view-only in release one."
+    },
+    "origin": {
+      "$ref": "#/$defs/ViewerOrigin",
+      "description": "Origin authenticated for the session."
+    },
+    "principal_id": {
+      "$ref": "#/$defs/ViewerPrincipalId",
+      "description": "Authenticated principal whose ticket established this session."
+    },
+    "ticket_consumed": {
+      "description": "Whether the one-time ticket was atomically consumed.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "principal_id",
+    "audience",
+    "desktop_id",
+    "desktop_generation",
+    "origin",
+    "mode",
+    "ticket_consumed",
+    "backend_state",
+    "established_at"
+  ],
+  "title": "ViewerSessionEvidence",
+  "type": "object"
+}

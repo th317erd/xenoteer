@@ -12,6 +12,175 @@
       "pattern": "^[a-z0-9][a-z0-9._-]*$",
       "type": "string"
     },
+    "ArtifactContentType": {
+      "description": "A validated HTTP media type without attacker-controlled control characters.",
+      "maxLength": 128,
+      "minLength": 3,
+      "pattern": "^[!#$&^_.+A-Za-z0-9-]+/[!#$&^_.+A-Za-z0-9-]+(?:;[ -~]+)?$",
+      "type": "string"
+    },
+    "ArtifactId": {
+      "description": "Identifies a bounded server-side artifact.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ArtifactPurpose": {
+      "description": "Why an immutable object exists and which capability authorizes it.",
+      "oneOf": [
+        {
+          "const": "clipboard_input",
+          "description": "Private caller upload consumed only as clipboard command input.",
+          "type": "string"
+        },
+        {
+          "const": "clipboard_output",
+          "description": "Private output produced by a clipboard read.",
+          "type": "string"
+        },
+        {
+          "const": "screenshot",
+          "description": "Screenshot bytes produced by an explicit capture request.",
+          "type": "string"
+        },
+        {
+          "const": "action_trace",
+          "description": "Bounded action-trace evidence.",
+          "type": "string"
+        },
+        {
+          "const": "support_bundle",
+          "description": "Explicitly requested diagnostic support material.",
+          "type": "string"
+        }
+      ]
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Request-direction representation of [`ArtifactRef`].\n\nArtifact responses permit additive metadata, while commands consuming an\nartifact must reject every unrecognized authority-bearing field.",
+      "properties": {
+        "artifact_id": {
+          "$ref": "#/$defs/ArtifactId"
+        },
+        "content_length": {
+          "format": "uint64",
+          "maximum": 33554432,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "content_type": {
+          "$ref": "#/$defs/ArtifactContentType"
+        },
+        "created_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration"
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "purpose": {
+          "$ref": "#/$defs/ArtifactPurpose"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "purpose",
+        "desktop_id",
+        "desktop_generation",
+        "content_type",
+        "content_length",
+        "sha256",
+        "created_at",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    "ClipboardTarget": {
+      "description": "A bounded X11 target atom name.",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[!-~]+$",
+      "type": "string"
+    },
+    "ClipboardWriteSource": {
+      "description": "Content accepted by selection writes.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Inline UTF-8 represented through the standard text targets.",
+          "properties": {
+            "source": {
+              "const": "inline_text",
+              "type": "string"
+            },
+            "text": {
+              "$ref": "#/$defs/SecretInlineText",
+              "description": "Secret text bytes."
+            }
+          },
+          "required": [
+            "source",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Inline binary bytes for one explicitly allowed MIME target.",
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/SecretInlineBinary",
+              "description": "Secret base64 body with checked decoded length/hash."
+            },
+            "source": {
+              "const": "inline_binary",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/ClipboardTarget",
+              "description": "Target atom/media type."
+            }
+          },
+          "required": [
+            "source",
+            "target",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Private immutable upload, revalidated at command execution.",
+          "properties": {
+            "artifact": {
+              "$ref": "#/$defs/ArtifactRef",
+              "description": "Must have purpose `clipboard_input` and fit the selection ceiling."
+            },
+            "source": {
+              "const": "artifact",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/ClipboardTarget",
+              "description": "Target atom/media type to serve without decoding."
+            }
+          },
+          "required": [
+            "source",
+            "artifact",
+            "target"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "Command": {
       "description": "A version-one command body.",
       "oneOf": [
@@ -60,6 +229,201 @@
             "type",
             "target",
             "curve"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Move the global pointer relative to its execution-time position.",
+          "properties": {
+            "curve": {
+              "$ref": "#/$defs/PointerCurve",
+              "description": "Interpolation curve."
+            },
+            "delta": {
+              "$ref": "#/$defs/Point",
+              "description": "Signed root-physical displacement from the live pointer position."
+            },
+            "duration_ms": {
+              "description": "Requested whole-path duration. Omission selects the configured default.",
+              "format": "uint32",
+              "maximum": 10000,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "pointer_move_relative",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "delta",
+            "curve"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Execute a complete FIFO-atomic click sequence.",
+          "properties": {
+            "button": {
+              "$ref": "#/$defs/PointerLogicalButton",
+              "description": "Logical button resolved from the live X11 pointer mapping."
+            },
+            "count": {
+              "description": "Number of complete press/release clicks.",
+              "format": "uint8",
+              "maximum": 5,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "curve": {
+              "$ref": "#/$defs/PointerCurve",
+              "description": "Motion interpolation curve."
+            },
+            "duration_ms": {
+              "description": "Requested whole-path motion duration when the target requires movement.",
+              "format": "uint32",
+              "maximum": 10000,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "inter_click_interval_ms": {
+              "description": "Delay between complete clicks; must remain below 250 ms.",
+              "format": "uint16",
+              "maximum": 249,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pre_click_dwell_ms": {
+              "description": "Dwell attached to the first button press.",
+              "format": "uint16",
+              "maximum": 10000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "press_duration_ms": {
+              "description": "Delay between each press and release.",
+              "format": "uint16",
+              "maximum": 10000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "target": {
+              "$ref": "#/$defs/PointerClickTarget",
+              "description": "Current, absolute-root, or exact-window click destination."
+            },
+            "type": {
+              "const": "pointer_click",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "target",
+            "button",
+            "count",
+            "curve",
+            "pre_click_dwell_ms",
+            "press_duration_ms",
+            "inter_click_interval_ms"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Execute a complete FIFO-atomic press/move/release drag.",
+          "properties": {
+            "button": {
+              "$ref": "#/$defs/PointerLogicalButton",
+              "description": "Logical button held for the drag."
+            },
+            "curve": {
+              "$ref": "#/$defs/PointerCurve",
+              "description": "Motion interpolation curve."
+            },
+            "duration_ms": {
+              "description": "Requested whole-path duration.",
+              "format": "uint32",
+              "maximum": 10000,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "press_dwell_ms": {
+              "description": "Delay after the press and before motion.",
+              "format": "uint16",
+              "maximum": 10000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "release_dwell_ms": {
+              "description": "Delay on the release boundary.",
+              "format": "uint16",
+              "maximum": 10000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "target": {
+              "$ref": "#/$defs/PointerDragTarget",
+              "description": "Root or execution-time-relative drag endpoint."
+            },
+            "type": {
+              "const": "pointer_drag",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "target",
+            "button",
+            "curve",
+            "press_dwell_ms",
+            "release_dwell_ms"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Execute bounded discrete scroll notches.",
+          "properties": {
+            "count": {
+              "description": "Number of complete press/release notches.",
+              "format": "uint16",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "direction": {
+              "$ref": "#/$defs/PointerScrollDirection",
+              "description": "Logical scroll direction."
+            },
+            "interval_ms": {
+              "description": "Delay between complete notches.",
+              "format": "uint16",
+              "maximum": 1000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "pointer_scroll",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "direction",
+            "count",
+            "interval_ms"
           ],
           "type": "object"
         },
@@ -173,6 +537,89 @@
         },
         {
           "additionalProperties": false,
+          "description": "Press and release one named, scalar, or raw key.",
+          "properties": {
+            "hold_ms": {
+              "description": "Delay between press and release.",
+              "format": "uint16",
+              "maximum": 10000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "key": {
+              "$ref": "#/$defs/KeyboardKeyIdentifier",
+              "description": "Unresolved key identity."
+            },
+            "type": {
+              "const": "keyboard_press",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "key",
+            "hold_ms"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Press a modifier-first chord and release it in reverse order.",
+          "properties": {
+            "hold_ms": {
+              "description": "Delay between final press and first release.",
+              "format": "uint16",
+              "maximum": 10000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "keys": {
+              "description": "Ordered unresolved identities.",
+              "items": {
+                "$ref": "#/$defs/KeyboardKeyIdentifier"
+              },
+              "maxItems": 16,
+              "minItems": 1,
+              "type": "array"
+            },
+            "type": {
+              "const": "keyboard_chord",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "keys",
+            "hold_ms"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Execute complete keyboard units without FIFO interleaving.",
+          "properties": {
+            "steps": {
+              "description": "Ordered complete keyboard units.",
+              "items": {
+                "$ref": "#/$defs/KeyboardSequenceStep"
+              },
+              "maxItems": 1024,
+              "minItems": 1,
+              "type": "array"
+            },
+            "type": {
+              "const": "keyboard_sequence",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "steps"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "Conservatively release only input owned by Xenoteer.",
           "properties": {
             "type": {
@@ -258,6 +705,276 @@
           "required": [
             "type",
             "process"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Ask the window manager to activate one exact window birth.",
+          "properties": {
+            "fallback": {
+              "$ref": "#/$defs/WindowFocusFallback"
+            },
+            "switch_workspace": {
+              "description": "Whether a fixed-profile workspace switch may precede activation.",
+              "type": "boolean"
+            },
+            "type": {
+              "const": "window_activate",
+              "type": "string"
+            },
+            "window": {
+              "$ref": "#/$defs/WindowRef"
+            }
+          },
+          "required": [
+            "type",
+            "window",
+            "switch_workspace",
+            "fallback"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Ask the window manager or ICCCM client to close one exact window birth.",
+          "properties": {
+            "type": {
+              "const": "window_close",
+              "type": "string"
+            },
+            "wait_for": {
+              "$ref": "#/$defs/WindowCloseWaitPolicy"
+            },
+            "window": {
+              "$ref": "#/$defs/WindowRef"
+            }
+          },
+          "required": [
+            "type",
+            "window",
+            "wait_for"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Add or remove one idempotent window-manager state.",
+          "properties": {
+            "desired": {
+              "description": "Requested final state, preserving retry idempotency.",
+              "type": "boolean"
+            },
+            "state": {
+              "$ref": "#/$defs/WindowManagerState"
+            },
+            "type": {
+              "const": "window_set_state",
+              "type": "string"
+            },
+            "window": {
+              "$ref": "#/$defs/WindowRef"
+            }
+          },
+          "required": [
+            "type",
+            "window",
+            "state",
+            "desired"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Request a desired minimized state.",
+          "properties": {
+            "desired": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "window_minimize",
+              "type": "string"
+            },
+            "window": {
+              "$ref": "#/$defs/WindowRef"
+            }
+          },
+          "required": [
+            "type",
+            "window",
+            "desired"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Request bounded programmatic window geometry.",
+          "properties": {
+            "bounds_policy": {
+              "$ref": "#/$defs/WindowScreenBoundsPolicy"
+            },
+            "geometry": {
+              "$ref": "#/$defs/WindowGeometryRequest"
+            },
+            "relative_to": {
+              "$ref": "#/$defs/WindowGeometryTarget"
+            },
+            "type": {
+              "const": "window_move_resize",
+              "type": "string"
+            },
+            "window": {
+              "$ref": "#/$defs/WindowRef"
+            }
+          },
+          "required": [
+            "type",
+            "window",
+            "relative_to",
+            "geometry",
+            "bounds_policy"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Move one exact window birth to a zero-based workspace.",
+          "properties": {
+            "type": {
+              "const": "window_move_to_workspace",
+              "type": "string"
+            },
+            "window": {
+              "$ref": "#/$defs/WindowRef"
+            },
+            "workspace": {
+              "description": "Desired zero-based EWMH desktop index; the sticky sentinel is forbidden.",
+              "format": "uint32",
+              "maximum": 4294967294,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type",
+            "window",
+            "workspace"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Request a best-effort stacking relationship.",
+          "properties": {
+            "mode": {
+              "$ref": "#/$defs/WindowStackMode"
+            },
+            "sibling": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WindowRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required by `above`/`below` and forbidden by `raise`/`lower`."
+            },
+            "type": {
+              "const": "window_stack",
+              "type": "string"
+            },
+            "window": {
+              "$ref": "#/$defs/WindowRef"
+            }
+          },
+          "required": [
+            "type",
+            "window",
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Acquire and serve one X11 selection value.",
+          "properties": {
+            "content": {
+              "$ref": "#/$defs/ClipboardWriteSource",
+              "description": "Secret inline data or private input artifact."
+            },
+            "selection": {
+              "$ref": "#/$defs/SelectionName",
+              "description": "CLIPBOARD and PRIMARY remain independent."
+            },
+            "type": {
+              "const": "selection_set",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "selection",
+            "content"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Relinquish Xenoteer's ownership of one X11 selection.",
+          "properties": {
+            "selection": {
+              "$ref": "#/$defs/SelectionName",
+              "description": "Selection to clear without affecting the other selection."
+            },
+            "type": {
+              "const": "selection_clear",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "selection"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Insert exact UTF-8 through one bounded strategy.",
+          "properties": {
+            "clipboard_options": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TextInsertOptions"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Clipboard-specific bounds, present only when clipboard might be selected."
+            },
+            "strategy": {
+              "$ref": "#/$defs/TextStrategy",
+              "description": "Requested strategy, including deterministic `auto`."
+            },
+            "target": {
+              "$ref": "#/$defs/TextTarget",
+              "description": "Exact target revalidated near execution."
+            },
+            "text": {
+              "$ref": "#/$defs/TextSource",
+              "description": "Secret inline text or private artifact."
+            },
+            "type": {
+              "const": "text_insert",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text",
+            "target",
+            "strategy"
           ],
           "type": "object"
         }
@@ -361,6 +1078,428 @@
       "minLength": 1,
       "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
       "type": "string"
+    },
+    "KeyboardKeyIdentifier": {
+      "description": "Named, Unicode-scalar, or advanced raw physical key identity.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "One member of the closed named-key vocabulary.",
+          "properties": {
+            "kind": {
+              "const": "named",
+              "type": "string"
+            },
+            "name": {
+              "$ref": "#/$defs/KeyboardNamedKey",
+              "description": "Stable named-key value."
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Exactly one non-control Unicode scalar.",
+          "properties": {
+            "kind": {
+              "const": "scalar",
+              "type": "string"
+            },
+            "value": {
+              "description": "Requested Unicode scalar; diagnostic formatting always redacts it.",
+              "maxLength": 1,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Advanced core-X11 physical keycode escape hatch.",
+          "properties": {
+            "keycode": {
+              "description": "Physical core-X11 keycode.",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 8,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "raw",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "keycode"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "KeyboardNamedKey": {
+      "description": "Closed, versioned named-key vocabulary.",
+      "oneOf": [
+        {
+          "const": "backspace",
+          "description": "Backspace.",
+          "type": "string"
+        },
+        {
+          "const": "tab",
+          "description": "Horizontal tab.",
+          "type": "string"
+        },
+        {
+          "const": "enter",
+          "description": "Return/enter.",
+          "type": "string"
+        },
+        {
+          "const": "escape",
+          "description": "Escape.",
+          "type": "string"
+        },
+        {
+          "const": "space",
+          "description": "Space.",
+          "type": "string"
+        },
+        {
+          "const": "insert",
+          "description": "Insert.",
+          "type": "string"
+        },
+        {
+          "const": "delete",
+          "description": "Delete.",
+          "type": "string"
+        },
+        {
+          "const": "home",
+          "description": "Home.",
+          "type": "string"
+        },
+        {
+          "const": "end",
+          "description": "End.",
+          "type": "string"
+        },
+        {
+          "const": "page_up",
+          "description": "Page up.",
+          "type": "string"
+        },
+        {
+          "const": "page_down",
+          "description": "Page down.",
+          "type": "string"
+        },
+        {
+          "const": "arrow_left",
+          "description": "Left arrow.",
+          "type": "string"
+        },
+        {
+          "const": "arrow_up",
+          "description": "Up arrow.",
+          "type": "string"
+        },
+        {
+          "const": "arrow_right",
+          "description": "Right arrow.",
+          "type": "string"
+        },
+        {
+          "const": "arrow_down",
+          "description": "Down arrow.",
+          "type": "string"
+        },
+        {
+          "const": "shift",
+          "description": "Configured default shift side.",
+          "type": "string"
+        },
+        {
+          "const": "control",
+          "description": "Configured default control side.",
+          "type": "string"
+        },
+        {
+          "const": "alt",
+          "description": "Configured default alt side.",
+          "type": "string"
+        },
+        {
+          "const": "meta",
+          "description": "Configured default meta side.",
+          "type": "string"
+        },
+        {
+          "const": "super",
+          "description": "Configured default super side.",
+          "type": "string"
+        },
+        {
+          "const": "shift_left",
+          "description": "Left shift.",
+          "type": "string"
+        },
+        {
+          "const": "shift_right",
+          "description": "Right shift.",
+          "type": "string"
+        },
+        {
+          "const": "control_left",
+          "description": "Left control.",
+          "type": "string"
+        },
+        {
+          "const": "control_right",
+          "description": "Right control.",
+          "type": "string"
+        },
+        {
+          "const": "alt_left",
+          "description": "Left alt.",
+          "type": "string"
+        },
+        {
+          "const": "alt_right",
+          "description": "Right alt.",
+          "type": "string"
+        },
+        {
+          "const": "meta_left",
+          "description": "Left meta.",
+          "type": "string"
+        },
+        {
+          "const": "meta_right",
+          "description": "Right meta.",
+          "type": "string"
+        },
+        {
+          "const": "super_left",
+          "description": "Left super.",
+          "type": "string"
+        },
+        {
+          "const": "super_right",
+          "description": "Right super.",
+          "type": "string"
+        },
+        {
+          "const": "hyper_left",
+          "description": "Left hyper.",
+          "type": "string"
+        },
+        {
+          "const": "hyper_right",
+          "description": "Right hyper.",
+          "type": "string"
+        },
+        {
+          "const": "alt_graph",
+          "description": "ISO level-three shift, normally AltGr.",
+          "type": "string"
+        },
+        {
+          "const": "caps_lock",
+          "description": "Caps lock.",
+          "type": "string"
+        },
+        {
+          "const": "num_lock",
+          "description": "Number lock.",
+          "type": "string"
+        },
+        {
+          "const": "scroll_lock",
+          "description": "Scroll lock.",
+          "type": "string"
+        },
+        {
+          "const": "print_screen",
+          "description": "Print screen.",
+          "type": "string"
+        },
+        {
+          "const": "pause",
+          "description": "Pause/break.",
+          "type": "string"
+        },
+        {
+          "const": "context_menu",
+          "description": "Context menu.",
+          "type": "string"
+        },
+        {
+          "const": "f1",
+          "description": "Function key 1.",
+          "type": "string"
+        },
+        {
+          "const": "f2",
+          "description": "Function key 2.",
+          "type": "string"
+        },
+        {
+          "const": "f3",
+          "description": "Function key 3.",
+          "type": "string"
+        },
+        {
+          "const": "f4",
+          "description": "Function key 4.",
+          "type": "string"
+        },
+        {
+          "const": "f5",
+          "description": "Function key 5.",
+          "type": "string"
+        },
+        {
+          "const": "f6",
+          "description": "Function key 6.",
+          "type": "string"
+        },
+        {
+          "const": "f7",
+          "description": "Function key 7.",
+          "type": "string"
+        },
+        {
+          "const": "f8",
+          "description": "Function key 8.",
+          "type": "string"
+        },
+        {
+          "const": "f9",
+          "description": "Function key 9.",
+          "type": "string"
+        },
+        {
+          "const": "f10",
+          "description": "Function key 10.",
+          "type": "string"
+        },
+        {
+          "const": "f11",
+          "description": "Function key 11.",
+          "type": "string"
+        },
+        {
+          "const": "f12",
+          "description": "Function key 12.",
+          "type": "string"
+        },
+        {
+          "const": "f13",
+          "description": "Function key 13.",
+          "type": "string"
+        },
+        {
+          "const": "f14",
+          "description": "Function key 14.",
+          "type": "string"
+        },
+        {
+          "const": "f15",
+          "description": "Function key 15.",
+          "type": "string"
+        },
+        {
+          "const": "f16",
+          "description": "Function key 16.",
+          "type": "string"
+        },
+        {
+          "const": "f17",
+          "description": "Function key 17.",
+          "type": "string"
+        },
+        {
+          "const": "f18",
+          "description": "Function key 18.",
+          "type": "string"
+        },
+        {
+          "const": "f19",
+          "description": "Function key 19.",
+          "type": "string"
+        },
+        {
+          "const": "f20",
+          "description": "Function key 20.",
+          "type": "string"
+        },
+        {
+          "const": "f21",
+          "description": "Function key 21.",
+          "type": "string"
+        },
+        {
+          "const": "f22",
+          "description": "Function key 22.",
+          "type": "string"
+        },
+        {
+          "const": "f23",
+          "description": "Function key 23.",
+          "type": "string"
+        },
+        {
+          "const": "f24",
+          "description": "Function key 24.",
+          "type": "string"
+        }
+      ]
+    },
+    "KeyboardSequenceStep": {
+      "additionalProperties": false,
+      "description": "One complete press or chord in an atomic keyboard sequence.",
+      "properties": {
+        "delay_before_ms": {
+          "description": "Delay before this complete step begins.",
+          "format": "uint16",
+          "maximum": 10000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hold_ms": {
+          "description": "Delay between final press and first release.",
+          "format": "uint16",
+          "maximum": 10000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "keys": {
+          "description": "Modifier-first key identities, released in reverse order.",
+          "items": {
+            "$ref": "#/$defs/KeyboardKeyIdentifier"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "keys",
+        "delay_before_ms",
+        "hold_ms"
+      ],
+      "type": "object"
     },
     "LaunchId": {
       "description": "Identifies one managed application launch.",
@@ -486,7 +1625,7 @@
     },
     "Point": {
       "additionalProperties": false,
-      "description": "A signed two-dimensional point.",
+      "description": "Closed request-direction point object.",
       "properties": {
         "x": {
           "format": "int32",
@@ -502,6 +1641,83 @@
         "y"
       ],
       "type": "object"
+    },
+    "PointerClickTarget": {
+      "description": "Optional motion destination resolved immediately before an atomic click.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Click at the pointer's execution-time position.",
+          "properties": {
+            "kind": {
+              "const": "current",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Move to an absolute root-physical point before clicking.",
+          "properties": {
+            "kind": {
+              "const": "root",
+              "type": "string"
+            },
+            "point": {
+              "$ref": "#/$defs/Point",
+              "description": "Absolute root-physical endpoint."
+            }
+          },
+          "required": [
+            "kind",
+            "point"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Resolve a window-local point against live geometry before clicking.",
+          "properties": {
+            "activate": {
+              "description": "Ask the window manager to activate the exact window before input.",
+              "type": "boolean"
+            },
+            "bounds_policy": {
+              "$ref": "#/$defs/WindowPointerBoundsPolicy",
+              "description": "Handling for a point outside the selected live rectangle."
+            },
+            "coordinate_space": {
+              "$ref": "#/$defs/WindowPointerCoordinateSpace",
+              "description": "Whether `point` is client-relative or frame-relative."
+            },
+            "kind": {
+              "const": "window",
+              "type": "string"
+            },
+            "point": {
+              "$ref": "#/$defs/Point",
+              "description": "Point in the selected window coordinate space."
+            },
+            "window": {
+              "$ref": "#/$defs/WindowRef",
+              "description": "Exact observed window birth."
+            }
+          },
+          "required": [
+            "kind",
+            "window",
+            "coordinate_space",
+            "point",
+            "activate",
+            "bounds_policy"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "PointerCurve": {
       "description": "Interpolation curve for a pointer movement.",
@@ -523,26 +1739,120 @@
         }
       ]
     },
+    "PointerDragTarget": {
+      "description": "Execution-time destination for an atomic drag.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Absolute root-physical endpoint.",
+          "properties": {
+            "kind": {
+              "const": "root",
+              "type": "string"
+            },
+            "point": {
+              "$ref": "#/$defs/Point",
+              "description": "Absolute endpoint."
+            }
+          },
+          "required": [
+            "kind",
+            "point"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Signed displacement from the execution-time pointer position.",
+          "properties": {
+            "delta": {
+              "$ref": "#/$defs/Point",
+              "description": "Relative root-physical displacement."
+            },
+            "kind": {
+              "const": "relative",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "delta"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PointerLogicalButton": {
+      "description": "Stable logical buttons accepted by complete click and drag commands.",
+      "oneOf": [
+        {
+          "const": "left",
+          "description": "Primary button.",
+          "type": "string"
+        },
+        {
+          "const": "middle",
+          "description": "Middle button.",
+          "type": "string"
+        },
+        {
+          "const": "right",
+          "description": "Secondary button.",
+          "type": "string"
+        },
+        {
+          "const": "back",
+          "description": "Browser-style back button.",
+          "type": "string"
+        },
+        {
+          "const": "forward",
+          "description": "Browser-style forward button.",
+          "type": "string"
+        }
+      ]
+    },
+    "PointerScrollDirection": {
+      "description": "Direction of discrete logical scroll notches.",
+      "oneOf": [
+        {
+          "const": "up",
+          "description": "Vertical scroll toward the top.",
+          "type": "string"
+        },
+        {
+          "const": "down",
+          "description": "Vertical scroll toward the bottom.",
+          "type": "string"
+        },
+        {
+          "const": "left",
+          "description": "Horizontal scroll toward the left.",
+          "type": "string"
+        },
+        {
+          "const": "right",
+          "description": "Horizontal scroll toward the right.",
+          "type": "string"
+        }
+      ]
+    },
     "ProcessRef": {
       "additionalProperties": false,
-      "description": "A reference safe against desktop restart and Linux PID reuse.",
+      "description": "Request-direction representation of [`ProcessRef`].\n\nThe public reference is also emitted in responses and therefore accepts\nadditive output fields. Every request occurrence deserializes through this\nclosed shape so a misspelled identity claim is never ignored.",
       "properties": {
         "desktop_generation": {
-          "$ref": "#/$defs/DesktopGeneration",
-          "description": "Desktop lifetime that owns the child."
+          "$ref": "#/$defs/DesktopGeneration"
         },
         "launch_id": {
-          "$ref": "#/$defs/LaunchId",
-          "description": "Server-generated managed launch identity."
+          "$ref": "#/$defs/LaunchId"
         },
         "pid": {
-          "description": "Positive Linux process identifier.",
           "format": "uint32",
           "minimum": 1,
           "type": "integer"
         },
         "proc_start_ticks": {
-          "description": "Field 22 from `/proc/{pid}/stat`, measured in boot clock ticks.",
           "format": "uint64",
           "minimum": 1,
           "type": "integer"
@@ -558,7 +1868,7 @@
     },
     "ProtocolVersion": {
       "additionalProperties": false,
-      "description": "A negotiated protocol major/minor pair.",
+      "description": "Closed request-direction protocol-version object.",
       "properties": {
         "major": {
           "format": "uint16",
@@ -584,6 +1894,170 @@
       "format": "uuid",
       "type": "string"
     },
+    "SecretInlineBinary": {
+      "additionalProperties": false,
+      "properties": {
+        "base64": {
+          "type": "string"
+        },
+        "decoded_length": {
+          "format": "uint32",
+          "maximum": 262144,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "base64",
+        "decoded_length",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "SecretInlineText": {
+      "description": "Inline UTF-8 content whose diagnostics expose only byte/scalar counts.",
+      "maxLength": 262144,
+      "type": "string"
+    },
+    "SelectionName": {
+      "description": "Independently owned X11 selections supported for release one writes.",
+      "oneOf": [
+        {
+          "const": "clipboard",
+          "description": "Explicit clipboard selection.",
+          "type": "string"
+        },
+        {
+          "const": "primary",
+          "description": "Pointer-selection convention; never mirrored automatically.",
+          "type": "string"
+        }
+      ]
+    },
+    "Sha256Digest": {
+      "description": "Canonical lowercase hexadecimal SHA-256 content identity.",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "TextInsertOptions": {
+      "additionalProperties": false,
+      "description": "Clipboard-specific text insertion policy.",
+      "properties": {
+        "paste_observation_timeout_ms": {
+          "description": "Maximum wait for a compatible application SelectionRequest.",
+          "format": "uint32",
+          "maximum": 2000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "preserve_clipboard": {
+          "description": "Preserve a bounded text representation of the previous CLIPBOARD value.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "preserve_clipboard",
+        "paste_observation_timeout_ms"
+      ],
+      "type": "object"
+    },
+    "TextSource": {
+      "description": "Text body carried inline or by a purpose-bound private upload.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Inline UTF-8 under the ordinary-message ceiling.",
+          "properties": {
+            "source": {
+              "const": "inline",
+              "type": "string"
+            },
+            "text": {
+              "$ref": "#/$defs/SecretInlineText",
+              "description": "Secret text."
+            }
+          },
+          "required": [
+            "source",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Larger immutable UTF-8 upload.",
+          "properties": {
+            "artifact": {
+              "$ref": "#/$defs/ArtifactRef",
+              "description": "Must be a `clipboard_input` artifact of at most 1 MiB."
+            },
+            "source": {
+              "const": "artifact",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "artifact"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TextStrategy": {
+      "description": "Release-four exact text strategies.",
+      "oneOf": [
+        {
+          "const": "physical",
+          "description": "Current-layout XTEST keycodes only.",
+          "type": "string"
+        },
+        {
+          "const": "physical_extended",
+          "description": "Explicit global temporary-keymap strategy.",
+          "type": "string"
+        },
+        {
+          "const": "clipboard",
+          "description": "Temporary CLIPBOARD ownership plus an observed paste request.",
+          "type": "string"
+        },
+        {
+          "const": "auto",
+          "description": "Deterministic policy selection among available release-four strategies.",
+          "type": "string"
+        }
+      ]
+    },
+    "TextTarget": {
+      "description": "Target whose focus/identity is revalidated before text effects.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Exact generation-bound X11 window.",
+          "properties": {
+            "target": {
+              "const": "window",
+              "type": "string"
+            },
+            "window": {
+              "$ref": "#/$defs/WindowRef",
+              "description": "Window to activate/verify before insertion."
+            }
+          },
+          "required": [
+            "target",
+            "window"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "Timestamp": {
       "description": "A canonical RFC 3339 timestamp with an explicit UTC offset.",
       "format": "date-time",
@@ -603,6 +2077,205 @@
           "type": "string"
         }
       ]
+    },
+    "WindowCloseWaitPolicy": {
+      "description": "Postcondition the close saga should await after sending its advisory request.",
+      "oneOf": [
+        {
+          "const": "request_sent",
+          "description": "Return after a same-connection barrier proves the request was sent.",
+          "type": "string"
+        },
+        {
+          "const": "unmapped_or_destroyed",
+          "description": "Await destruction or unmapping until the command deadline.",
+          "type": "string"
+        }
+      ]
+    },
+    "WindowFocusFallback": {
+      "description": "Explicit fallback policy for activation when EWMH cannot establish focus.",
+      "oneOf": [
+        {
+          "const": "ewmh_only",
+          "description": "Use only `_NET_ACTIVE_WINDOW` and observed WM/core-focus convergence.",
+          "type": "string"
+        },
+        {
+          "const": "allow_set_input_focus",
+          "description": "Permit the documented raw `SetInputFocus` compatibility fallback.",
+          "type": "string"
+        }
+      ]
+    },
+    "WindowGeometryRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "height": {
+          "format": "uint32",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "width": {
+          "format": "uint32",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "x": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "y": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "WindowGeometryTarget": {
+      "description": "Whether requested geometry describes the WM frame or top-level client.",
+      "enum": [
+        "frame",
+        "client"
+      ],
+      "type": "string"
+    },
+    "WindowIdentityHash": {
+      "description": "Fixed lowercase SHA-256 projection binding an XID birth to initial evidence.",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "WindowManagerState": {
+      "description": "Desired idempotent `_NET_WM_STATE` projection.",
+      "oneOf": [
+        {
+          "enum": [
+            "fullscreen",
+            "above",
+            "sticky"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "maximized",
+          "description": "Both vertical and horizontal maximize atoms as one public state.",
+          "type": "string"
+        }
+      ]
+    },
+    "WindowPointerBoundsPolicy": {
+      "description": "Policy for a window-local point outside the selected client or frame rectangle.",
+      "oneOf": [
+        {
+          "const": "reject",
+          "description": "Reject a point outside the selected rectangle.",
+          "type": "string"
+        },
+        {
+          "const": "clamp",
+          "description": "Clamp each coordinate to the nearest point inside the selected rectangle.",
+          "type": "string"
+        },
+        {
+          "const": "allow",
+          "description": "Permit a translated point outside the rectangle when it still fits root coordinates.",
+          "type": "string"
+        }
+      ]
+    },
+    "WindowPointerCoordinateSpace": {
+      "description": "Coordinate frame for a point local to a window.",
+      "oneOf": [
+        {
+          "const": "client",
+          "description": "Coordinates relative to the client content window.",
+          "type": "string"
+        },
+        {
+          "const": "frame",
+          "description": "Coordinates relative to the window-manager frame.",
+          "type": "string"
+        }
+      ]
+    },
+    "WindowRef": {
+      "additionalProperties": false,
+      "description": "Closed request-direction representation of [`WindowRef`].",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration"
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId"
+        },
+        "identity_hash": {
+          "$ref": "#/$defs/WindowIdentityHash"
+        },
+        "observed_generation": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "xid": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "desktop_id",
+        "desktop_generation",
+        "xid",
+        "observed_generation",
+        "identity_hash"
+      ],
+      "type": "object"
+    },
+    "WindowScreenBoundsPolicy": {
+      "description": "Policy for a desired rectangle that would extend beyond root bounds.",
+      "oneOf": [
+        {
+          "const": "require_inside_root",
+          "description": "Reject geometry outside the root rectangle before the WM request.",
+          "type": "string"
+        },
+        {
+          "const": "clamp_to_root",
+          "description": "Clamp the desired geometry to the root and report a constraint warning.",
+          "type": "string"
+        },
+        {
+          "const": "allow_offscreen",
+          "description": "Permit a cooperating WM to place part of the window off-screen.",
+          "type": "string"
+        }
+      ]
+    },
+    "WindowStackMode": {
+      "description": "Advisory stacking operation; exact global z-order is never promised.",
+      "enum": [
+        "raise",
+        "lower",
+        "above",
+        "below"
+      ],
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

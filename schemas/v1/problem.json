@@ -44,6 +44,21 @@
           "type": "string"
         },
         {
+          "const": "pointer_clicked",
+          "description": "One or more complete pointer clicks were confirmed.",
+          "type": "string"
+        },
+        {
+          "const": "pointer_dragged",
+          "description": "A complete press/move/release drag was confirmed.",
+          "type": "string"
+        },
+        {
+          "const": "pointer_scrolled",
+          "description": "One or more complete discrete scroll notches were confirmed.",
+          "type": "string"
+        },
+        {
           "const": "key_pressed",
           "description": "A physical key was pressed.",
           "type": "string"
@@ -51,6 +66,11 @@
         {
           "const": "key_released",
           "description": "A physical key was released.",
+          "type": "string"
+        },
+        {
+          "const": "keyboard_action_completed",
+          "description": "A complete key press, chord, or sequence was confirmed.",
           "type": "string"
         },
         {
@@ -76,6 +96,26 @@
         {
           "const": "postcondition_met",
           "description": "The requested postcondition was observed.",
+          "type": "string"
+        },
+        {
+          "const": "window_request_sent",
+          "description": "A window-manager or ICCCM request crossed its externally visible boundary.",
+          "type": "string"
+        },
+        {
+          "const": "window_state_changed",
+          "description": "The requested window postcondition was observed.",
+          "type": "string"
+        },
+        {
+          "const": "clipboard_ownership_changed",
+          "description": "Xenoteer acquired or relinquished X11 selection ownership.",
+          "type": "string"
+        },
+        {
+          "const": "text_inserted",
+          "description": "At least one text-insertion effect was emitted.",
           "type": "string"
         }
       ]

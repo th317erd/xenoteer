@@ -262,6 +262,12 @@ pub enum InputFailureKind {
     DeadlineExceededBeforeEffect,
     /// The actor is not healthy enough to admit ordinary input.
     HealthRejected,
+    /// An exact observed target birth failed near-effect revalidation.
+    TargetStale,
+    /// The exact input target no longer owned focus at the near-effect boundary.
+    FocusLost,
+    /// Required near-effect target/focus evidence could not be obtained.
+    PreconditionUnavailable,
     /// Core ownership validation rejected the transition.
     StateRejected,
     /// This lane has not implemented the otherwise valid operation yet.

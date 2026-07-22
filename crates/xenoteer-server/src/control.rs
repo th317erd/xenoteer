@@ -11,10 +11,9 @@ use axum::{
 };
 use serde::Deserialize;
 use xenoteer_protocol::{
-    Command, CommandEnvelope, CommandId, CommandResult, ControlLeaseId, DesktopGeneration,
-    DesktopId, EnvelopeValidationError, EventResyncReason, LeaseAcquireRequest,
-    LeaseReleaseRequest, LeaseRenewRequest, LeaseStateView, LeaseValidationError, RequestId,
-    SequencedEvent,
+    CommandEnvelope, CommandId, CommandResult, ControlLeaseId, DesktopGeneration, DesktopId,
+    EnvelopeValidationError, EventResyncReason, LeaseAcquireRequest, LeaseReleaseRequest,
+    LeaseRenewRequest, LeaseStateView, LeaseValidationError, RequestId, SequencedEvent,
 };
 
 use crate::{
@@ -532,7 +531,7 @@ async fn submit_command(
         Ok(Json(command)) => command,
         Err(rejection) => return json_rejection_response(rejection, request_id),
     };
-    if !principal.has_grant(required_submit_grant(&command.command)) {
+    if !principal.satisfies(crate::command_grant_requirement(&command.command)) {
         return ApiProblem::permission_denied(request_id).into_response();
     }
     if let Err(problem) = validate_command(&state, desktop_id, &command, request_id) {
@@ -651,7 +650,7 @@ async fn cancel_command(
     Extension(request_id): Extension<RequestId>,
     path: Result<Path<(DesktopId, CommandId)>, axum::extract::rejection::PathRejection>,
 ) -> Response {
-    if !has_cancel_grant(&principal) {
+    if !principal.has_command_cancellation_grant() {
         return ApiProblem::permission_denied(request_id).into_response();
     }
     let Ok(Path((desktop_id, command_id))) = path else {
@@ -683,26 +682,6 @@ async fn cancel_command(
         ),
         Err(error) => control_problem(error, request_id).into_response(),
     }
-}
-
-fn required_submit_grant(command: &Command) -> Grant {
-    match command {
-        Command::PointerMove(_)
-        | Command::PointerButtonDown(_)
-        | Command::PointerButtonUp(_)
-        | Command::KeyboardKeyDown(_)
-        | Command::KeyboardKeyUp(_)
-        | Command::InputReset(_) => Grant::InputControl,
-        Command::ApplicationLaunch(_) => Grant::ApplicationLaunch,
-        Command::ProcessTerminate(_) => Grant::ApplicationTerminate,
-        Command::DesktopProbe(_) | Command::ProcessStatus(_) => Grant::DesktopObserve,
-    }
-}
-
-fn has_cancel_grant(principal: &Principal) -> bool {
-    principal.has_grant(Grant::InputControl)
-        || principal.has_grant(Grant::ApplicationLaunch)
-        || principal.has_grant(Grant::ApplicationTerminate)
 }
 
 fn context(principal: Principal, request_id: RequestId) -> ControlRequestContext {
@@ -749,7 +728,7 @@ fn validate_command(
     validate_generation(state, path_desktop, command.desktop_generation, request_id)
 }
 
-fn validate_generation(
+pub(crate) fn validate_generation(
     state: &ApiState,
     path_desktop: DesktopId,
     requested_generation: DesktopGeneration,
@@ -896,7 +875,7 @@ fn json_response<T: serde::Serialize>(
     response
 }
 
-fn control_problem(error: ControlPlaneError, request_id: RequestId) -> ApiProblem {
+pub(crate) fn control_problem(error: ControlPlaneError, request_id: RequestId) -> ApiProblem {
     match error {
         ControlPlaneError::InvalidRequest => ApiProblem::invalid_request(request_id),
         ControlPlaneError::PermissionDenied => ApiProblem::permission_denied(request_id),
@@ -924,9 +903,9 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use tower::ServiceExt;
     use xenoteer_protocol::{
-        ApplicationId, ApplicationLaunchCommand, CommandOutcome, DesktopProbeCommand, EffectStage,
-        LaunchId, LeaseAvailability, Point, PointerCurve, PointerMoveCommand, ProcessRef,
-        ProcessStatusCommand, ProcessTerminateCommand, ProtocolVersion, Timestamp,
+        ApplicationId, ApplicationLaunchCommand, Command, CommandOutcome, DesktopProbeCommand,
+        EffectStage, LaunchId, LeaseAvailability, Point, PointerCurve, PointerMoveCommand,
+        ProcessRef, ProcessStatusCommand, ProcessTerminateCommand, ProtocolVersion, Timestamp,
     };
 
     use super::*;
@@ -1465,12 +1444,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_accepts_each_mutation_grant_and_rejects_observation_grants()
+    async fn cancellation_accepts_each_command_mutation_grant_and_rejects_non_command_grants()
     -> Result<(), Box<dyn std::error::Error>> {
         for grant in [
             Grant::InputControl,
             Grant::ApplicationLaunch,
             Grant::ApplicationTerminate,
+            Grant::WindowControl,
+            Grant::ClipboardWrite,
         ] {
             let desktop_id = DesktopId::new();
             let generation = DesktopGeneration::new();
@@ -1487,7 +1468,15 @@ mod tests {
             assert_eq!(control.cancel_calls.load(Ordering::SeqCst), 1, "{grant:?}");
         }
 
-        for grant in [Grant::DesktopStatus, Grant::DesktopObserve] {
+        for grant in [
+            Grant::DesktopStatus,
+            Grant::DesktopObserve,
+            Grant::ClipboardRead,
+            Grant::CaptureRead,
+            Grant::ArtifactRead,
+            Grant::ArtifactDelete,
+            Grant::ViewerRead,
+        ] {
             let desktop_id = DesktopId::new();
             let generation = DesktopGeneration::new();
             let control = Arc::new(MockControl::new(desktop_id, generation, SubmitMode::New));

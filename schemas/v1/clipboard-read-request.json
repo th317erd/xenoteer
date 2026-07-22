@@ -1,0 +1,54 @@
+{
+  "$defs": {
+    "ClipboardTarget": {
+      "description": "A bounded X11 target atom name.",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[!-~]+$",
+      "type": "string"
+    },
+    "SelectionName": {
+      "description": "Independently owned X11 selections supported for release one writes.",
+      "oneOf": [
+        {
+          "const": "clipboard",
+          "description": "Explicit clipboard selection.",
+          "type": "string"
+        },
+        {
+          "const": "primary",
+          "description": "Pointer-selection convention; never mirrored automatically.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Read another owner's preferred bounded representation.",
+  "properties": {
+    "allow_binary_fallback": {
+      "description": "Whether invalid text encoding may be returned as binary rather than rejected.",
+      "type": "boolean"
+    },
+    "preferred_targets": {
+      "description": "Ordered target preferences; empty selects the server's documented text order.",
+      "items": {
+        "$ref": "#/$defs/ClipboardTarget"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "selection": {
+      "$ref": "#/$defs/SelectionName",
+      "description": "Selection to convert."
+    }
+  },
+  "required": [
+    "selection",
+    "preferred_targets",
+    "allow_binary_fallback"
+  ],
+  "title": "ClipboardReadRequest",
+  "type": "object"
+}

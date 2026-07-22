@@ -115,7 +115,11 @@ jobs:
           XENOTEER_IMAGE: xenoteer:phase2
         run: scripts/container/build.sh
       - name: Exercise PID 1, health, shutdown, failure, and hardened profiles
+        timeout-minutes: 30
         run: sudo scripts/container/test-image.sh xenoteer:phase2
+      - name: Exercise slow-subscriber resync under real X11 event churn
+        timeout-minutes: 10
+        run: sudo scripts/container/test-phase4-event-flood.sh xenoteer:phase2
       - name: Exercise real loopback view-only noVNC chain
         run: sudo env XENOTEER_NOVNC_SPIKE_BASE_IMAGE=xenoteer:phase2 scripts/container/test-novnc-spike.sh
       - name: Build exact derived desktop application fixture
@@ -125,6 +129,9 @@ jobs:
         run: scripts/container/build-desktop-app-fixture.sh
       - name: Exercise GTK, Qt, browser, Electron, accessibility, and hardened matrix
         run: sudo scripts/container/test-desktop-app-image.sh xenoteer:desktop-apps-test
+      - name: Exercise Phase 4 clipboard, window-control, and capture API matrix
+        timeout-minutes: 20
+        run: sudo scripts/container/test-phase4-live-fixtures.py xenoteer:desktop-apps-test
 
   container-phase2-soak:
     name: Phase 2 30-minute idle soak

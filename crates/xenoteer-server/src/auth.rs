@@ -61,6 +61,27 @@ pub enum Grant {
     /// Terminate a managed application process group.
     #[serde(rename = "application:terminate")]
     ApplicationTerminate,
+    /// Request window-manager-mediated state changes.
+    #[serde(rename = "window:control")]
+    WindowControl,
+    /// Read selection contents.
+    #[serde(rename = "clipboard:read")]
+    ClipboardRead,
+    /// Own, clear, or temporarily replace selection contents.
+    #[serde(rename = "clipboard:write")]
+    ClipboardWrite,
+    /// Capture bounded desktop or window pixels.
+    #[serde(rename = "capture:read")]
+    CaptureRead,
+    /// Read authorized generic trace or support artifacts.
+    #[serde(rename = "artifact:read")]
+    ArtifactRead,
+    /// Delete authorized generic trace or support artifacts.
+    #[serde(rename = "artifact:delete")]
+    ArtifactDelete,
+    /// Create a short-lived view-only viewer session.
+    #[serde(rename = "viewer:read")]
+    ViewerRead,
 }
 
 impl Grant {
@@ -73,10 +94,17 @@ impl Grant {
             Self::InputControl => "input:control",
             Self::ApplicationLaunch => "application:launch",
             Self::ApplicationTerminate => "application:terminate",
+            Self::WindowControl => "window:control",
+            Self::ClipboardRead => "clipboard:read",
+            Self::ClipboardWrite => "clipboard:write",
+            Self::CaptureRead => "capture:read",
+            Self::ArtifactRead => "artifact:read",
+            Self::ArtifactDelete => "artifact:delete",
+            Self::ViewerRead => "viewer:read",
         }
     }
 
-    /// Parses one member of the closed release-three grant vocabulary.
+    /// Parses one member of the closed release-four grant vocabulary.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         Self::operator_grants()
@@ -84,17 +112,120 @@ impl Grant {
             .find(|grant| grant.as_str() == name)
     }
 
-    /// Returns the complete release-three operator grant set.
+    /// Returns the complete release-four operator grant set.
     #[must_use]
-    pub const fn operator_grants() -> [Self; 5] {
+    pub const fn operator_grants() -> [Self; 12] {
         [
             Self::DesktopStatus,
             Self::DesktopObserve,
             Self::InputControl,
             Self::ApplicationLaunch,
             Self::ApplicationTerminate,
+            Self::WindowControl,
+            Self::ClipboardRead,
+            Self::ClipboardWrite,
+            Self::CaptureRead,
+            Self::ArtifactRead,
+            Self::ArtifactDelete,
+            Self::ViewerRead,
         ]
     }
+}
+
+/// An immutable all-of authorization rule for one command shape.
+///
+/// Keeping the rule as data lets HTTP, WebSocket, and the near-effect daemon
+/// boundary share the exact same policy. Commands such as clipboard-preserving
+/// text insertion can require more than one grant without duplicating match
+/// statements across transports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrantRequirement {
+    all: &'static [Grant],
+}
+
+impl GrantRequirement {
+    /// Builds an all-of grant requirement.
+    #[must_use]
+    pub const fn all(grants: &'static [Grant]) -> Self {
+        Self { all: grants }
+    }
+
+    /// Returns the grants that must all be present.
+    #[must_use]
+    pub const fn grants(self) -> &'static [Grant] {
+        self.all
+    }
+}
+
+const DESKTOP_OBSERVE_REQUIREMENT: &[Grant] = &[Grant::DesktopObserve];
+const INPUT_CONTROL_REQUIREMENT: &[Grant] = &[Grant::InputControl];
+const TARGETED_INPUT_REQUIREMENT: &[Grant] = &[Grant::InputControl, Grant::WindowControl];
+const APPLICATION_LAUNCH_REQUIREMENT: &[Grant] = &[Grant::ApplicationLaunch];
+const APPLICATION_TERMINATE_REQUIREMENT: &[Grant] = &[Grant::ApplicationTerminate];
+const WINDOW_CONTROL_REQUIREMENT: &[Grant] = &[Grant::WindowControl];
+const CLIPBOARD_WRITE_REQUIREMENT: &[Grant] = &[Grant::ClipboardWrite];
+const TEXT_PHYSICAL_REQUIREMENT: &[Grant] = &[Grant::InputControl, Grant::WindowControl];
+const TEXT_CLIPBOARD_REQUIREMENT: &[Grant] = &[
+    Grant::InputControl,
+    Grant::WindowControl,
+    Grant::ClipboardWrite,
+];
+const COMMAND_CANCELLATION_GRANTS: &[Grant] = &[
+    Grant::InputControl,
+    Grant::ApplicationLaunch,
+    Grant::ApplicationTerminate,
+    Grant::WindowControl,
+    Grant::ClipboardWrite,
+];
+
+/// Returns the shared transport-and-effect authorization rule for a command.
+#[must_use]
+pub const fn command_grant_requirement(command: &xenoteer_protocol::Command) -> GrantRequirement {
+    use xenoteer_protocol::Command;
+
+    let grants = match command {
+        Command::PointerMove(_)
+        | Command::PointerMoveRelative(_)
+        | Command::PointerDrag(_)
+        | Command::PointerScroll(_)
+        | Command::PointerButtonDown(_)
+        | Command::PointerButtonUp(_)
+        | Command::KeyboardKeyDown(_)
+        | Command::KeyboardKeyUp(_)
+        | Command::KeyboardPress(_)
+        | Command::KeyboardChord(_)
+        | Command::KeyboardSequence(_)
+        | Command::InputReset(_) => INPUT_CONTROL_REQUIREMENT,
+        Command::PointerClick(command) => {
+            if matches!(
+                &command.target,
+                xenoteer_protocol::PointerClickTarget::Window { .. }
+            ) {
+                TARGETED_INPUT_REQUIREMENT
+            } else {
+                INPUT_CONTROL_REQUIREMENT
+            }
+        }
+        Command::ApplicationLaunch(_) => APPLICATION_LAUNCH_REQUIREMENT,
+        Command::ProcessTerminate(_) => APPLICATION_TERMINATE_REQUIREMENT,
+        Command::WindowActivate(_)
+        | Command::WindowClose(_)
+        | Command::WindowSetState(_)
+        | Command::WindowMinimize(_)
+        | Command::WindowMoveResize(_)
+        | Command::WindowMoveToWorkspace(_)
+        | Command::WindowStack(_) => WINDOW_CONTROL_REQUIREMENT,
+        Command::SelectionSet(_) | Command::SelectionClear(_) => CLIPBOARD_WRITE_REQUIREMENT,
+        Command::TextInsert(command) => match command.strategy {
+            xenoteer_protocol::TextStrategy::Physical
+            | xenoteer_protocol::TextStrategy::PhysicalExtended => TEXT_PHYSICAL_REQUIREMENT,
+            xenoteer_protocol::TextStrategy::Clipboard | xenoteer_protocol::TextStrategy::Auto => {
+                TEXT_CLIPBOARD_REQUIREMENT
+            }
+        },
+        Command::DesktopProbe(_) | Command::ProcessStatus(_) => DESKTOP_OBSERVE_REQUIREMENT,
+    };
+    GrantRequirement::all(grants)
 }
 
 /// Authenticated identity and its prevalidated grants.
@@ -125,7 +256,7 @@ impl Principal {
         })
     }
 
-    /// Builds the local release-three operator used by a single-token deployment.
+    /// Builds the local release-four operator used by a single-token deployment.
     pub fn local_operator() -> Result<Self, PrincipalError> {
         Self::new("local-operator", Grant::operator_grants())
     }
@@ -140,6 +271,27 @@ impl Principal {
     #[must_use]
     pub fn has_grant(&self, grant: Grant) -> bool {
         self.grants.contains(&grant)
+    }
+
+    /// Returns whether this principal may request cooperative command cancellation.
+    ///
+    /// The coordinator must independently recheck this authorization immediately
+    /// before recording cancellation. This transport helper only keeps REST and
+    /// WebSocket admission on the same least-privilege grant vocabulary.
+    #[must_use]
+    pub fn has_command_cancellation_grant(&self) -> bool {
+        COMMAND_CANCELLATION_GRANTS
+            .iter()
+            .any(|grant| self.has_grant(*grant))
+    }
+
+    /// Returns whether every grant in a shared authorization rule is present.
+    #[must_use]
+    pub fn satisfies(&self, requirement: GrantRequirement) -> bool {
+        requirement
+            .grants()
+            .iter()
+            .all(|grant| self.has_grant(*grant))
     }
 
     /// Returns grants in deterministic wire order.
@@ -639,6 +791,113 @@ mod tests {
             assert_eq!(Grant::from_name(grant.as_str()), Some(grant));
         }
         assert_eq!(Grant::from_name("desktop:administrator"), None);
+    }
+
+    #[test]
+    fn grant_requirements_use_all_of_semantics() -> Result<(), PrincipalError> {
+        let observer = Principal::new("observer", [Grant::DesktopObserve])?;
+        let observe_and_capture =
+            GrantRequirement::all(&[Grant::DesktopObserve, Grant::CaptureRead]);
+        assert!(!observer.satisfies(observe_and_capture));
+        assert!(Principal::local_operator()?.satisfies(observe_and_capture));
+        Ok(())
+    }
+
+    #[test]
+    fn command_cancellation_grants_are_limited_to_command_mutations() -> Result<(), PrincipalError>
+    {
+        assert!(
+            !Principal::new("no-grants", [])?.has_command_cancellation_grant(),
+            "an unprivileged principal must not cancel commands"
+        );
+        for grant in Grant::operator_grants() {
+            let principal = Principal::new("single-grant", [grant])?;
+            let expected = matches!(
+                grant,
+                Grant::InputControl
+                    | Grant::ApplicationLaunch
+                    | Grant::ApplicationTerminate
+                    | Grant::WindowControl
+                    | Grant::ClipboardWrite
+            );
+            assert_eq!(
+                principal.has_command_cancellation_grant(),
+                expected,
+                "{grant:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn phase_four_command_policy_is_effect_bound_and_strategy_specific()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let selection =
+            xenoteer_protocol::Command::SelectionClear(xenoteer_protocol::SelectionClearCommand {
+                selection: xenoteer_protocol::SelectionName::Clipboard,
+            });
+        assert_eq!(
+            command_grant_requirement(&selection).grants(),
+            &[Grant::ClipboardWrite]
+        );
+
+        let desktop_id = xenoteer_protocol::DesktopId::new();
+        let generation = xenoteer_protocol::DesktopGeneration::new();
+        let workspace_move: xenoteer_protocol::Command =
+            serde_json::from_value(serde_json::json!({
+                "type": "window_move_to_workspace",
+                "window": {
+                    "desktop_id": desktop_id,
+                    "desktop_generation": generation,
+                    "xid": 41,
+                    "observed_generation": 1,
+                    "identity_hash": "c".repeat(64)
+                },
+                "workspace": 2
+            }))?;
+        assert_eq!(
+            command_grant_requirement(&workspace_move).grants(),
+            &[Grant::WindowControl]
+        );
+
+        let clipboard_text: xenoteer_protocol::Command =
+            serde_json::from_value(serde_json::json!({
+                "type": "text_insert",
+                "text": {"source": "inline", "text": "secret-canary"},
+                "target": {
+                    "target": "window",
+                    "window": {
+                        "desktop_id": desktop_id,
+                        "desktop_generation": generation,
+                        "xid": 42,
+                        "observed_generation": 1,
+                        "identity_hash": "a".repeat(64)
+                    }
+                },
+                "strategy": "clipboard",
+                "clipboard_options": {
+                    "preserve_clipboard": true,
+                    "paste_observation_timeout_ms": 500
+                }
+            }))?;
+        assert_eq!(
+            command_grant_requirement(&clipboard_text).grants(),
+            &[
+                Grant::InputControl,
+                Grant::WindowControl,
+                Grant::ClipboardWrite
+            ]
+        );
+
+        let mut physical_value = serde_json::to_value(&clipboard_text)?;
+        physical_value["strategy"] = serde_json::json!("physical");
+        physical_value["clipboard_options"] = serde_json::Value::Null;
+        let physical_text: xenoteer_protocol::Command = serde_json::from_value(physical_value)?;
+        assert_eq!(
+            command_grant_requirement(&physical_text).grants(),
+            &[Grant::InputControl, Grant::WindowControl]
+        );
+        Ok(())
     }
 
     #[test]

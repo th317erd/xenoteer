@@ -1,16 +1,20 @@
 //! Narrow single-owner backend seam used by the actor and failure-injection tests.
 
+use std::time::Duration;
+
 use x11rb::connection::Connection as _;
 use x11rb::cookie::VoidCookie;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
-    BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConnectionExt as _, KEY_PRESS_EVENT,
+    Atom, AtomEnum, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConnectionExt as _, KEY_PRESS_EVENT,
     KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT, Mapping,
 };
 use x11rb::protocol::xtest::ConnectionExt as _;
 
 use xenoteer_core::domain::RootPoint;
 use xenoteer_core::input::{ButtonMapping, PhysicalButton, PhysicalKey};
+use xenoteer_core::window_geometry::WindowGeometryContext;
+use xenoteer_protocol::{CoordinateSpace, Rect, WindowFrameExtents, WindowGeometry, WindowRect};
 
 use crate::error::classify_reply_error;
 use crate::{ExtensionName, OpenedConnection, X11Error, connect};
@@ -96,6 +100,17 @@ pub(super) trait InputBackend: Send + 'static {
     fn observe_pointer(&self) -> Result<PointerObservation, BackendFault>;
     fn observe_keys(&self) -> Result<Vec<PhysicalKey>, BackendFault>;
 
+    fn wait_for_input_delay(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+
+    fn observe_window_geometry(&self, _window: u32) -> Result<WindowGeometryContext, BackendFault> {
+        Err(BackendFault::new(
+            BackendFaultKind::Capability,
+            "window geometry observation is unavailable",
+        ))
+    }
+
     fn read_keyboard_mapping(
         &self,
         _key: PhysicalKey,
@@ -120,13 +135,24 @@ pub(super) trait InputBackend: Send + 'static {
 
 pub(super) struct X11InputBackend {
     opened: OpenedConnection,
+    net_frame_extents: Atom,
 }
 
 impl X11InputBackend {
     pub(super) fn open(display: &str) -> Result<Self, BackendFault> {
         let opened = connect(display)
             .map_err(|error| BackendFault::new(BackendFaultKind::Connection, error.to_string()))?;
-        Ok(Self { opened })
+        let net_frame_extents = opened
+            .connection
+            .intern_atom(false, b"_NET_FRAME_EXTENTS")
+            .map_err(|error| BackendFault::new(BackendFaultKind::Connection, error.to_string()))?
+            .reply()
+            .map_err(classify_backend_reply)?
+            .atom;
+        Ok(Self {
+            opened,
+            net_frame_extents,
+        })
     }
 
     fn pointer_mapping(&self) -> Result<ButtonMapping, BackendFault> {
@@ -288,6 +314,56 @@ impl InputBackend for X11InputBackend {
         })
     }
 
+    fn observe_window_geometry(&self, window: u32) -> Result<WindowGeometryContext, BackendFault> {
+        let root = query_window_rect(
+            &self.opened.connection,
+            self.opened.info.root,
+            self.opened.info.root,
+        )?;
+        let client_rect =
+            query_window_rect(&self.opened.connection, self.opened.info.root, window)?;
+        let frame_extents = self
+            .opened
+            .connection
+            .get_property(
+                false,
+                window,
+                self.net_frame_extents,
+                AtomEnum::CARDINAL,
+                0,
+                4,
+            )
+            .map_err(|error| BackendFault::new(BackendFaultKind::Connection, error.to_string()))?
+            .reply()
+            .map_err(classify_backend_reply)
+            .map(|reply| {
+                let values = reply.value32().map(Iterator::collect::<Vec<_>>);
+                match values.as_deref() {
+                    Some([left, right, top, bottom]) => {
+                        let extents = WindowFrameExtents {
+                            left: *left,
+                            right: *right,
+                            top: *top,
+                            bottom: *bottom,
+                        };
+                        extents.validate().is_ok().then_some(extents)
+                    }
+                    _ => None,
+                }
+            })?;
+        let frame_rect = frame_extents
+            .map(|extents| derive_frame_rect(client_rect, extents))
+            .transpose()?;
+        let geometry = WindowGeometry {
+            client_rect,
+            frame_rect,
+            content_rect: client_rect,
+            frame_extents,
+        };
+        WindowGeometryContext::new(root, geometry)
+            .map_err(|error| BackendFault::new(BackendFaultKind::Capability, error.to_string()))
+    }
+
     fn observe_keys(&self) -> Result<Vec<PhysicalKey>, BackendFault> {
         let keymap = self
             .opened
@@ -348,6 +424,72 @@ impl InputBackend for X11InputBackend {
             .check()
             .map_err(classify_backend_reply)
     }
+}
+
+fn query_window_rect<C: x11rb::connection::Connection>(
+    connection: &C,
+    root: u32,
+    window: u32,
+) -> Result<WindowRect, BackendFault> {
+    let geometry = connection
+        .get_geometry(window)
+        .map_err(|error| BackendFault::new(BackendFaultKind::Connection, error.to_string()))?
+        .reply()
+        .map_err(classify_backend_reply)?;
+    if geometry.root != root {
+        return Err(BackendFault::new(
+            BackendFaultKind::Request,
+            "window belongs to another root",
+        ));
+    }
+    let translated = connection
+        .translate_coordinates(window, root, 0, 0)
+        .map_err(|error| BackendFault::new(BackendFaultKind::Connection, error.to_string()))?
+        .reply()
+        .map_err(classify_backend_reply)?;
+    if !translated.same_screen {
+        return Err(BackendFault::new(
+            BackendFaultKind::Request,
+            "window coordinates are not on the actor root",
+        ));
+    }
+    let rect = Rect::new(
+        i32::from(translated.dst_x),
+        i32::from(translated.dst_y),
+        u32::from(geometry.width),
+        u32::from(geometry.height),
+    )
+    .map_err(|error| BackendFault::new(BackendFaultKind::Capability, error.to_string()))?;
+    WindowRect::new(CoordinateSpace::RootPhysical, rect)
+        .map_err(|error| BackendFault::new(BackendFaultKind::Capability, error.to_string()))
+}
+
+fn derive_frame_rect(
+    client: WindowRect,
+    extents: WindowFrameExtents,
+) -> Result<WindowRect, BackendFault> {
+    let origin = client.rect.origin();
+    let size = client
+        .rect
+        .size()
+        .map_err(|error| BackendFault::new(BackendFaultKind::Capability, error.to_string()))?;
+    let x = i64::from(origin.x()) - i64::from(extents.left);
+    let y = i64::from(origin.y()) - i64::from(extents.top);
+    let width = u64::from(size.width()) + u64::from(extents.left) + u64::from(extents.right);
+    let height = u64::from(size.height()) + u64::from(extents.top) + u64::from(extents.bottom);
+    let rect = Rect::new(
+        i32::try_from(x)
+            .map_err(|error| BackendFault::new(BackendFaultKind::Capability, error.to_string()))?,
+        i32::try_from(y)
+            .map_err(|error| BackendFault::new(BackendFaultKind::Capability, error.to_string()))?,
+        u32::try_from(width)
+            .map_err(|error| BackendFault::new(BackendFaultKind::Capability, error.to_string()))?,
+        u32::try_from(height)
+            .map_err(|error| BackendFault::new(BackendFaultKind::Capability, error.to_string()))?,
+    )
+    .map_err(|error| BackendFault::new(BackendFaultKind::Capability, error.to_string()))?;
+    WindowRect::new(CoordinateSpace::RootPhysical, rect)
+        .map_err(|error| BackendFault::new(BackendFaultKind::Capability, error.to_string()))
 }
 
 pub(super) const fn xtest_version_supported(major: u8, minor: u16) -> bool {

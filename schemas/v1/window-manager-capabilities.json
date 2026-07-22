@@ -1,0 +1,67 @@
+{
+  "$defs": {
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "WindowManagerCapability": {
+      "description": "One operation-level capability projected from root `_NET_SUPPORTED` atoms.",
+      "enum": [
+        "activate",
+        "close",
+        "state_maximized",
+        "state_fullscreen",
+        "state_above",
+        "state_sticky",
+        "move_resize",
+        "move_to_workspace",
+        "client_list",
+        "stacking_list",
+        "frame_extents",
+        "current_workspace",
+        "window_workspace"
+      ],
+      "type": "string"
+    },
+    "WindowModelRevision": {
+      "description": "One non-zero actor-local model revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Generation-scoped window-manager support observed at one model revision.",
+  "properties": {
+    "desktop_generation": {
+      "$ref": "#/$defs/DesktopGeneration"
+    },
+    "desktop_id": {
+      "$ref": "#/$defs/DesktopId"
+    },
+    "model_revision": {
+      "$ref": "#/$defs/WindowModelRevision"
+    },
+    "supported": {
+      "items": {
+        "$ref": "#/$defs/WindowManagerCapability"
+      },
+      "maxItems": 16,
+      "type": "array"
+    }
+  },
+  "required": [
+    "desktop_id",
+    "desktop_generation",
+    "model_revision",
+    "supported"
+  ],
+  "title": "WindowManagerCapabilities",
+  "type": "object"
+}

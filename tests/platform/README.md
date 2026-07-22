@@ -3,8 +3,9 @@
 These tests prove native backend behavior and are intentionally separate from
 portable unit tests. They never accept a mocked backend as proof.
 
-- `run-x11-spikes.sh` creates an authenticated, TCP-disabled Xvfb, runs the
-  ignored live X11/XTEST/poll-loop tests, and enables the native xkbcommon model.
+- `run-x11-spikes.sh` creates an authenticated, TCP-disabled Xvfb, keeps that
+  isolated server from resetting between test binaries, runs the ignored live
+  X11/XTEST/poll-loop tests, and enables the native xkbcommon model.
 - `run-atspi-spike.sh` creates a session bus, AT-SPI registry, authenticated
   Xvfb, and minimal GTK fixture, then runs the ignored live AT-SPI test.
 - `run-concurrent-spikes.sh` launches two X11 harnesses concurrently and then

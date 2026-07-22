@@ -1,8 +1,19 @@
 //! Correctness-first core `GetImage` decoding.
 
+mod actor;
+mod cursor;
+mod geometry;
 mod image;
 mod pixel;
+mod x11;
 
+pub use actor::{
+    CAPTURE_REQUEST_CAPACITY, CaptureActorExit, CaptureActorFailure, CaptureActorFailureKind,
+    CaptureActorHandle, CaptureActorHealth, CaptureActorJoin, CaptureActorState,
+    CaptureContentDigest, CaptureReply, CaptureSubmitError, MAX_CAPTURE_ENCODE_JOBS,
+    RawCaptureBytes, RawCaptureLimitation, RawCaptureResult, RawCaptureRevalidationError,
+    RawWindowCaptureGeometry, spawn_capture_actor,
+};
 pub use image::{CaptureImageLimits, ResizeFilter, encode_png_bgra8, resize_bgra8};
 pub use pixel::{ByteOrder, PixelFormat, PixelVisualClass, RawImage, decode_bgra8};
 
@@ -49,20 +60,41 @@ pub fn get_image_bgra8(
             .reply()
             .map_err(|error| X11Error::Reply(error.to_string()))
     })?;
+    decode_image_bgra8(
+        connection,
+        info,
+        reply.depth,
+        reply.visual,
+        width,
+        height,
+        reply.data,
+    )
+}
+
+fn decode_image_bgra8(
+    connection: &RustConnection,
+    info: &XConnectionInfo,
+    depth: u8,
+    visual: u32,
+    width: u16,
+    height: u16,
+    data: Vec<u8>,
+) -> Result<Vec<u8>> {
+    with_capture_preflight(width, height, || Ok(()))?;
     let setup = connection.setup();
     let pixmap_format = setup
         .pixmap_formats
         .iter()
-        .find(|format| format.depth == reply.depth)
+        .find(|format| format.depth == depth)
         .ok_or_else(|| X11Error::Pixel("reply depth has no setup pixmap format".to_owned()))?;
     let screen = setup
         .roots
         .get(info.screen_index)
         .ok_or(X11Error::InvalidSetup("selected screen index is absent"))?;
-    let visual_id = if reply.visual == 0 {
+    let visual_id = if visual == 0 {
         info.root_visual
     } else {
-        reply.visual
+        visual
     };
     let visual = screen
         .allowed_depths
@@ -81,7 +113,7 @@ pub fn get_image_bgra8(
     };
     let format = PixelFormat {
         visual_class: PixelVisualClass::from_wire_value(visual.class.into()),
-        depth: reply.depth,
+        depth,
         bits_per_pixel: pixmap_format.bits_per_pixel,
         scanline_pad: pixmap_format.scanline_pad,
         byte_order,
@@ -89,7 +121,7 @@ pub fn get_image_bgra8(
         green_mask: visual.green_mask,
         blue_mask: visual.blue_mask,
     };
-    let image = RawImage::new(u32::from(width), u32::from(height), format, reply.data)?;
+    let image = RawImage::new(u32::from(width), u32::from(height), format, data)?;
     decode_bgra8(&image)
 }
 

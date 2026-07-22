@@ -12,7 +12,6 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "additionalProperties": false,
   "description": "A reference safe against desktop restart and Linux PID reuse.",
   "properties": {
     "desktop_generation": {

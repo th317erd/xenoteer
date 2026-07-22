@@ -133,6 +133,12 @@ class WebSocket:
             self._socket.close()
             self._socket = None
 
+    def set_receive_buffer(self, size: int) -> None:
+        """Constrain the kernel receive window for deterministic slow-reader tests."""
+        require(self._socket is not None, "WebSocket transport is not connected")
+        require(1024 <= size <= 1024 * 1024, "WebSocket receive buffer bound is invalid")
+        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, size)
+
     def send_json(self, value: dict[str, Any]) -> None:
         payload = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         self.send_frame(0x1, payload)

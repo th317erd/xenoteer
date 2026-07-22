@@ -1,0 +1,815 @@
+{
+  "$defs": {
+    "CoordinateSpace": {
+      "description": "The reference frame used by a geometry value.",
+      "oneOf": [
+        {
+          "const": "root_physical",
+          "description": "Root-window physical pixels.",
+          "type": "string"
+        },
+        {
+          "const": "window_client",
+          "description": "Coordinates relative to a client window.",
+          "type": "string"
+        },
+        {
+          "const": "window_frame",
+          "description": "Coordinates relative to a window-manager frame.",
+          "type": "string"
+        },
+        {
+          "const": "atspi_screen",
+          "description": "AT-SPI screen coordinates after profile correlation.",
+          "type": "string"
+        }
+      ]
+    },
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "LaunchId": {
+      "description": "Identifies one managed application launch.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ProcessRef": {
+      "description": "A reference safe against desktop restart and Linux PID reuse.",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration",
+          "description": "Desktop lifetime that owns the child."
+        },
+        "launch_id": {
+          "$ref": "#/$defs/LaunchId",
+          "description": "Server-generated managed launch identity."
+        },
+        "pid": {
+          "description": "Positive Linux process identifier.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "proc_start_ticks": {
+          "description": "Field 22 from `/proc/{pid}/stat`, measured in boot clock ticks.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "desktop_generation",
+        "pid",
+        "proc_start_ticks",
+        "launch_id"
+      ],
+      "type": "object"
+    },
+    "Rect": {
+      "description": "A signed origin and non-empty unsigned extent.",
+      "properties": {
+        "height": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "x": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "y": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
+    "WindowAtomName": {
+      "description": "Bounded escaped X11 atom name safe for public metadata.",
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "WindowClass": {
+      "description": "Separately decoded ICCCM `WM_CLASS` components.",
+      "properties": {
+        "class": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Resource class component, if it could be recovered."
+        },
+        "instance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Resource instance component, if it could be recovered."
+        }
+      },
+      "type": "object"
+    },
+    "WindowFrameExtents": {
+      "description": "Advisory window-manager frame borders in root-physical pixels.",
+      "properties": {
+        "bottom": {
+          "format": "uint32",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "left": {
+          "format": "uint32",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "right": {
+          "format": "uint32",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "top": {
+          "format": "uint32",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "left",
+        "right",
+        "top",
+        "bottom"
+      ],
+      "type": "object"
+    },
+    "WindowGeometry": {
+      "description": "Bounded geometry projection with every rectangle expressed in root coordinates.",
+      "properties": {
+        "client_rect": {
+          "$ref": "#/$defs/WindowRect",
+          "description": "Top-level client geometry translated into root-physical coordinates."
+        },
+        "content_rect": {
+          "$ref": "#/$defs/WindowRect",
+          "description": "Proven content geometry; initially equal to the client geometry."
+        },
+        "frame_extents": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowFrameExtents"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Advisory `_NET_FRAME_EXTENTS`, when available."
+        },
+        "frame_rect": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowRect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Window-manager frame geometry, when a frame can be established."
+        }
+      },
+      "required": [
+        "client_rect",
+        "content_rect"
+      ],
+      "type": "object"
+    },
+    "WindowIdentityHash": {
+      "description": "Fixed lowercase SHA-256 projection binding an XID birth to initial evidence.",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "WindowMapState": {
+      "description": "X server map/viewability state without guessing minimization semantics.",
+      "oneOf": [
+        {
+          "const": "unmapped",
+          "description": "The client is not mapped.",
+          "type": "string"
+        },
+        {
+          "const": "unviewable",
+          "description": "The client is mapped but not currently viewable.",
+          "type": "string"
+        },
+        {
+          "const": "viewable",
+          "description": "The client is mapped and viewable.",
+          "type": "string"
+        }
+      ]
+    },
+    "WindowMetadata": {
+      "description": "Bounded metadata that may originate from untrusted X11 client properties.",
+      "properties": {
+        "allowed_actions": {
+          "items": {
+            "$ref": "#/$defs/WindowAtomName"
+          },
+          "maxItems": 256,
+          "type": "array"
+        },
+        "class": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowClass"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "client_machine": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "icon_title": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocols": {
+          "items": {
+            "$ref": "#/$defs/WindowAtomName"
+          },
+          "maxItems": 256,
+          "type": "array"
+        },
+        "states": {
+          "items": {
+            "$ref": "#/$defs/WindowAtomName"
+          },
+          "maxItems": 256,
+          "type": "array"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "visible_title": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "window_types": {
+          "items": {
+            "$ref": "#/$defs/WindowAtomName"
+          },
+          "maxItems": 256,
+          "type": "array"
+        }
+      },
+      "required": [
+        "window_types",
+        "states",
+        "allowed_actions",
+        "protocols"
+      ],
+      "type": "object"
+    },
+    "WindowModelRevision": {
+      "description": "One non-zero actor-local model revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "WindowObservedState": {
+      "description": "Observed window-manager and focus state.",
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "focused": {
+          "type": "boolean"
+        },
+        "hidden": {
+          "type": "boolean"
+        },
+        "map_state": {
+          "$ref": "#/$defs/WindowMapState"
+        },
+        "minimized": {
+          "type": "boolean"
+        },
+        "modal": {
+          "type": "boolean"
+        },
+        "sticky": {
+          "type": "boolean"
+        },
+        "urgent": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "map_state",
+        "minimized",
+        "hidden",
+        "urgent",
+        "modal",
+        "sticky",
+        "active",
+        "focused"
+      ],
+      "type": "object"
+    },
+    "WindowProcessConfidence": {
+      "description": "Confidence attached to advisory process correlation.",
+      "enum": [
+        "none",
+        "low",
+        "medium",
+        "high"
+      ],
+      "type": "string"
+    },
+    "WindowProcessCorrelation": {
+      "description": "Explicitly advisory process correlation; never authorization evidence.",
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/WindowProcessConfidence",
+          "description": "Aggregate confidence reported by the correlation policy."
+        },
+        "conflict": {
+          "description": "Whether supplied PID evidence conflicts with stronger evidence.",
+          "type": "boolean"
+        },
+        "evidence": {
+          "description": "Bounded independent evidence used by the policy.",
+          "items": {
+            "$ref": "#/$defs/WindowProcessEvidence"
+          },
+          "maxItems": 8,
+          "type": "array"
+        },
+        "managed_process": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProcessRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact managed process identity when independently correlated."
+        },
+        "reported_pid": {
+          "description": "Client-supplied `_NET_WM_PID`, if present and non-zero.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "confidence",
+        "evidence",
+        "conflict"
+      ],
+      "type": "object"
+    },
+    "WindowProcessEvidence": {
+      "description": "Independent evidence used for process/window correlation.",
+      "enum": [
+        "net_wm_pid",
+        "proc_start_time",
+        "process_group",
+        "client_leader",
+        "wm_class",
+        "wm_command",
+        "client_machine",
+        "unique_candidate"
+      ],
+      "type": "string"
+    },
+    "WindowRect": {
+      "description": "One rectangle paired with its explicit coordinate reference frame.",
+      "properties": {
+        "coordinate_space": {
+          "$ref": "#/$defs/CoordinateSpace",
+          "description": "Reference frame used by `rect`."
+        },
+        "rect": {
+          "$ref": "#/$defs/Rect",
+          "description": "Checked non-empty rectangle."
+        }
+      },
+      "required": [
+        "coordinate_space",
+        "rect"
+      ],
+      "type": "object"
+    },
+    "WindowRef": {
+      "description": "Stable reference to exactly one observed XID birth in one desktop lifetime.",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration",
+          "description": "Exact X server/session lifetime that owns the XID."
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId",
+          "description": "Desktop resource that owns the window."
+        },
+        "identity_hash": {
+          "$ref": "#/$defs/WindowIdentityHash",
+          "description": "Server-generated binding to first-observed identity evidence."
+        },
+        "observed_generation": {
+          "description": "Per-XID birth marker incremented whenever an absent XID reappears.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "xid": {
+          "description": "Non-zero core X11 window identifier.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "desktop_id",
+        "desktop_generation",
+        "xid",
+        "observed_generation",
+        "identity_hash"
+      ],
+      "type": "object"
+    },
+    "WindowReferenceToken": {
+      "description": "Opaque URL-safe transport form of a generation-bound window reference.",
+      "maxLength": 1024,
+      "minLength": 16,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "WindowSnapshot": {
+      "description": "Complete bounded observation of one currently modeled window.",
+      "properties": {
+        "client_leader": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Client leader correlated to a live modeled window, when available."
+        },
+        "geometry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowGeometry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "group_leader": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Group leader correlated to a live modeled window, when available."
+        },
+        "has_accessibility_application": {
+          "description": "Whether an AT-SPI application correlation has been established.",
+          "type": "boolean"
+        },
+        "metadata": {
+          "$ref": "#/$defs/WindowMetadata"
+        },
+        "model_revision": {
+          "$ref": "#/$defs/WindowModelRevision",
+          "description": "Actor-local model revision that produced this snapshot."
+        },
+        "process": {
+          "$ref": "#/$defs/WindowProcessCorrelation"
+        },
+        "ref": {
+          "$ref": "#/$defs/WindowRef",
+          "description": "Stable identity for this exact XID birth."
+        },
+        "stacking_index": {
+          "description": "Zero-based position in the observed stacking order.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/WindowObservedState"
+        },
+        "transient_for": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Transient parent correlated to a live modeled window, when available."
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/WindowSnapshotWarning"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "workspace": {
+          "description": "Current fixed-workspace identifier, when reported by the WM.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "xid_hex": {
+          "description": "Canonical lowercase diagnostic XID, redundant by design.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref",
+        "xid_hex",
+        "model_revision",
+        "metadata",
+        "process",
+        "state",
+        "has_accessibility_application",
+        "warnings"
+      ],
+      "type": "object"
+    },
+    "WindowSnapshotEntry": {
+      "description": "One observed window paired with its server-issued lookup authority.\n\nThe token is opaque and must be authenticated by the server against the\nprincipal, desktop generation, exact window birth, and issuance policy.\nEmbedding it beside the snapshot makes every discovery result directly\nusable with the token-based window resource without parallel arrays or\nclient-side token construction.",
+      "properties": {
+        "reference_token": {
+          "$ref": "#/$defs/WindowReferenceToken",
+          "description": "Server-authenticated URL-safe token for subsequent exact lookup."
+        },
+        "snapshot": {
+          "$ref": "#/$defs/WindowSnapshot",
+          "description": "Complete bounded observation of one exact XID birth."
+        }
+      },
+      "required": [
+        "snapshot",
+        "reference_token"
+      ],
+      "type": "object"
+    },
+    "WindowSnapshotWarning": {
+      "description": "Bounded diagnostic attached to an otherwise usable snapshot.",
+      "oneOf": [
+        {
+          "properties": {
+            "code": {
+              "const": "malformed_property",
+              "type": "string"
+            },
+            "property": {
+              "$ref": "#/$defs/WindowAtomName"
+            }
+          },
+          "required": [
+            "code",
+            "property"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "truncated_property",
+              "type": "string"
+            },
+            "property": {
+              "$ref": "#/$defs/WindowAtomName"
+            }
+          },
+          "required": [
+            "code",
+            "property"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "lossy_property_text",
+              "type": "string"
+            },
+            "property": {
+              "$ref": "#/$defs/WindowAtomName"
+            }
+          },
+          "required": [
+            "code",
+            "property"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "unsupported_property_encoding",
+              "type": "string"
+            },
+            "property": {
+              "$ref": "#/$defs/WindowAtomName"
+            }
+          },
+          "required": [
+            "code",
+            "property"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "process_evidence_conflict",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "frame_geometry_unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "frame_extents_unverified",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WindowText": {
+      "description": "Bounded observed text with explicit lossy-decoding evidence.",
+      "properties": {
+        "lossy": {
+          "description": "Whether invalid source bytes required replacement or fallback decoding.",
+          "type": "boolean"
+        },
+        "value": {
+          "description": "UTF-8 projection exposed to clients.",
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "lossy"
+      ],
+      "type": "object"
+    },
+    "WindowWaitStatus": {
+      "description": "Terminal disposition of one observation wait.",
+      "enum": [
+        "matched",
+        "timed_out",
+        "target_vanished",
+        "resync_required"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Bounded wait result carrying only actor-local model revision evidence.",
+  "properties": {
+    "desktop_generation": {
+      "$ref": "#/$defs/DesktopGeneration"
+    },
+    "desktop_id": {
+      "$ref": "#/$defs/DesktopId"
+    },
+    "evaluated_revision": {
+      "$ref": "#/$defs/WindowModelRevision"
+    },
+    "matched_count": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "predicate_satisfied": {
+      "type": "boolean"
+    },
+    "status": {
+      "$ref": "#/$defs/WindowWaitStatus"
+    },
+    "windows": {
+      "items": {
+        "$ref": "#/$defs/WindowSnapshotEntry"
+      },
+      "maxItems": 200,
+      "type": "array"
+    }
+  },
+  "required": [
+    "desktop_id",
+    "desktop_generation",
+    "status",
+    "evaluated_revision",
+    "predicate_satisfied",
+    "matched_count",
+    "windows"
+  ],
+  "title": "WindowWaitResult",
+  "type": "object"
+}

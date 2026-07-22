@@ -45,10 +45,18 @@ Protocol problem codes use `deadline_exceeded_before_effect` and
 `deadline_before_effect` and `deadline_after_effect` names because they describe
 terminal state rather than the error catalog.
 
-The implemented HTTP contract, WebSocket message inventory, least-privilege
-grant mapping, and complete wire examples are in
+The implemented Phase 4 HTTP contract, WebSocket message inventory,
+least-privilege grant mapping, and complete wire examples are in
 [`docs/api/v1/`](docs/api/v1/README.md). Generated typed JSON Schemas remain in
 [`schemas/v1/`](schemas/v1/).
+
+The public API now includes generation-fenced window list/query/snapshot/
+resolve/wait, clipboard read, screenshot capture, private artifact
+upload/download/range/delete, and the origin-bound one-time-ticket viewer flow.
+Window mutations, clipboard writes, and text insertion are typed variants of
+the existing command endpoint—not separate REST routes. The checked-in OpenAPI
+path inventory is statically compared with the Phase 4 server router sources by
+`python3 scripts/api/validate-docs.py`.
 
 `/livez` proves only that the HTTP process is alive. `/readyz` becomes `200`
 only after the Phase 2 supervisor proves the fixed authenticated X11 display,

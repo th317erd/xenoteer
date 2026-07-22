@@ -391,6 +391,23 @@ X11-native "xdotool whistles," and provide secure human viewing.
 No semantic element selectors/actions, OCR, high-resolution XI2 scroll, or human
 takeover.
 
+Current implementation note: Phase 4 freezes window observation under
+`desktop:observe` while window-manager-mediated mutations require the separate
+`window:control` grant. A physical action that also activates or otherwise
+mutates a target window requires both `input:control` and `window:control`; the
+shared all-of command authorization policy is evaluated by REST, WebSocket, and
+again at the daemon effect boundary. Clipboard read/write, capture read,
+purpose-generic artifact read/delete, and viewer read are distinct grants.
+
+Desktop actors do not allocate public event sequence numbers. They submit
+unsequenced normalized metadata through a bounded, nonblocking ingress; the
+coordinator assigns the single global sequence before subscription filtering.
+Harmless window/clipboard-owner/damage metadata may be broadcast only to event
+subscribers, all of whom already require `desktop:observe`. Principal-owned or
+content-correlated metadata remains targeted. Ingress overflow discards the
+ambiguous queued batch and latches one capacity-independent global resync
+barrier rather than blocking an X11 actor or publishing a false complete stream.
+
 ## 8. Phase 5 — AT-SPI semantic automation
 
 ### Objective

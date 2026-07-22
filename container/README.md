@@ -105,6 +105,7 @@ weakening toolkit peer authentication.
 | `/run/user/1000` | 1000:1000, 0710 at initialization and toolkit-tightened to 0700 at runtime | Desktop-user runtime state; cross-identity bus sockets are kept elsewhere |
 | `/run/user/1001` | 1001:1001, 0700 | Private daemon HOME, XDG tree, and Xauthority |
 | `/run/xenoteer/bus` | 1000:1000, 0710 | Session/AT-SPI sockets shared only with supplemental GID 1000 and explicit UID policy |
+| `/run/xenoteer/artifacts` | 1001:1001, 0700 | Private daemon-owned artifact store; the store also verifies ownership and locks its root |
 | `/run/xenoteer/processd` | 0:1001, 0750; socket 0660 | Peer-credential-authenticated process broker IPC |
 | `/tmp` | root, 1777 tmpfs | Required with a read-only root |
 | `/dev/shm` | root, 1777, >=4 GiB | Private 4 GiB shm mount used by Compose |
@@ -291,6 +292,7 @@ sudo env XENOTEER_NOVNC_SPIKE_BASE_IMAGE=xenoteer:dev \
   scripts/container/test-novnc-spike.sh
 sudo scripts/container/build-desktop-app-fixture.sh
 sudo scripts/container/test-desktop-app-image.sh xenoteer:desktop-apps-test
+sudo scripts/container/test-phase4-live-fixtures.py xenoteer:desktop-apps-test
 sudo XENOTEER_IDLE_SOAK_SECONDS=1800 \
   scripts/container/test-idle-soak.sh xenoteer:dev
 ```
@@ -351,6 +353,13 @@ production boundary. Its gate exercises bare and standard process sets,
 ephemeral-profile rematerialization across a persistent-HOME restart, GTK/Qt and
 browser accessibility trees, sandboxed browser subprocesses, listener exposure,
 and the full application matrix under the read-only-root hardened profile.
+The separate two-CPU Phase 4 live-API gate uses the same fixture image to cover
+direct/INCR clipboard transfer and restore, generation-bound window discovery
+and xfwm4 operations, and root/window PNG artifacts across GTK3, Qt6, Chromium,
+Firefox ESR, and QtWebEngine without making the Phase 2 lifecycle matrix heavier.
+Its optional `XENOTEERD_BINARY_OVERRIDE` is only for diagnosing stale local
+fixture caches; CI and release qualification use a coherent freshly derived
+image with no binary override.
 Separate spike images retain a redundant end-to-end noVNC/RFB proof. Their exact assertions,
 measured results, and revisit triggers are recorded in
 [`spikes/browser/README.md`](spikes/browser/README.md) and

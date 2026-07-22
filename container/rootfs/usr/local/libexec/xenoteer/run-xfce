@@ -4,6 +4,7 @@ set -eu
 
 s6-setuidgid xenoteer xset s off
 s6-setuidgid xenoteer xset s noblank
+s6-setuidgid xenoteer setxkbmap -model pc105 -layout us
 if s6-setuidgid xenoteer xset q | grep -Fq 'DPMS is Enabled'; then
   s6-setuidgid xenoteer xset -dpms
 fi

@@ -2,25 +2,67 @@
 
 #![forbid(unsafe_code)]
 
+mod artifact_service;
+mod capability_monitor;
+mod clipboard_events;
+mod clipboard_service;
 mod control_plane;
 mod desktop_supervisor;
+mod event_sink;
+mod observation_plane;
 #[allow(dead_code)] // Phase 3 routes wire this verified adapter in the next integration step.
 mod process_manager;
+mod runtime_capabilities;
+mod screenshot_service;
 mod shutdown;
 
-use std::{fs, net::SocketAddr, path::PathBuf, process::ExitCode};
+use std::{fs, net::SocketAddr, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
 use clap::Parser;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
-use xenoteer_core::{Config, ConfigLoadError, ConfigOverrides};
-use xenoteer_protocol::{Capability, CapabilityId, CapabilityReport, CapabilityStatus};
+use xenoteer_artifacts::{ArtifactLimits, ArtifactStore, StoreError};
+use xenoteer_core::{Config, ConfigLoadError, ConfigOverrides, ViewerConfig, WindowModelLimits};
+use xenoteer_processd::{BrokerClient, DEFAULT_BROKER_SOCKET};
 use xenoteer_protocol::{DesktopGeneration, DesktopId};
 use xenoteer_server::{
-    AllowedOrigins, Authentication, DesktopReadiness, Grant, Principal, PrincipalError,
-    ReadinessHandle, ReadinessSnapshot, StaticCapabilityProvider, StaticTokenProvider,
-    TokenLoadError, TransportLimitError, TransportLimits, api_router_with_control, serve,
+    AllowedOrigins, ApiServices, Authentication, DesktopReadiness, Grant,
+    InMemoryViewerTicketRegistry, LoopbackWebsockifyConnector, OriginPolicyError, Principal,
+    PrincipalError, ReadinessHandle, ReadinessSnapshot, StaticTokenProvider, TokenLoadError,
+    TransportLimitError, TransportLimits, ViewerGateway, ViewerGatewayConfigurationError,
+    ViewerGatewayLimits, ViewerTicketRegistryConfig, ViewerTicketRegistryError,
+    api_router_with_services, serve,
+};
+use xenoteer_x11::capture::{
+    CaptureActorExit, CaptureActorHandle, CaptureActorState, spawn_capture_actor,
+};
+use xenoteer_x11::{
+    ClipboardActorExit, ClipboardActorHandle, ClipboardActorState, WindowControlActorExit,
+    WindowControlActorHandle, WindowControlActorState, X11Error, spawn_clipboard_actor,
+    spawn_window_control_actor,
+};
+
+use crate::{
+    artifact_service::{
+        ArtifactRetentionPolicy, ArtifactUploadTimeoutPolicy, RetentionPolicyError,
+        StoreArtifactService, UploadTimeoutPolicyError,
+    },
+    capability_monitor::{
+        OperationBackendMonitorError, WindowCapabilityMonitorError,
+        spawn_operation_backend_monitor, spawn_window_capability_monitor,
+    },
+    clipboard_events::{ClipboardEventRelayError, spawn_clipboard_event_relay},
+    clipboard_service::DaemonClipboardReadService,
+    event_sink::{DeferredEventSinkBindError, DeferredWindowEventSink},
+    observation_plane::{
+        ObservationCompositionError, ObservationServiceExit, ObservationServiceSettings,
+        WindowEventSink, spawn_live_observation_service_with_broker_and_event_sink,
+    },
+    runtime_capabilities::{
+        RuntimeCapabilityBackends, RuntimeCapabilityError, RuntimeCapabilityProvider,
+    },
+    screenshot_service::DaemonScreenshotService,
 };
 
 const CONFIG_PATH_ENV: &str = "XENOTEER_CONFIG";
@@ -103,9 +145,88 @@ async fn run() -> Result<(), DaemonError> {
         usize::try_from(config.server().request_body_limit_bytes())
             .map_err(|_| TransportLimitError::BodyBytes)?,
     )?;
-    let capabilities = StaticCapabilityProvider::new(raw_control_capabilities()?);
     let desktop_id = DesktopId::new();
     let desktop_generation = DesktopGeneration::new();
+
+    let viewer_config = config.viewer().clone();
+    let viewer = tokio::task::spawn_blocking(move || configured_viewer(&viewer_config))
+        .await
+        .map_err(|error| DaemonError::StartupTask(error.to_string()))??;
+    let viewer_enabled = viewer.enabled();
+
+    let artifact_limits = configured_artifact_limits(&config)?;
+    let artifact_root = config.artifacts().root_directory().to_owned();
+    let artifact_store =
+        tokio::task::spawn_blocking(move || ArtifactStore::open(artifact_root, artifact_limits))
+            .await
+            .map_err(|error| DaemonError::StartupTask(error.to_string()))??;
+    let artifact_service = Arc::new(StoreArtifactService::new(
+        Arc::new(artifact_store),
+        ArtifactRetentionPolicy::new(Duration::from_millis(
+            config.artifacts().clipboard_input_retention_ms(),
+        ))?
+        .with_generated_retention(Duration::from_millis(config.artifacts().max_retention_ms()))?,
+        ArtifactUploadTimeoutPolicy::new(
+            Duration::from_millis(config.artifacts().upload_total_timeout_ms()),
+            Duration::from_millis(config.artifacts().upload_idle_timeout_ms()),
+        )?,
+    ));
+
+    let observation_settings = configured_observation_settings(&config)?;
+    let observation_limits = configured_window_model_limits(&config);
+    let window_event_sink = Arc::new(DeferredWindowEventSink::new());
+    let observation_event_sink: Arc<dyn WindowEventSink> = window_event_sink.clone();
+    let display = configured_display();
+    let clipboard_display = display.clone();
+    let capture_display = display.clone();
+    let window_control_display = display.clone();
+    let (observation_service, observation_shutdown, observation_join) =
+        tokio::task::spawn_blocking(move || {
+            spawn_live_observation_service_with_broker_and_event_sink(
+                &display,
+                desktop_id,
+                desktop_generation,
+                observation_limits,
+                observation_settings,
+                BrokerClient::new(DEFAULT_BROKER_SOCKET),
+                observation_event_sink,
+            )
+        })
+        .await
+        .map_err(|error| DaemonError::StartupTask(error.to_string()))??;
+    let observation_join = DetachedJoinOwner::new("xenoteer-observation-join-monitor", move || {
+        observation_join.join()
+    });
+    let (clipboard_handle, clipboard_events, clipboard_join) =
+        tokio::task::spawn_blocking(move || spawn_clipboard_actor(&clipboard_display))
+            .await
+            .map_err(|error| DaemonError::StartupTask(error.to_string()))?
+            .map_err(DaemonError::ClipboardStartup)?;
+    let clipboard_join = DetachedJoinOwner::new("xenoteer-clipboard-join-monitor", move || {
+        clipboard_join.join()
+    });
+    let (capture_handle, capture_join) =
+        tokio::task::spawn_blocking(move || spawn_capture_actor(&capture_display))
+            .await
+            .map_err(|error| DaemonError::StartupTask(error.to_string()))?
+            .map_err(DaemonError::CaptureStartup)?;
+    let capture_join =
+        DetachedJoinOwner::new("xenoteer-capture-join-monitor", move || capture_join.join());
+    let (window_control_handle, window_control_join) =
+        tokio::task::spawn_blocking(move || spawn_window_control_actor(&window_control_display))
+            .await
+            .map_err(|error| DaemonError::StartupTask(error.to_string()))?
+            .map_err(DaemonError::WindowControlStartup)?;
+    let window_control_join =
+        DetachedJoinOwner::new("xenoteer-window-control-join-monitor", move || {
+            window_control_join.join()
+        });
+    let (window_capability_monitor, window_capability_reader) =
+        spawn_window_capability_monitor(window_control_handle.clone());
+    let (operation_backend_monitor, operation_backend_reader) = spawn_operation_backend_monitor(
+        Arc::clone(&artifact_service),
+        BrokerClient::new(DEFAULT_BROKER_SOCKET),
+    );
 
     let readiness = ReadinessHandle::new(ReadinessSnapshot::new(
         DesktopReadiness::Booting,
@@ -121,9 +242,46 @@ async fn run() -> Result<(), DaemonError> {
     let desktop_spec = desktop_supervisor::DesktopProbeSpec::from_config(&config)?;
     let (desktop_supervisor, mut desktop_fatal, desktop_input) =
         desktop_supervisor::spawn(readiness.clone(), desktop_spec, desktop_generation);
-    let coordinator = control_plane::spawn(&config, desktop_id, desktop_generation, desktop_input)?;
+    let capabilities = RuntimeCapabilityProvider::new(
+        readiness.clone(),
+        viewer_enabled,
+        desktop_input.clone(),
+        RuntimeCapabilityBackends::new(
+            Arc::clone(&observation_service),
+            capture_handle.clone(),
+            clipboard_handle.clone(),
+            window_control_handle.clone(),
+            operation_backend_reader,
+            window_capability_reader,
+        ),
+    )?;
+    let window_control_runtime = control_plane::WindowControlRuntime::new(
+        window_control_handle.clone(),
+        Arc::clone(&observation_service),
+    );
+    let clipboard_runtime = control_plane::ClipboardRuntime::new(
+        clipboard_handle.clone(),
+        Arc::clone(&artifact_service),
+        Arc::clone(&observation_service),
+        window_control_runtime,
+        desktop_input,
+        desktop_id,
+        desktop_generation,
+    );
+    let coordinator = control_plane::spawn_with_clipboard_runtime(
+        &config,
+        desktop_id,
+        desktop_generation,
+        clipboard_runtime,
+    )?;
+    window_event_sink.bind(coordinator.event_ingress())?;
+    let clipboard_event_relay = spawn_clipboard_event_relay(
+        clipboard_events,
+        window_event_sink.clone(),
+        desktop_id,
+        desktop_generation,
+    );
     let coordinator_shutdown = coordinator.shutdown_handle();
-    let desktop_cancellation = desktop_supervisor.cancellation();
     tracing::info!(
         listen = %local_address,
         readiness = "probing",
@@ -132,15 +290,43 @@ async fn run() -> Result<(), DaemonError> {
     );
 
     let shutdown_readiness = readiness.clone();
-    let application = api_router_with_control(
+    let screenshot_service = Arc::new(DaemonScreenshotService::new(
+        capture_handle.clone(),
+        Arc::clone(&observation_service),
+        Arc::clone(&artifact_service),
+    ));
+    let clipboard_read_service = Arc::new(DaemonClipboardReadService::new(
+        clipboard_handle.clone(),
+        Arc::clone(&artifact_service),
+        desktop_id,
+        desktop_generation,
+    ));
+    let services = ApiServices::new(coordinator.control(), observation_service)
+        .with_artifact_service(artifact_service)
+        .with_clipboard_read_service(clipboard_read_service)
+        .with_screenshot_service(screenshot_service);
+    let (origins, services) = viewer.into_router_parts(services);
+    let application = api_router_with_services(
         readiness.clone(),
         desktop_id,
         authentication,
         capabilities,
         transport_limits,
-        AllowedOrigins::default(),
-        coordinator.control(),
+        origins,
+        services,
     );
+    // Keep the RAII join owner local through every fallible startup step. Once
+    // composition is complete, a blocking monitor can safely own it and feed
+    // terminal failure into graceful HTTP shutdown.
+    let observation_monitor = observation_join.into_monitor()?;
+    let mut observation_fatal = observation_monitor.clone();
+    let signal_observation_shutdown = observation_shutdown.clone();
+    let signal_window_control_shutdown = window_control_handle.clone();
+    let signal_capture_shutdown = capture_handle.clone();
+    let signal_clipboard_shutdown = clipboard_handle.clone();
+    let monitor_window_control = window_control_handle.clone();
+    let monitor_capture = capture_handle.clone();
+    let monitor_clipboard = clipboard_handle.clone();
     let serve_result = serve(listener, application, async move {
         tokio::select! {
             signal = shutdown_signals.wait() => {
@@ -154,6 +340,18 @@ async fn run() -> Result<(), DaemonError> {
             _ = &mut desktop_fatal => {
                 tracing::error!("desktop supervisor requested daemon shutdown");
             }
+            exit = observation_fatal.wait() => {
+                tracing::error!(?exit, "observation service requested daemon shutdown");
+            }
+            state = wait_for_window_control_failure(monitor_window_control) => {
+                tracing::error!(?state, "window-control actor requested daemon shutdown");
+            }
+            state = wait_for_capture_failure(monitor_capture) => {
+                tracing::error!(?state, "capture actor requested daemon shutdown");
+            }
+            state = wait_for_clipboard_failure(monitor_clipboard) => {
+                tracing::error!(?state, "clipboard actor requested daemon shutdown");
+            }
         }
         shutdown_readiness.transition(ReadinessSnapshot::new(
             DesktopReadiness::Draining,
@@ -165,23 +363,88 @@ async fn run() -> Result<(), DaemonError> {
         {
             tracing::error!(%error, "coordinator shutdown failed during HTTP drain");
         }
-        desktop_cancellation.cancel();
+        let _ = signal_window_control_shutdown.shutdown();
+        let _ = signal_capture_shutdown.shutdown();
+        let _ = signal_clipboard_shutdown.shutdown();
+        signal_observation_shutdown.request();
     })
     .await;
 
+    let window_capability_monitor_result = window_capability_monitor.shutdown().await;
+    let operation_backend_monitor_result = operation_backend_monitor.shutdown().await;
+    let clipboard_event_result = clipboard_event_relay.shutdown().await;
     let coordinator_result = coordinator.shutdown().await;
+    let _ = window_control_handle.shutdown();
+    let _ = capture_handle.shutdown();
+    let _ = clipboard_handle.shutdown();
+    let window_control_monitor = window_control_join.into_monitor();
+    let capture_monitor = capture_join.into_monitor();
+    let clipboard_monitor = clipboard_join.into_monitor();
+    let (window_control_first, capture_first, clipboard_first) = tokio::join!(
+        first_join_attempt(window_control_monitor, Duration::from_secs(5)),
+        first_join_attempt(capture_monitor, Duration::from_secs(5)),
+        first_join_attempt(clipboard_monitor, Duration::from_secs(5)),
+    );
+    observation_shutdown.request();
+    let observation_first =
+        first_join_attempt(Ok(observation_monitor), Duration::from_secs(5)).await;
+    // Preserve the X server until window control, capture, clipboard, and
+    // observation have had their ordinary shutdown window. Supervisor teardown
+    // remains unconditional if an actor needs the bounded second join attempt.
     let supervisor_result = desktop_supervisor.shutdown().await;
+    let (window_control_result, capture_result, clipboard_result, observation_result) = tokio::join!(
+        finish_join_attempt(window_control_first, Duration::from_secs(2)),
+        finish_join_attempt(capture_first, Duration::from_secs(2)),
+        finish_join_attempt(clipboard_first, Duration::from_secs(2)),
+        finish_join_attempt(observation_first, Duration::from_secs(2)),
+    );
+    let window_control_result = window_control_result.map_err(|error| match error {
+        ActorJoinWaitError::Monitor(error) => DaemonError::ActorJoinMonitor(error),
+        ActorJoinWaitError::TimedOut => DaemonError::WindowControlShutdownTimeout,
+    });
+    let capture_result = capture_result.map_err(|error| match error {
+        ActorJoinWaitError::Monitor(error) => DaemonError::ActorJoinMonitor(error),
+        ActorJoinWaitError::TimedOut => DaemonError::CaptureShutdownTimeout,
+    });
+    let clipboard_result = clipboard_result.map_err(|error| match error {
+        ActorJoinWaitError::Monitor(error) => DaemonError::ActorJoinMonitor(error),
+        ActorJoinWaitError::TimedOut => DaemonError::ClipboardShutdownTimeout,
+    });
+    let observation_result = observation_result.map_err(|error| match error {
+        ActorJoinWaitError::Monitor(error) => DaemonError::ActorJoinMonitor(error),
+        ActorJoinWaitError::TimedOut => DaemonError::ObservationShutdownTimeout,
+    });
     if let Err(error) = serve_result {
         return Err(DaemonError::Serve(error));
     }
     coordinator_result?;
+    clipboard_event_result?;
+    window_capability_monitor_result?;
+    operation_backend_monitor_result?;
     supervisor_result?;
-
+    let window_control_result = window_control_result?;
+    let capture_result = capture_result?;
+    let clipboard_result = clipboard_result?;
+    let observation_result = observation_result?;
+    if window_control_result != WindowControlActorExit::Stopped {
+        return Err(DaemonError::WindowControlRuntime(window_control_result));
+    }
+    if observation_result != ObservationServiceExit::Stopped {
+        return Err(DaemonError::ObservationRuntime(observation_result));
+    }
+    if capture_result != CaptureActorExit::Stopped {
+        return Err(DaemonError::CaptureRuntime(capture_result));
+    }
+    if clipboard_result != ClipboardActorExit::Stopped {
+        return Err(DaemonError::ClipboardRuntime(clipboard_result));
+    }
     readiness.transition(ReadinessSnapshot::new(
         DesktopReadiness::Stopped,
         None,
         Some("shutdown_complete"),
     ));
+    tracing::info!("clipboard actor stopped");
+    tracing::info!("capture actor stopped");
     tracing::info!("xenoteerd stopped");
     Ok(())
 }
@@ -196,20 +459,289 @@ fn configured_principal(config: &Config) -> Result<Principal, DaemonError> {
     Principal::new("local-operator", grants).map_err(Into::into)
 }
 
-fn raw_control_capabilities() -> Result<CapabilityReport, DaemonError> {
-    let available = [
-        "application.registered.launch",
-        "input.keyboard.xtest",
-        "input.pointer.smooth",
-        "input.pointer.xtest",
-        "input.reset.owned",
-        "process.managed.status",
-        "process.managed.terminate",
-    ]
-    .into_iter()
-    .map(|id| CapabilityId::new(id).map(|id| Capability::new(id, CapabilityStatus::Available)))
-    .collect::<Result<Vec<_>, _>>()?;
-    Ok(CapabilityReport::checked(available)?)
+fn configured_artifact_limits(config: &Config) -> Result<ArtifactLimits, DaemonError> {
+    let artifacts = config.artifacts();
+    Ok(ArtifactLimits::new(
+        artifacts.max_object_bytes(),
+        artifacts.max_total_bytes(),
+        artifacts.max_objects(),
+        artifacts.max_owner_bytes(),
+        artifacts.max_owner_objects(),
+        artifacts.max_retention_ms(),
+    )?)
+}
+
+fn configured_observation_settings(
+    config: &Config,
+) -> Result<ObservationServiceSettings, DaemonError> {
+    let observation = config.observation();
+    Ok(ObservationServiceSettings::new(
+        observation.request_capacity(),
+        observation.max_waiters(),
+        observation.token_capacity(),
+        observation.cursor_ttl_ms(),
+        observation.reference_ttl_ms(),
+        Duration::from_millis(observation.raw_request_timeout_ms()),
+        Duration::from_millis(observation.startup_timeout_ms()),
+        Duration::from_millis(observation.idle_poll_interval_ms()),
+    )?)
+}
+
+fn configured_window_model_limits(config: &Config) -> WindowModelLimits {
+    let observation = config.observation();
+    WindowModelLimits {
+        max_live_windows: observation.max_live_windows(),
+        max_tombstones: observation.max_tombstones(),
+        tombstone_ttl_ms: observation.tombstone_ttl_ms(),
+    }
+}
+
+fn configured_display() -> String {
+    std::env::var("DISPLAY")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| ":99".to_owned())
+}
+
+async fn wait_for_window_control_failure(
+    handle: WindowControlActorHandle,
+) -> WindowControlActorState {
+    loop {
+        let state = handle.health().state;
+        if !matches!(
+            state,
+            WindowControlActorState::Starting | WindowControlActorState::Healthy
+        ) {
+            return state;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_capture_failure(handle: CaptureActorHandle) -> CaptureActorState {
+    loop {
+        let state = handle.health().state;
+        if !matches!(
+            state,
+            CaptureActorState::Starting | CaptureActorState::Healthy
+        ) {
+            return state;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_clipboard_failure(handle: ClipboardActorHandle) -> ClipboardActorState {
+    loop {
+        let state = handle.health().state;
+        if !matches!(
+            state,
+            ClipboardActorState::Starting | ClipboardActorState::Healthy
+        ) {
+            return state;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[derive(Clone)]
+struct DetachedJoinMonitor<T> {
+    exit: tokio::sync::watch::Receiver<Option<T>>,
+}
+
+impl<T: Copy> DetachedJoinMonitor<T> {
+    async fn wait(&mut self) -> Result<T, DetachedJoinMonitorError> {
+        loop {
+            let current = *self.exit.borrow_and_update();
+            if let Some(exit) = current {
+                return Ok(exit);
+            }
+            self.exit
+                .changed()
+                .await
+                .map_err(|_| DetachedJoinMonitorError::Closed)?;
+        }
+    }
+}
+
+fn spawn_detached_join_monitor<T, F>(
+    name: &'static str,
+    join: F,
+) -> Result<DetachedJoinMonitor<T>, DetachedJoinMonitorError>
+where
+    T: Copy + Send + Sync + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (exit_tx, exit) = tokio::sync::watch::channel(None);
+    let (join_tx, join_rx) = std::sync::mpsc::sync_channel::<F>(1);
+    let thread = std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || {
+            let Ok(join) = join_rx.recv() else {
+                return;
+            };
+            let exit = join();
+            let _ = exit_tx.send(Some(exit));
+        });
+    let thread = match thread {
+        Ok(thread) => thread,
+        Err(error) => {
+            // A join owner's Drop may itself join indefinitely. Retain it until
+            // the process exits rather than moving that unbounded wait back
+            // onto Tokio's runtime thread when the OS cannot create a monitor.
+            std::mem::forget(join);
+            return Err(DetachedJoinMonitorError::Spawn(error));
+        }
+    };
+    if let Err(std::sync::mpsc::SendError(join)) = join_tx.send(join) {
+        // The monitor closed before accepting ownership. Preserve the same
+        // bounded-failure guarantee as the thread-creation error above.
+        std::mem::forget(join);
+        return Err(DetachedJoinMonitorError::Closed);
+    }
+    drop(thread);
+    Ok(DetachedJoinMonitor { exit })
+}
+
+/// Owns an actor join closure without permitting synchronous cleanup on a
+/// Tokio runtime thread when later daemon composition fails.
+struct DetachedJoinOwner<T, F>
+where
+    T: Copy + Send + Sync + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    monitor_name: &'static str,
+    join: Option<F>,
+}
+
+impl<T, F> DetachedJoinOwner<T, F>
+where
+    T: Copy + Send + Sync + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    const fn new(monitor_name: &'static str, join: F) -> Self {
+        Self {
+            monitor_name,
+            join: Some(join),
+        }
+    }
+
+    fn into_monitor(mut self) -> Result<DetachedJoinMonitor<T>, DetachedJoinMonitorError> {
+        let join = self.join.take().ok_or(DetachedJoinMonitorError::Closed)?;
+        spawn_detached_join_monitor(self.monitor_name, join)
+    }
+}
+
+impl<T, F> Drop for DetachedJoinOwner<T, F>
+where
+    T: Copy + Send + Sync + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    fn drop(&mut self) {
+        let Some(join) = self.join.take() else {
+            return;
+        };
+        // Dropping the returned receiver detaches only the monitor result; the
+        // OS thread continues to request and wait for actor shutdown.
+        let _monitor = spawn_detached_join_monitor(self.monitor_name, join);
+    }
+}
+
+enum FirstJoinAttempt<T> {
+    Complete(Result<T, DetachedJoinMonitorError>),
+    TimedOut(DetachedJoinMonitor<T>),
+}
+
+async fn first_join_attempt<T>(
+    monitor: Result<DetachedJoinMonitor<T>, DetachedJoinMonitorError>,
+    timeout: Duration,
+) -> FirstJoinAttempt<T>
+where
+    T: Copy,
+{
+    let mut monitor = match monitor {
+        Ok(monitor) => monitor,
+        Err(error) => return FirstJoinAttempt::Complete(Err(error)),
+    };
+    match tokio::time::timeout(timeout, monitor.wait()).await {
+        Ok(result) => FirstJoinAttempt::Complete(result),
+        Err(_) => FirstJoinAttempt::TimedOut(monitor),
+    }
+}
+
+async fn finish_join_attempt<T>(
+    first: FirstJoinAttempt<T>,
+    timeout: Duration,
+) -> Result<T, ActorJoinWaitError>
+where
+    T: Copy,
+{
+    match first {
+        FirstJoinAttempt::Complete(result) => result.map_err(ActorJoinWaitError::Monitor),
+        FirstJoinAttempt::TimedOut(mut monitor) => tokio::time::timeout(timeout, monitor.wait())
+            .await
+            .map_err(|_| ActorJoinWaitError::TimedOut)?
+            .map_err(ActorJoinWaitError::Monitor),
+    }
+}
+
+enum ConfiguredViewer {
+    Disabled,
+    Enabled {
+        origins: AllowedOrigins,
+        tickets: Arc<InMemoryViewerTicketRegistry>,
+        gateway: Arc<ViewerGateway>,
+    },
+}
+
+impl ConfiguredViewer {
+    const fn enabled(&self) -> bool {
+        matches!(self, Self::Enabled { .. })
+    }
+
+    fn into_router_parts(self, services: ApiServices) -> (AllowedOrigins, ApiServices) {
+        match self {
+            Self::Disabled => (AllowedOrigins::default(), services),
+            Self::Enabled {
+                origins,
+                tickets,
+                gateway,
+            } => (
+                origins,
+                services
+                    .with_viewer_ticket_service(tickets)
+                    .with_viewer_gateway(gateway),
+            ),
+        }
+    }
+}
+
+fn configured_viewer(config: &ViewerConfig) -> Result<ConfiguredViewer, DaemonError> {
+    if !config.enabled() {
+        return Ok(ConfiguredViewer::Disabled);
+    }
+
+    let origins = AllowedOrigins::exact(config.allowed_origins().iter().cloned())?;
+    let registry_config = ViewerTicketRegistryConfig::new(
+        config.ticket_capacity(),
+        Duration::from_secs(config.ticket_ttl_seconds()),
+    )?;
+    let tickets = Arc::new(InMemoryViewerTicketRegistry::new(registry_config)?);
+    let connector = Arc::new(LoopbackWebsockifyConnector::new(config.backend_address())?);
+    let limits = ViewerGatewayLimits::new(
+        Duration::from_millis(config.connect_timeout_ms()),
+        Duration::from_millis(config.write_timeout_ms()),
+        Duration::from_millis(config.idle_timeout_ms()),
+        Duration::from_millis(config.session_timeout_ms()),
+        config.maximum_frame_bytes(),
+        config.maximum_sessions(),
+    )?;
+    let gateway = Arc::new(ViewerGateway::new(connector, config.no_vnc_root(), limits)?);
+    Ok(ConfiguredViewer::Enabled {
+        origins,
+        tickets,
+        gateway,
+    })
 }
 
 fn configuration_environment(
@@ -222,8 +754,6 @@ fn configuration_environment(
 
 #[derive(Debug, Error)]
 enum DaemonError {
-    #[error(transparent)]
-    CapabilityIdentifier(#[from] xenoteer_protocol::CapabilityIdError),
     #[error("could not read configuration file: {0}")]
     ReadConfig(std::io::Error),
     #[error(transparent)]
@@ -237,7 +767,55 @@ enum DaemonError {
     #[error(transparent)]
     TransportLimits(#[from] TransportLimitError),
     #[error(transparent)]
-    Capabilities(#[from] xenoteer_protocol::CapabilityReportError),
+    RuntimeCapabilities(#[from] RuntimeCapabilityError),
+    #[error(transparent)]
+    WindowCapabilityMonitor(#[from] WindowCapabilityMonitorError),
+    #[error(transparent)]
+    OperationBackendMonitor(#[from] OperationBackendMonitorError),
+    #[error(transparent)]
+    EventSinkBind(#[from] DeferredEventSinkBindError),
+    #[error(transparent)]
+    ClipboardEventRelay(#[from] ClipboardEventRelayError),
+    #[error(transparent)]
+    ViewerOriginPolicy(#[from] OriginPolicyError),
+    #[error(transparent)]
+    ViewerTickets(#[from] ViewerTicketRegistryError),
+    #[error(transparent)]
+    ViewerGateway(#[from] ViewerGatewayConfigurationError),
+    #[error(transparent)]
+    ActorJoinMonitor(#[from] DetachedJoinMonitorError),
+    #[error(transparent)]
+    ArtifactStore(#[from] StoreError),
+    #[error(transparent)]
+    ArtifactRetention(#[from] RetentionPolicyError),
+    #[error(transparent)]
+    ArtifactUploadTimeout(#[from] UploadTimeoutPolicyError),
+    #[error(transparent)]
+    ObservationComposition(#[from] ObservationCompositionError),
+    #[error("window-control actor could not start: {0}")]
+    WindowControlStartup(X11Error),
+    #[error("window-control actor exited unexpectedly: {0:?}")]
+    WindowControlRuntime(WindowControlActorExit),
+    #[error("window-control actor did not stop before its shutdown deadline")]
+    WindowControlShutdownTimeout,
+    #[error("capture actor could not start: {0}")]
+    CaptureStartup(X11Error),
+    #[error("capture actor exited unexpectedly: {0:?}")]
+    CaptureRuntime(CaptureActorExit),
+    #[error("capture actor did not stop before its shutdown deadline")]
+    CaptureShutdownTimeout,
+    #[error("clipboard actor could not start: {0}")]
+    ClipboardStartup(X11Error),
+    #[error("clipboard actor exited unexpectedly: {0:?}")]
+    ClipboardRuntime(ClipboardActorExit),
+    #[error("clipboard actor did not stop before its shutdown deadline")]
+    ClipboardShutdownTimeout,
+    #[error("observation service exited unexpectedly: {0:?}")]
+    ObservationRuntime(ObservationServiceExit),
+    #[error("observation service did not stop before its shutdown deadline")]
+    ObservationShutdownTimeout,
+    #[error("startup worker failed: {0}")]
+    StartupTask(String),
     #[error("invalid tracing filter: {0}")]
     LogFilter(tracing_subscriber::filter::ParseError),
     #[error("could not initialize tracing: {0}")]
@@ -256,101 +834,20 @@ enum DaemonError {
     CoordinatorRuntime(#[from] control_plane::CoordinatorRuntimeError),
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phase_three_capabilities_are_explicit_and_available() -> Result<(), DaemonError> {
-        let report = raw_control_capabilities()?;
-        let identifiers = report
-            .capabilities()
-            .iter()
-            .map(|capability| {
-                assert_eq!(capability.status(), CapabilityStatus::Available);
-                capability.id().as_str()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            identifiers,
-            vec![
-                "application.registered.launch",
-                "input.keyboard.xtest",
-                "input.pointer.smooth",
-                "input.pointer.xtest",
-                "input.reset.owned",
-                "process.managed.status",
-                "process.managed.terminate",
-            ]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn launcher_config_key_is_not_forwarded_to_typed_configuration() -> Result<(), ConfigLoadError>
-    {
-        let config = Config::load(
-            None,
-            configuration_environment([
-                (
-                    CONFIG_PATH_ENV.to_owned(),
-                    "LAUNCHER_CONFIG_VALUE_CANARY".to_owned(),
-                ),
-                ("XENOTEER__LOGGING__FILTER".to_owned(), "warn".to_owned()),
-            ]),
-            &ConfigOverrides::default(),
-        )?;
-        assert_eq!(config.logging().filter(), "warn");
-        Ok(())
-    }
-
-    #[test]
-    fn configured_principal_honors_least_privilege_grants() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let config = Config::load(
-            Some("[auth]\ngrants = ['desktop:status']"),
-            std::iter::empty::<(&str, &str)>(),
-            &ConfigOverrides::default(),
-        )?;
-        let principal = configured_principal(&config)?;
-        assert!(principal.has_grant(Grant::DesktopStatus));
-        assert!(!principal.has_grant(Grant::DesktopObserve));
-        assert!(!principal.has_grant(Grant::InputControl));
-        Ok(())
-    }
-
-    #[test]
-    fn unknown_xenoteer_environment_is_redacted_through_daemon_error()
-    -> Result<(), Box<dyn std::error::Error>> {
-        const KEY_CANARY: &str = "XENOTEER_BAD_KEY_SECRET_CANARY";
-        const VALUE_CANARY: &str = "UNKNOWN_ENV_VALUE_SECRET_CANARY";
-        let result = Config::load(
-            None,
-            configuration_environment([(KEY_CANARY.to_owned(), VALUE_CANARY.to_owned())]),
-            &ConfigOverrides::default(),
-        );
-        let error = match result {
-            Err(error) => DaemonError::Config(error),
-            Ok(_) => {
-                return Err(std::io::Error::other(
-                    "unknown Xenoteer environment key unexpectedly loaded",
-                )
-                .into());
-            }
-        };
-        assert_error_chain_redacted(&error, KEY_CANARY);
-        assert_error_chain_redacted(&error, VALUE_CANARY);
-        Ok(())
-    }
-
-    fn assert_error_chain_redacted(error: &DaemonError, canary: &str) {
-        assert!(!format!("{error}").contains(canary));
-        assert!(!format!("{error:?}").contains(canary));
-        let mut source = std::error::Error::source(error);
-        while let Some(current) = source {
-            assert!(!format!("{current}").contains(canary));
-            assert!(!format!("{current:?}").contains(canary));
-            source = current.source();
-        }
-    }
+#[derive(Debug, Error)]
+enum DetachedJoinMonitorError {
+    #[error("could not start detached actor join monitor: {0}")]
+    Spawn(std::io::Error),
+    #[error("detached actor join monitor closed without an exit state")]
+    Closed,
 }
+
+#[derive(Debug)]
+enum ActorJoinWaitError {
+    Monitor(DetachedJoinMonitorError),
+    TimedOut,
+}
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod tests;

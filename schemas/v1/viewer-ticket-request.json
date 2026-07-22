@@ -1,0 +1,48 @@
+{
+  "$defs": {
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ViewerMode": {
+      "description": "Closed release-one viewer control mode.",
+      "oneOf": [
+        {
+          "const": "view_only",
+          "description": "Human observation only; key, pointer, resize, and clipboard are disabled.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Explicit ticket issuance request.",
+  "properties": {
+    "desktop_generation": {
+      "$ref": "#/$defs/DesktopGeneration",
+      "description": "Exact desktop lifetime; tickets never cross generations."
+    },
+    "desktop_id": {
+      "$ref": "#/$defs/DesktopId",
+      "description": "Desktop resource to observe."
+    },
+    "mode": {
+      "$ref": "#/$defs/ViewerMode",
+      "description": "Explicit future-safe mode; release one accepts only view-only."
+    }
+  },
+  "required": [
+    "desktop_id",
+    "desktop_generation",
+    "mode"
+  ],
+  "title": "ViewerTicketRequest",
+  "type": "object"
+}

@@ -114,6 +114,7 @@ Capability checks occur before resource lookup and again near queued effects:
 |---|---|
 | `desktop:status` | detailed health/capabilities |
 | `desktop:observe` | window/process metadata and events |
+| `window:control` | window-manager-mediated activation, close, state, and geometry requests |
 | `input:control` | lease and physical mouse/keyboard |
 | `clipboard:read` / `clipboard:write` | selection content operations |
 | `accessibility:read` | semantic tree/query/events |

@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    CommandId, ErrorCode, Problem, ProblemValidationError, ProcessRef, ProcessState,
-    ProcessValidationError, ProcessView, Timestamp, TimestampError,
+    ClipboardValidationError, CommandId, ErrorCode, Problem, ProblemValidationError, ProcessRef,
+    ProcessState, ProcessValidationError, ProcessView, TextInsertEvidence, Timestamp,
+    TimestampError, WindowControlResult, WindowControlValidationError,
 };
 
 /// Maximum UTF-8 byte length of a warning code.
@@ -70,10 +71,18 @@ pub enum EffectStage {
     ButtonPressed,
     /// A pointer button was released.
     ButtonReleased,
+    /// One or more complete pointer clicks were confirmed.
+    PointerClicked,
+    /// A complete press/move/release drag was confirmed.
+    PointerDragged,
+    /// One or more complete discrete scroll notches were confirmed.
+    PointerScrolled,
     /// A physical key was pressed.
     KeyPressed,
     /// A physical key was released.
     KeyReleased,
+    /// A complete key press, chord, or sequence was confirmed.
+    KeyboardActionCompleted,
     /// Xenoteer-owned pressed input was conservatively reset.
     InputReset,
     /// A managed application child was started.
@@ -84,6 +93,14 @@ pub enum EffectStage {
     ProcessExited,
     /// The requested postcondition was observed.
     PostconditionMet,
+    /// A window-manager or ICCCM request crossed its externally visible boundary.
+    WindowRequestSent,
+    /// The requested window postcondition was observed.
+    WindowStateChanged,
+    /// Xenoteer acquired or relinquished X11 selection ownership.
+    ClipboardOwnershipChanged,
+    /// At least one text-insertion effect was emitted.
+    TextInserted,
 }
 
 impl EffectStage {
@@ -96,7 +113,7 @@ impl EffectStage {
 
 /// A successful command payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommandOutcome {
     /// A Phase-0 backend probe acknowledgment.
     Probe {
@@ -120,22 +137,34 @@ pub enum CommandOutcome {
     },
     /// An operation completed without an additional payload.
     Acknowledged,
+    /// A window operation completed with bounded observed evidence.
+    WindowControl {
+        /// Desired operation and observed postcondition.
+        result: WindowControlResult,
+    },
+    /// Text insertion completed with content-free delivery evidence.
+    TextInserted {
+        /// Selected strategy and bounded completed counts.
+        evidence: TextInsertEvidence,
+    },
 }
 
 impl CommandOutcome {
     /// Revalidates nested process references and state-dependent outcomes.
-    pub fn validate(&self) -> Result<(), ProcessValidationError> {
+    pub fn validate(&self) -> Result<(), ResultInvariantError> {
         match self {
             Self::Probe { .. } | Self::Acknowledged => Ok(()),
-            Self::ApplicationLaunched { process } => process.validate(),
-            Self::ProcessStatus { process } => process.validate(),
+            Self::ApplicationLaunched { process } => process.validate().map_err(Into::into),
+            Self::ProcessStatus { process } => process.validate().map_err(Into::into),
             Self::ProcessTerminated { process } => {
                 process.validate()?;
                 if process.state != ProcessState::Exited {
-                    return Err(ProcessValidationError::ProcessView);
+                    return Err(ProcessValidationError::ProcessView.into());
                 }
                 Ok(())
             }
+            Self::WindowControl { result } => result.validate().map_err(Into::into),
+            Self::TextInserted { evidence } => evidence.validate().map_err(Into::into),
         }
     }
 }
@@ -502,6 +531,12 @@ pub enum ResultInvariantError {
     /// A nested managed-process outcome is malformed.
     #[error(transparent)]
     InvalidProcess(#[from] ProcessValidationError),
+    /// A nested window-control outcome is malformed.
+    #[error(transparent)]
+    InvalidWindowControl(#[from] WindowControlValidationError),
+    /// A nested clipboard/text outcome is malformed.
+    #[error(transparent)]
+    InvalidClipboard(#[from] ClipboardValidationError),
 }
 
 #[cfg(test)]

@@ -1,0 +1,129 @@
+{
+  "$defs": {
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Timestamp": {
+      "description": "A canonical RFC 3339 timestamp with an explicit UTC offset.",
+      "format": "date-time",
+      "type": "string"
+    },
+    "ViewerMode": {
+      "description": "Closed release-one viewer control mode.",
+      "oneOf": [
+        {
+          "const": "view_only",
+          "description": "Human observation only; key, pointer, resize, and clipboard are disabled.",
+          "type": "string"
+        }
+      ]
+    },
+    "ViewerOrigin": {
+      "description": "Exact HTTP(S) browser origin to which a viewer ticket is bound.",
+      "maxLength": 512,
+      "minLength": 8,
+      "pattern": "^https?://[^/?#@\\s]+$",
+      "type": "string"
+    },
+    "ViewerPrincipalId": {
+      "description": "Stable authenticated identity copied into a viewer ticket claim.",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._:@-]+$",
+      "type": "string"
+    },
+    "ViewerTicketAudience": {
+      "description": "Closed service audience for viewer bearer material.",
+      "oneOf": [
+        {
+          "const": "viewer_websocket",
+          "description": "Browser viewer WebSocket upgrade endpoint only.",
+          "type": "string"
+        }
+      ]
+    },
+    "ViewerTicketSecret": {
+      "description": "Random single-use bearer material distinct from long-lived API authority.",
+      "maxLength": 128,
+      "minLength": 43,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "readOnly": true,
+      "type": "string"
+    },
+    "ViewerTicketUsePolicy": {
+      "description": "Closed ticket-consumption policy.",
+      "oneOf": [
+        {
+          "const": "single_use",
+          "description": "Atomically consumed by the first valid viewer WebSocket upgrade.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Single-use ticket response. Debug output always redacts bearer material.\n\nThe issuer must generate the ticket with a CSPRNG and persist only a keyed\ndigest of its secret. The server-side record must retain the complete claim\nset (`principal_id`, `audience`, `desktop_id`, `desktop_generation`, `origin`,\n`mode`, and expiry) plus a consumed flag. A viewer upgrade must atomically\nlook up and consume that record while checking the current time and every\nclaim; wire-shape validation alone is not authorization.",
+  "properties": {
+    "audience": {
+      "$ref": "#/$defs/ViewerTicketAudience",
+      "description": "Exact endpoint class allowed to consume the bearer."
+    },
+    "desktop_generation": {
+      "$ref": "#/$defs/DesktopGeneration",
+      "description": "Exact desktop lifetime authorized for viewing."
+    },
+    "desktop_id": {
+      "$ref": "#/$defs/DesktopId",
+      "description": "Desktop resource authorized for viewing."
+    },
+    "expires_at": {
+      "$ref": "#/$defs/Timestamp",
+      "description": "Strictly later expiry, no more than sixty seconds after issue."
+    },
+    "issued_at": {
+      "$ref": "#/$defs/Timestamp",
+      "description": "Ticket creation instant."
+    },
+    "mode": {
+      "$ref": "#/$defs/ViewerMode",
+      "description": "Always view-only in release one."
+    },
+    "origin": {
+      "$ref": "#/$defs/ViewerOrigin",
+      "description": "Origin required at the browser WebSocket upgrade."
+    },
+    "principal_id": {
+      "$ref": "#/$defs/ViewerPrincipalId",
+      "description": "Authenticated principal for whom the server minted this ticket."
+    },
+    "ticket": {
+      "$ref": "#/$defs/ViewerTicketSecret",
+      "description": "Secret returned once and stored only as a keyed digest by the server."
+    },
+    "use_policy": {
+      "$ref": "#/$defs/ViewerTicketUsePolicy",
+      "description": "Explicit one-time consumption contract."
+    }
+  },
+  "required": [
+    "ticket",
+    "principal_id",
+    "audience",
+    "desktop_id",
+    "desktop_generation",
+    "origin",
+    "mode",
+    "issued_at",
+    "expires_at",
+    "use_policy"
+  ],
+  "title": "OneTimeViewerTicket",
+  "type": "object"
+}

@@ -6,6 +6,12 @@ pub mod config;
 pub mod coordinator;
 pub mod domain;
 pub mod input;
+pub mod window;
+pub mod window_geometry;
+pub mod window_query;
+
+#[cfg(test)]
+mod window_geometry_tests;
 
 pub use config::{
     AuthConfig, Config, ConfigDiagnostic, ConfigDiagnosticKind, ConfigLoadError, ConfigOverrides,
@@ -24,4 +30,14 @@ pub use coordinator::{
     GenerationToken, IdempotencyDecision, LeaseMachine, LeasePhase, LeasePolicy, LeaseRequirement,
     MonotonicMillis, PrincipalId, ReplayResult, ResetOutcome, ResetRequest, ResetRetryOutcome,
     TerminalCause, spawn_coordinator, spawn_coordinator_with_event_mapper,
+};
+pub use window::{
+    DEFAULT_MAX_LIVE_WINDOWS, DEFAULT_MAX_WINDOW_TOMBSTONES, DEFAULT_WINDOW_TOMBSTONE_TTL_MS,
+    ResolvedWindow, WindowModel, WindowModelChange, WindowModelError, WindowModelLimits,
+    WindowTombstone,
+};
+pub use window_query::{
+    WindowContinuationDescriptor, WindowContinuationQuery, WindowPageProjection, WindowQueryError,
+    WindowQueryRecord, WindowQueryView, WindowResolveProjection, WindowSelectorFingerprint,
+    WindowWaitEvaluation,
 };
