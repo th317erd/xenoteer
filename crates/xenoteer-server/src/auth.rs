@@ -82,6 +82,12 @@ pub enum Grant {
     /// Create a short-lived view-only viewer session.
     #[serde(rename = "viewer:read")]
     ViewerRead,
+    /// Query semantic trees, snapshots, waits, and redacted events.
+    #[serde(rename = "accessibility:read")]
+    AccessibilityRead,
+    /// Invoke semantic actions or read/write authorized semantic values/text.
+    #[serde(rename = "accessibility:write")]
+    AccessibilityWrite,
 }
 
 impl Grant {
@@ -101,10 +107,12 @@ impl Grant {
             Self::ArtifactRead => "artifact:read",
             Self::ArtifactDelete => "artifact:delete",
             Self::ViewerRead => "viewer:read",
+            Self::AccessibilityRead => "accessibility:read",
+            Self::AccessibilityWrite => "accessibility:write",
         }
     }
 
-    /// Parses one member of the closed release-four grant vocabulary.
+    /// Parses one member of the closed release-five grant vocabulary.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         Self::operator_grants()
@@ -112,9 +120,9 @@ impl Grant {
             .find(|grant| grant.as_str() == name)
     }
 
-    /// Returns the complete release-four operator grant set.
+    /// Returns the complete release-five operator grant set.
     #[must_use]
-    pub const fn operator_grants() -> [Self; 12] {
+    pub const fn operator_grants() -> [Self; 14] {
         [
             Self::DesktopStatus,
             Self::DesktopObserve,
@@ -128,6 +136,8 @@ impl Grant {
             Self::ArtifactRead,
             Self::ArtifactDelete,
             Self::ViewerRead,
+            Self::AccessibilityRead,
+            Self::AccessibilityWrite,
         ]
     }
 }
@@ -164,8 +174,31 @@ const APPLICATION_LAUNCH_REQUIREMENT: &[Grant] = &[Grant::ApplicationLaunch];
 const APPLICATION_TERMINATE_REQUIREMENT: &[Grant] = &[Grant::ApplicationTerminate];
 const WINDOW_CONTROL_REQUIREMENT: &[Grant] = &[Grant::WindowControl];
 const CLIPBOARD_WRITE_REQUIREMENT: &[Grant] = &[Grant::ClipboardWrite];
+const ACCESSIBILITY_WRITE_REQUIREMENT: &[Grant] = &[Grant::AccessibilityWrite];
+const ELEMENT_PHYSICAL_CLICK_REQUIREMENT: &[Grant] = &[
+    Grant::AccessibilityRead,
+    Grant::InputControl,
+    Grant::WindowControl,
+];
+const ELEMENT_PHYSICAL_CLICK_WITH_SCROLL_REQUIREMENT: &[Grant] = &[
+    Grant::AccessibilityRead,
+    Grant::AccessibilityWrite,
+    Grant::InputControl,
+    Grant::WindowControl,
+];
 const TEXT_PHYSICAL_REQUIREMENT: &[Grant] = &[Grant::InputControl, Grant::WindowControl];
 const TEXT_CLIPBOARD_REQUIREMENT: &[Grant] = &[
+    Grant::InputControl,
+    Grant::WindowControl,
+    Grant::ClipboardWrite,
+];
+const TEXT_SEMANTIC_AND_PHYSICAL_REQUIREMENT: &[Grant] = &[
+    Grant::AccessibilityWrite,
+    Grant::InputControl,
+    Grant::WindowControl,
+];
+const TEXT_SEMANTIC_AND_CLIPBOARD_REQUIREMENT: &[Grant] = &[
+    Grant::AccessibilityWrite,
     Grant::InputControl,
     Grant::WindowControl,
     Grant::ClipboardWrite,
@@ -176,11 +209,12 @@ const COMMAND_CANCELLATION_GRANTS: &[Grant] = &[
     Grant::ApplicationTerminate,
     Grant::WindowControl,
     Grant::ClipboardWrite,
+    Grant::AccessibilityWrite,
 ];
 
 /// Returns the shared transport-and-effect authorization rule for a command.
 #[must_use]
-pub const fn command_grant_requirement(command: &xenoteer_protocol::Command) -> GrantRequirement {
+pub fn command_grant_requirement(command: &xenoteer_protocol::Command) -> GrantRequirement {
     use xenoteer_protocol::Command;
 
     let grants = match command {
@@ -216,16 +250,43 @@ pub const fn command_grant_requirement(command: &xenoteer_protocol::Command) -> 
         | Command::WindowMoveToWorkspace(_)
         | Command::WindowStack(_) => WINDOW_CONTROL_REQUIREMENT,
         Command::SelectionSet(_) | Command::SelectionClear(_) => CLIPBOARD_WRITE_REQUIREMENT,
-        Command::TextInsert(command) => match command.strategy {
-            xenoteer_protocol::TextStrategy::Physical
-            | xenoteer_protocol::TextStrategy::PhysicalExtended => TEXT_PHYSICAL_REQUIREMENT,
-            xenoteer_protocol::TextStrategy::Clipboard | xenoteer_protocol::TextStrategy::Auto => {
-                TEXT_CLIPBOARD_REQUIREMENT
+        Command::ElementInvoke(_)
+        | Command::ElementFocus(_)
+        | Command::ElementSetValue(_)
+        | Command::ElementSelection(_)
+        | Command::ElementSetText(_)
+        | Command::ElementInsertText(_)
+        | Command::ElementScroll(_) => ACCESSIBILITY_WRITE_REQUIREMENT,
+        Command::ElementPhysicalClick(command) => match command.scroll_policy {
+            xenoteer_protocol::ElementClickScrollPolicy::Never => {
+                ELEMENT_PHYSICAL_CLICK_REQUIREMENT
+            }
+            xenoteer_protocol::ElementClickScrollPolicy::IfNeeded
+            | xenoteer_protocol::ElementClickScrollPolicy::Always => {
+                ELEMENT_PHYSICAL_CLICK_WITH_SCROLL_REQUIREMENT
             }
         },
+        Command::TextInsert(command) => text_insert_grants(command.strategy_union()),
         Command::DesktopProbe(_) | Command::ProcessStatus(_) => DESKTOP_OBSERVE_REQUIREMENT,
     };
     GrantRequirement::all(grants)
+}
+
+fn text_insert_grants(union: xenoteer_protocol::TextStrategyUnion) -> &'static [Grant] {
+    let uses_physical_plane = union.physical || union.clipboard || union.physical_extended;
+    match (union.semantic, uses_physical_plane, union.clipboard) {
+        (true, false, false) => ACCESSIBILITY_WRITE_REQUIREMENT,
+        (false, true, false) => TEXT_PHYSICAL_REQUIREMENT,
+        (false, true, true) => TEXT_CLIPBOARD_REQUIREMENT,
+        (true, true, false) => TEXT_SEMANTIC_AND_PHYSICAL_REQUIREMENT,
+        (true, true, true) => TEXT_SEMANTIC_AND_CLIPBOARD_REQUIREMENT,
+        // Structurally invalid policy unions are rejected by protocol
+        // validation. Keep authorization fail-closed if one reaches this
+        // shared transport/effect boundary anyway.
+        (false, false, false) | (false, false, true) | (true, false, true) => {
+            TEXT_SEMANTIC_AND_CLIPBOARD_REQUIREMENT
+        }
+    }
 }
 
 /// Authenticated identity and its prevalidated grants.
@@ -256,7 +317,7 @@ impl Principal {
         })
     }
 
-    /// Builds the local release-four operator used by a single-token deployment.
+    /// Builds the local release-five operator used by a single-token deployment.
     pub fn local_operator() -> Result<Self, PrincipalError> {
         Self::new("local-operator", Grant::operator_grants())
     }
@@ -819,6 +880,7 @@ mod tests {
                     | Grant::ApplicationTerminate
                     | Grant::WindowControl
                     | Grant::ClipboardWrite
+                    | Grant::AccessibilityWrite
             );
             assert_eq!(
                 principal.has_command_cancellation_grant(),
@@ -827,6 +889,45 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn text_strategy_union_authorization_covers_every_possible_effect_plane() {
+        use xenoteer_protocol::TextStrategyUnion;
+
+        assert_eq!(
+            text_insert_grants(TextStrategyUnion {
+                semantic: true,
+                physical: false,
+                clipboard: false,
+                physical_extended: false,
+            }),
+            &[Grant::AccessibilityWrite]
+        );
+        assert_eq!(
+            text_insert_grants(TextStrategyUnion {
+                semantic: true,
+                physical: true,
+                clipboard: true,
+                physical_extended: true,
+            }),
+            &[
+                Grant::AccessibilityWrite,
+                Grant::InputControl,
+                Grant::WindowControl,
+                Grant::ClipboardWrite,
+            ]
+        );
+        assert_eq!(
+            text_insert_grants(TextStrategyUnion {
+                semantic: false,
+                physical: false,
+                clipboard: false,
+                physical_extended: false,
+            }),
+            TEXT_SEMANTIC_AND_CLIPBOARD_REQUIREMENT,
+            "an invalid empty policy must fail closed"
+        );
     }
 
     #[test]
@@ -896,6 +997,61 @@ mod tests {
         assert_eq!(
             command_grant_requirement(&physical_text).grants(),
             &[Grant::InputControl, Grant::WindowControl]
+        );
+
+        let physical_click: xenoteer_protocol::Command =
+            serde_json::from_value(serde_json::json!({
+                "type": "element_physical_click",
+                "element": {
+                    "desktop_id": desktop_id,
+                    "desktop_generation": generation,
+                    "atspi_generation": 1,
+                    "application": {
+                        "desktop_id": desktop_id,
+                        "desktop_generation": generation,
+                        "atspi_generation": 1,
+                        "unique_bus_name": ":1.42",
+                        "root_object_path": "/org/a11y/atspi/accessible/root",
+                        "app_instance_generation": 1,
+                        "identity_hash": "d".repeat(64)
+                    },
+                    "object_path": "/org/a11y/atspi/accessible/button",
+                    "object_identity_hash": "e".repeat(64),
+                    "cache_sequence": 1
+                },
+                "window": null,
+                "minimum_correlation": "strong",
+                "point_policy": {"type": "center"},
+                "scroll_policy": "if_needed",
+                "activation_policy": "if_needed",
+                "occlusion_policy": "best_effort_reject",
+                "button": "left",
+                "count": 1,
+                "interval_ms": 0,
+                "move_duration_ms": 100,
+                "curve": "smooth",
+                "settle_timeout_ms": 1000,
+                "postcondition": null
+            }))?;
+        assert_eq!(
+            command_grant_requirement(&physical_click).grants(),
+            &[
+                Grant::AccessibilityRead,
+                Grant::AccessibilityWrite,
+                Grant::InputControl,
+                Grant::WindowControl
+            ]
+        );
+        let mut no_scroll_value = serde_json::to_value(&physical_click)?;
+        no_scroll_value["scroll_policy"] = serde_json::json!("never");
+        let no_scroll: xenoteer_protocol::Command = serde_json::from_value(no_scroll_value)?;
+        assert_eq!(
+            command_grant_requirement(&no_scroll).grants(),
+            &[
+                Grant::AccessibilityRead,
+                Grant::InputControl,
+                Grant::WindowControl
+            ]
         );
         Ok(())
     }

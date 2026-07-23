@@ -503,6 +503,272 @@ fn only_authoritative_stacking_inventory_sets_stacking_indices() -> Result<(), B
 }
 
 #[test]
+fn correlation_snapshot_is_atomic_convertible_and_rejects_a_partial_universe()
+-> Result<(), Box<dyn Error>> {
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let limits = WindowModelLimits {
+        max_live_windows: MAX_ACCESSIBILITY_CORRELATION_CANDIDATES + 1,
+        ..WindowModelLimits::default()
+    };
+    let mut state = ModelState::new(
+        desktop_id,
+        generation,
+        limits,
+        usize::from(MAX_WINDOW_PAGE_LIMIT),
+        1_000,
+        1_000,
+    )?;
+    let mut first = raw(42)?;
+    first.properties.reported_pid = Some(321);
+    first.properties.title = Some(WindowText::new("Editor", false)?);
+    let first_inventory = inventory(InventorySource::NetClientList, vec![42]);
+    state.reconcile_raw(
+        &first_inventory,
+        std::slice::from_ref(&first),
+        MonotonicMillis::new(1),
+        ReconcileIdentityPolicy::PreserveContinuity,
+    )?;
+
+    let correlation = state.correlation_snapshot(MonotonicMillis::new(2))?;
+    assert_eq!(correlation.windows.len(), 1);
+    assert_eq!(correlation.windows[0].model_revision, correlation.revision);
+    let candidates = correlation.candidates()?;
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].process_id, Some(321));
+    assert_eq!(
+        candidates[0]
+            .title
+            .as_ref()
+            .map(NormalizedCorrelationText::as_str),
+        Some("editor")
+    );
+    assert_eq!(
+        candidates[0].top_level_extents,
+        Some(first.geometry.client_rect.rect)
+    );
+    assert_eq!(candidates[0].observed_at, MonotonicMillis::new(2));
+
+    let xids = (1..=MAX_ACCESSIBILITY_CORRELATION_CANDIDATES + 1)
+        .map(|index| u32::try_from(index).map(|xid| xid + 1_000))
+        .collect::<Result<Vec<_>, _>>()?;
+    let inputs = xids
+        .iter()
+        .map(|xid| raw(*xid))
+        .collect::<Result<Vec<_>, _>>()?;
+    state.reconcile_raw(
+        &inventory(InventorySource::NetClientList, xids),
+        &inputs,
+        MonotonicMillis::new(3),
+        ReconcileIdentityPolicy::InvalidateAll,
+    )?;
+    assert!(matches!(
+        state.correlation_snapshot(MonotonicMillis::new(4)),
+        Err(ControlPlaneError::ResourceExhausted)
+    ));
+    Ok(())
+}
+
+#[test]
+fn exact_occlusion_snapshot_orders_geometry_tracks_movement_and_advances_epoch()
+-> Result<(), Box<dyn Error>> {
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let mut state = ModelState::new(
+        desktop_id,
+        generation,
+        WindowModelLimits::default(),
+        usize::from(MAX_WINDOW_PAGE_LIMIT),
+        1_000,
+        1_000,
+    )?;
+    let mut inputs = vec![raw(42)?, raw(43)?, raw(44)?];
+    for (index, input) in inputs.iter_mut().enumerate() {
+        input.geometry.client_rect = WindowRect::new(
+            CoordinateSpace::RootPhysical,
+            Rect::new(i32::try_from(index)? * 100, 10, 80, 80)?,
+        )?;
+    }
+    let root = inventory(InventorySource::NetClientListStacking, vec![42, 43, 44]);
+    state.reconcile_raw(
+        &root,
+        &inputs,
+        MonotonicMillis::new(1),
+        ReconcileIdentityPolicy::PreserveContinuity,
+    )?;
+    let target = state.model.live_reference(42).cloned().ok_or("missing")?;
+
+    let first = state.occlusion_snapshot(&target, MonotonicMillis::new(2))?;
+    assert_eq!(first.stacking_epoch, 1);
+    assert!(first.stacking_complete);
+    assert_eq!(
+        first.rectangles_above,
+        vec![
+            inputs[1].geometry.client_rect.rect,
+            inputs[2].geometry.client_rect.rect,
+        ]
+    );
+    assert_eq!(first.as_click_snapshot().target_window, &target);
+
+    inputs[0].geometry.client_rect =
+        WindowRect::new(CoordinateSpace::RootPhysical, Rect::new(500, 500, 80, 80)?)?;
+    state.reconcile_raw(
+        &root,
+        &inputs,
+        MonotonicMillis::new(3),
+        ReconcileIdentityPolicy::PreserveContinuity,
+    )?;
+    let moved = state.occlusion_snapshot(&target, MonotonicMillis::new(4))?;
+    assert_eq!(moved.stacking_epoch, 2);
+    assert_eq!(moved.target_window, target);
+    assert_eq!(
+        moved.target_client_bounds,
+        Some(inputs[0].geometry.client_rect.rect)
+    );
+
+    state.remove_xid(42, MonotonicMillis::new(5))?;
+    assert!(matches!(
+        state.occlusion_snapshot(&target, MonotonicMillis::new(6)),
+        Err(ControlPlaneError::NotFound | ControlPlaneError::StaleReference { .. })
+    ));
+    Ok(())
+}
+
+#[test]
+fn over_cap_or_unproven_stacking_is_explicitly_incomplete() -> Result<(), Box<dyn Error>> {
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let window_count = MAX_ELEMENT_CLICK_OCCLUDERS + 2;
+    let limits = WindowModelLimits {
+        max_live_windows: window_count,
+        ..WindowModelLimits::default()
+    };
+    let mut state = ModelState::new(
+        desktop_id,
+        generation,
+        limits,
+        usize::from(MAX_WINDOW_PAGE_LIMIT),
+        1_000,
+        1_000,
+    )?;
+    let xids = (0..window_count)
+        .map(|index| u32::try_from(index).map(|xid| xid + 1_000))
+        .collect::<Result<Vec<_>, _>>()?;
+    let inputs = xids
+        .iter()
+        .map(|xid| raw(*xid))
+        .collect::<Result<Vec<_>, _>>()?;
+    state.reconcile_raw(
+        &inventory(InventorySource::NetClientListStacking, xids.clone()),
+        &inputs,
+        MonotonicMillis::new(1),
+        ReconcileIdentityPolicy::PreserveContinuity,
+    )?;
+    let target = state
+        .model
+        .live_reference(xids[0])
+        .cloned()
+        .ok_or("missing")?;
+    let capped = state.occlusion_snapshot(&target, MonotonicMillis::new(2))?;
+    assert_eq!(capped.rectangles_above.len(), MAX_ELEMENT_CLICK_OCCLUDERS);
+    assert!(!capped.stacking_complete);
+
+    state.reconcile_raw(
+        &inventory(InventorySource::NetClientList, xids),
+        &inputs,
+        MonotonicMillis::new(3),
+        ReconcileIdentityPolicy::PreserveContinuity,
+    )?;
+    let unproven = state.occlusion_snapshot(&target, MonotonicMillis::new(4))?;
+    assert!(unproven.rectangles_above.is_empty());
+    assert!(!unproven.stacking_complete);
+    assert!(unproven.stacking_epoch > capped.stacking_epoch);
+    Ok(())
+}
+
+#[test]
+fn accessibility_correlations_are_exact_replaceable_and_survive_x11_refresh()
+-> Result<(), Box<dyn Error>> {
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let mut state = ModelState::new(
+        desktop_id,
+        generation,
+        WindowModelLimits::default(),
+        usize::from(MAX_WINDOW_PAGE_LIMIT),
+        1_000,
+        1_000,
+    )?;
+    let input = raw(42)?;
+    let root = inventory(InventorySource::NetClientList, vec![42]);
+    state.reconcile_raw(
+        &root,
+        std::slice::from_ref(&input),
+        MonotonicMillis::new(1),
+        ReconcileIdentityPolicy::PreserveContinuity,
+    )?;
+    let window = state
+        .model
+        .live_reference(42)
+        .cloned()
+        .ok_or("missing window")?;
+
+    let initial_revision = state.model.revision();
+    let correlated_revision = state.replace_accessibility_correlations(
+        initial_revision,
+        std::slice::from_ref(&window),
+        MonotonicMillis::new(2),
+    )?;
+    assert!(matches!(
+        state.replace_accessibility_correlations(
+            initial_revision,
+            std::slice::from_ref(&window),
+            MonotonicMillis::new(2),
+        ),
+        Err(ControlPlaneError::StaleReference { .. })
+    ));
+    let repeated_revision = state.replace_accessibility_correlations(
+        correlated_revision,
+        std::slice::from_ref(&window),
+        MonotonicMillis::new(2),
+    )?;
+    assert_eq!(correlated_revision, repeated_revision);
+
+    state.reconcile_raw(
+        &root,
+        std::slice::from_ref(&input),
+        MonotonicMillis::new(3),
+        ReconcileIdentityPolicy::PreserveContinuity,
+    )?;
+    state.observe_raw(&input, MonotonicMillis::new(4))?;
+    let (_, refreshed) = state.model.snapshot_all(MonotonicMillis::new(4))?;
+    assert!(refreshed[0].has_accessibility_application);
+
+    let mut stale = window.clone();
+    stale.observed_generation += 1;
+    stale.identity_hash = WindowIdentityHash::new("b".repeat(64))?;
+    let current_revision = state.model.revision();
+    assert_eq!(
+        state.replace_accessibility_correlations(
+            current_revision,
+            &[stale],
+            MonotonicMillis::new(5)
+        ),
+        Err(ControlPlaneError::NotFound)
+    );
+    let (_, unchanged) = state.model.snapshot_all(MonotonicMillis::new(5))?;
+    assert!(unchanged[0].has_accessibility_application);
+
+    let current_revision = state.model.revision();
+    let cleared_revision =
+        state.replace_accessibility_correlations(current_revision, &[], MonotonicMillis::new(6))?;
+    assert!(cleared_revision > correlated_revision);
+    let (_, cleared) = state.model.snapshot_all(MonotonicMillis::new(6))?;
+    assert!(!cleared[0].has_accessibility_application);
+    Ok(())
+}
+
+#[test]
 fn malformed_or_over_capacity_reconcile_is_rejected_before_mutation() -> Result<(), Box<dyn Error>>
 {
     let desktop_id = DesktopId::new();
@@ -1552,6 +1818,68 @@ fn actor_is_object_safe_and_shutdown_is_prompt() -> Result<(), Box<dyn Error>> {
     assert_eq!(join.join(), ObservationServiceExit::Stopped);
     assert_eq!(service.health(), ObservationServiceState::Stopped);
     assert!(started.elapsed() < Duration::from_millis(500));
+    Ok(())
+}
+
+#[tokio::test]
+async fn service_exposes_atomic_correlation_and_blocking_queue_head_stacking_views()
+-> Result<(), Box<dyn Error>> {
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let mut lower = raw(42)?;
+    lower.geometry.client_rect =
+        WindowRect::new(CoordinateSpace::RootPhysical, Rect::new(10, 10, 100, 100)?)?;
+    let mut upper = raw(43)?;
+    upper.geometry.client_rect =
+        WindowRect::new(CoordinateSpace::RootPhysical, Rect::new(50, 50, 100, 100)?)?;
+    let backend = ScriptedBackend::new(
+        [Ok(inventory(
+            InventorySource::NetClientListStacking,
+            vec![42, 43],
+        ))],
+        [Ok(lower.clone()), Ok(upper.clone())],
+    );
+    let (service, shutdown, join) = spawn_model_actor(
+        Box::new(backend),
+        desktop_id,
+        generation,
+        WindowModelLimits::default(),
+        ObservationServiceSettings::for_test(),
+    )?;
+
+    let correlation = service.accessibility_correlation_snapshot().await?;
+    assert_eq!(correlation.windows.len(), 2);
+    assert!(
+        correlation
+            .windows
+            .iter()
+            .all(|window| window.model_revision == correlation.revision)
+    );
+    let blocking_correlation =
+        service.accessibility_correlation_snapshot_blocking(Duration::from_millis(250))?;
+    assert_eq!(blocking_correlation.revision, correlation.revision);
+    assert_eq!(
+        blocking_correlation.windows.len(),
+        correlation.windows.len()
+    );
+    let target = correlation
+        .windows
+        .iter()
+        .find(|snapshot| snapshot.window.xid == 42)
+        .map(|snapshot| snapshot.window.clone())
+        .ok_or("missing target")?;
+    let first =
+        service.occlusion_snapshot_exact_blocking(target.clone(), Duration::from_millis(250))?;
+    let second = service.occlusion_snapshot_exact_blocking(target, Duration::from_millis(250))?;
+    assert_eq!(
+        first.rectangles_above,
+        vec![upper.geometry.client_rect.rect]
+    );
+    assert!(first.stacking_complete);
+    assert!(second.stacking_epoch > first.stacking_epoch);
+
+    shutdown.request();
+    assert_eq!(join.join(), ObservationServiceExit::Stopped);
     Ok(())
 }
 

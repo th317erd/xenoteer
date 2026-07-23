@@ -141,6 +141,7 @@ pub struct WindowPointerClickRequest {
     pre_click_dwell_ms: u16,
     press_duration_ms: u16,
     inter_click_interval_ms: u16,
+    expected_root_target: Option<RootPoint>,
 }
 
 /// Policy for a local point outside the selected live client/frame rectangle.
@@ -181,7 +182,18 @@ impl WindowPointerClickRequest {
             pre_click_dwell_ms,
             press_duration_ms,
             inter_click_interval_ms,
+            expected_root_target: None,
         }
+    }
+
+    /// Requires every live window-local resolution to name this exact root pixel.
+    ///
+    /// Ordinary window clicks leave this unset. Element-derived clicks bind it
+    /// to the root point admitted from fresh accessibility geometry.
+    #[must_use]
+    pub const fn with_expected_root_target(mut self, expected: RootPoint) -> Self {
+        self.expected_root_target = Some(expected);
+        self
     }
 
     pub(super) const fn window(self) -> u32 {
@@ -213,6 +225,9 @@ impl WindowPointerClickRequest {
     }
     pub(super) const fn inter_click_interval_ms(self) -> u16 {
         self.inter_click_interval_ms
+    }
+    pub(super) const fn expected_root_target(self) -> Option<RootPoint> {
+        self.expected_root_target
     }
 }
 

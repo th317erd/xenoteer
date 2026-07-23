@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -294,6 +295,78 @@ fn revalidation_is_immediately_before_backend_execution() {
         lock_mutex(&state.inner.calls).as_slice(),
         ["revalidate", "execute"]
     );
+    assert_eq!(join.join(), WindowControlActorExit::Stopped);
+}
+
+#[test]
+fn queued_cancellation_revalidation_prevents_a_late_backend_effect() {
+    let state = FakeState::default();
+    state.block();
+    let factory_state = state.clone();
+    let (handle, join) = spawn_with_backend(2, move || {
+        Ok(FakeBackend {
+            state: factory_state,
+        })
+    })
+    .unwrap();
+
+    let running = handle.try_submit(request(7), || Ok(())).unwrap();
+    state.wait_entered();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let queue_head_cancelled = Arc::clone(&cancelled);
+    let queued = handle
+        .try_submit(request(8), move || {
+            if queue_head_cancelled.load(Ordering::Acquire) {
+                Err(RawWindowRevalidationError::Rejected)
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+    cancelled.store(true, Ordering::Release);
+    state.release();
+
+    running.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(
+        queued.recv_timeout(WAIT).unwrap().unwrap_err().kind,
+        WindowControlActorFailureKind::RevalidationRejected
+    );
+    assert_eq!(lock_mutex(&state.inner.calls).as_slice(), ["execute"]);
+    assert_eq!(join.join(), WindowControlActorExit::Stopped);
+}
+
+#[test]
+fn queued_deadline_revalidation_prevents_a_late_backend_effect() {
+    let state = FakeState::default();
+    state.block();
+    let factory_state = state.clone();
+    let (handle, join) = spawn_with_backend(2, move || {
+        Ok(FakeBackend {
+            state: factory_state,
+        })
+    })
+    .unwrap();
+
+    let running = handle.try_submit(request(7), || Ok(())).unwrap();
+    state.wait_entered();
+    let deadline = Instant::now();
+    let queued = handle
+        .try_submit(request(8), move || {
+            if Instant::now() >= deadline {
+                Err(RawWindowRevalidationError::Rejected)
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+    state.release();
+
+    running.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(
+        queued.recv_timeout(WAIT).unwrap().unwrap_err().kind,
+        WindowControlActorFailureKind::RevalidationRejected
+    );
+    assert_eq!(lock_mutex(&state.inner.calls).as_slice(), ["execute"]);
     assert_eq!(join.join(), WindowControlActorExit::Stopped);
 }
 

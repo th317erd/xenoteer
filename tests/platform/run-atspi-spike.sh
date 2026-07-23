@@ -127,4 +127,4 @@ accessibility_bus_address=$(gdbus call --session \
 echo "AT-SPI runtime $XDG_RUNTIME_DIR address $accessibility_bus_address"
 
 XENOTEER_ATSPI_FIXTURE_PID=$fixture_pid \
-    cargo test -j 4 -p xenoteer-atspi --all-features --test probe -- --ignored --test-threads=1
+    cargo test -j 2 -p xenoteer-atspi --all-features --test probe -- --ignored --test-threads=1

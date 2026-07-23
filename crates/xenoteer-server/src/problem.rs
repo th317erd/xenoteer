@@ -194,6 +194,64 @@ impl ApiProblem {
         )
     }
 
+    pub(crate) fn accessibility_resync_required(
+        request_id: RequestId,
+        current_generation: Option<DesktopGeneration>,
+    ) -> Self {
+        Self::control(
+            StatusCode::CONFLICT,
+            ErrorCode::ToolkitProtocolError,
+            "Accessibility resynchronization required",
+            "Accessibility completeness was lost; refresh authoritative state before retrying.",
+            RetryAdvice::AfterResync,
+            ControlMetadata::new(request_id).with_generation(current_generation),
+        )
+    }
+
+    pub(crate) fn ambiguous_accessibility_target(request_id: RequestId) -> Self {
+        Self::control(
+            StatusCode::CONFLICT,
+            ErrorCode::AmbiguousTarget,
+            "Ambiguous accessibility target",
+            "The selector matched more than one accessible element.",
+            RetryAdvice::Never,
+            ControlMetadata::new(request_id),
+        )
+    }
+
+    pub(crate) fn accessibility_query_limit_exceeded(request_id: RequestId) -> Self {
+        Self::control(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::QueryBudgetExceeded,
+            "Accessibility query limit exceeded",
+            "The bounded accessibility query could not complete within its declared limits.",
+            RetryAdvice::Never,
+            ControlMetadata::new(request_id),
+        )
+    }
+
+    pub(crate) fn accessibility_element_not_found(request_id: RequestId) -> Self {
+        Self::control(
+            StatusCode::NOT_FOUND,
+            ErrorCode::ElementNotFound,
+            "Accessible element not found",
+            "The exact generation-fenced accessible element does not exist.",
+            RetryAdvice::Never,
+            ControlMetadata::new(request_id),
+        )
+    }
+
+    pub(crate) fn accessibility_interface_not_supported(request_id: RequestId) -> Self {
+        Self::control(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InterfaceNotSupported,
+            "Accessibility interface not supported",
+            "The target does not expose the required accessibility interface.",
+            RetryAdvice::Never,
+            ControlMetadata::new(request_id),
+        )
+    }
+
     pub(crate) fn command_id_conflict(request_id: RequestId) -> Self {
         Self::control(
             StatusCode::CONFLICT,

@@ -1,5 +1,7 @@
 use super::*;
 
+use std::sync::atomic::AtomicUsize;
+
 use xenoteer_protocol::{
     Rect, WindowAtomName, WindowGeometry, WindowIdentityHash, WindowMapState, WindowMetadata,
     WindowObservedState, WindowProcessConfidence, WindowProcessCorrelation,
@@ -124,6 +126,42 @@ fn window_mutations_are_cancellable_completions_with_conservative_effects() {
             effect: CommandEffect::AfterEffect,
         }
     );
+}
+
+#[test]
+fn physical_activation_cancellation_during_revalidation_denies_the_effect_boundary() {
+    let cancellation = CancellationToken::new();
+    let fence = WindowMutationFence::physical(
+        cancellation.clone(),
+        Instant::now() + Duration::from_secs(1),
+    );
+    let admitted_effects = AtomicUsize::new(0);
+    let result = revalidate_at_window_effect_boundary(&fence, || {
+        cancellation.cancel();
+        Ok(())
+    });
+    if result.is_ok() {
+        admitted_effects.fetch_add(1, Ordering::Relaxed);
+    }
+    assert_eq!(result, Err(RawWindowRevalidationError::Rejected));
+    assert_eq!(admitted_effects.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn expired_physical_activation_deadline_denies_work_before_revalidation_or_effect() {
+    let fence = WindowMutationFence::physical(CancellationToken::new(), Instant::now());
+    let revalidations = AtomicUsize::new(0);
+    let admitted_effects = AtomicUsize::new(0);
+    let result = revalidate_at_window_effect_boundary(&fence, || {
+        revalidations.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    });
+    if result.is_ok() {
+        admitted_effects.fetch_add(1, Ordering::Relaxed);
+    }
+    assert_eq!(result, Err(RawWindowRevalidationError::Rejected));
+    assert_eq!(revalidations.load(Ordering::Relaxed), 0);
+    assert_eq!(admitted_effects.load(Ordering::Relaxed), 0);
 }
 
 #[test]

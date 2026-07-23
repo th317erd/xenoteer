@@ -13,6 +13,7 @@ sudo scripts/container/build.sh
 sudo scripts/container/build-desktop-app-fixture.sh
 sudo scripts/container/test-desktop-app-image.sh xenoteer:desktop-apps-test
 sudo scripts/container/test-phase4-live-fixtures.py xenoteer:desktop-apps-test
+sudo scripts/container/test-phase5-atspi-live.py xenoteer:desktop-apps-test
 ```
 
 Both builds use the Debian snapshot recorded in `container/locks/release.lock`.
@@ -85,6 +86,14 @@ root/window PNG capture through private artifact range/download/delete. The two
 small AT-SPI/GTK helpers emit only content length and digest evidence; expected
 clipboard and text bodies are never printed. Every named fixture is mandatory,
 so a stale fixture image or unavailable application fails rather than skipping.
+Exact application paste is asserted for GTK3, Qt6, Chromium, and Firefox.
+QtWebEngine is still mandatory for initial editable-text, window, AT-SPI,
+sandbox, and capture checks, but the runner emits an explicit isolated skip for
+its empirically reproduced QtWebEngine 6.8.2/PyQt 6.9 X11
+forced-accessibility duplicate-paste defect. Its HTML input lacks AT-SPI
+EditableText, so semantic insertion is not a
+truthful fallback; see `plans/05-keyboard-and-clipboard.md` for the evidence and
+re-enable criteria.
 
 The fixture image should normally be rebuilt from the current production image
 before this gate runs. For local diagnosis of an intentionally stale cached
@@ -92,3 +101,86 @@ fixture layer, `XENOTEERD_BINARY_OVERRIDE` may name an executable current
 `xenoteerd` binary; the runner mounts that single binary read-only and still
 requires every desktop fixture. CI and release qualification must use a
 coherent freshly derived image and leave this override unset.
+
+## Phase 5 AT-SPI live gate
+
+Phase 5 release qualification uses one freshly built desktop-app fixture
+container and leaves `XENOTEER_TEST_DAEMON_BINARY` unset. The override exists
+only to diagnose a stale local image and is never qualification evidence. The
+runner resolves both derived and recorded base tags to immutable image IDs,
+rechecks the rootfs layer prefix, and applies hard limits of 2 CPUs, 6 GiB RAM,
+512 PIDs, and 4 GiB shared memory. Docker must be rootless or the command must
+run as root so the API token bind mount has the same ownership contract as
+production startup.
+
+The gate covers GTK3 and Qt6 application restart fencing, protected text
+redaction, Chromium and Firefox document-reload reminting, and a 4,096-row
+materialized stress surface. The standard GTK3 and Qt6 fixtures cover native
+virtualized controls separately; the stress surface is intentionally
+materialized so every stable row can be traversed and paginated. A separate
+valid depth-24 tree is queried with `max_depth=8` to prove the public
+`query_budget_exceeded` boundary.
+
+The pressure cases also cover AT-SPI bus loss/reconnect without a desktop-
+generation change, a bounded 5,000-mutation producer with a slow subscriber,
+and isolation of an application that exposes a 70,000-byte accessible name
+while a healthy GTK sibling remains queryable. Bad-parent and cyclic-topology
+handling are bounded model/unit tests; the live fixture's self-relation is not
+claimed as relation-hydration coverage. Every live pressure case must leave the
+daemon responsive, avoid OOM termination, recover authoritative accessibility
+state, and keep token/text canaries out of logs.
+
+Some toolkit accessibility bridges do not re-register after the accessibility
+bus is replaced. The reconnect proof therefore rejects the old reference,
+relaunches a controlled toolkit client, and requires a fresh AT-SPI-generation
+reference while the desktop generation remains unchanged. The event-flood
+recovery uses the same controlled-relaunch rule when its producer retained the
+dead bridge connection.
+
+GTK3 and Qt6 also exercise the authenticated control exit gate through the
+reviewed Phase 3 WebSocket client. One renewable exclusive lease drives semantic
+invoke, focus, value, protected set/insert text, and generic `text.insert` with
+`strategy=auto` constrained to the semantic policy. Qt supplies reliable
+selection readback; GTK exercises the operation but accepts an explicit
+unsupported/no-effect or dispatched-unsupported outcome when its bridge cannot
+provide reliable post-read evidence. Scroll must either return bounded
+before/after geometry when the toolkit exposes the AT-SPI operation or an honest
+no-effect unsupported result; the gate does not pretend that every standard
+widget is scrollable. A separate physical element click must carry the exact
+correlated window birth, at least strong non-conflicting correlation, fresh
+geometry, a smooth 250 ms pointer path, and a distinct physical outcome with
+`pointer_interpolated=true` and effect stage
+`element_physically_clicked`; semantic results are required to retain their own
+operation-specific outcomes and effect stages.
+
+Run the coherent gate as follows. The timeout and low-priority wrappers are
+optional but recommended on shared development machines:
+
+```sh
+sudo scripts/container/build.sh
+sudo scripts/container/build-desktop-app-fixture.sh
+sudo scripts/container/test-desktop-app-image.sh xenoteer:desktop-apps-test
+sudo nice -n 15 ionice -c 3 timeout 25m \
+  scripts/container/test-phase5-atspi-live.py xenoteer:desktop-apps-test
+```
+
+The coherent no-override Phase 5 qualification passed with production image
+`sha256:68508e98bb1f7a0995e96b4b93499cced7247fa7a99f90652c19abec2a52dafb`
+and exact derived fixture image
+`sha256:1733ddadd8d2235c42ec518bbc06d2053e6eded9d6f4cebd6999708f9470e934`.
+The production, desktop matrix, Phase 4 API, and Phase 5 AT-SPI gates all used
+the two-CPU policy and left their daemon overrides unset.
+
+Source/package verification should retain the repository's shared heavy-build
+lock and two-job limit:
+
+```sh
+timeout 5m flock /tmp/codex/xenoteer-heavy-build.lock \
+  nice -n 15 ionice -c 3 env CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 \
+  cargo test -p xenoteer-atspi --all-features --locked
+
+timeout 10m flock /tmp/codex/xenoteer-heavy-build.lock \
+  nice -n 15 ionice -c 3 env CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 \
+  cargo test --locked -p xenoteerd \
+    application_invalidation_cache_change_precedes_marker_without_duplicate_removals
+```

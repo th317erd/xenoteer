@@ -2,6 +2,11 @@
 
 #![forbid(unsafe_code)]
 
+mod accessibility_events;
+mod accessibility_plane;
+mod accessibility_runtime;
+#[cfg(test)]
+mod accessibility_runtime_tests;
 mod artifact_service;
 mod capability_monitor;
 mod clipboard_events;
@@ -14,6 +19,7 @@ mod observation_plane;
 mod process_manager;
 mod runtime_capabilities;
 mod screenshot_service;
+mod semantic_actions;
 mod shutdown;
 
 use std::{fs, net::SocketAddr, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
@@ -44,6 +50,7 @@ use xenoteer_x11::{
 };
 
 use crate::{
+    accessibility_runtime::{AccessibilityRuntimeError, spawn_live_accessibility_runtime},
     artifact_service::{
         ArtifactRetentionPolicy, ArtifactUploadTimeoutPolicy, RetentionPolicyError,
         StoreArtifactService, UploadTimeoutPolicyError,
@@ -227,6 +234,15 @@ async fn run() -> Result<(), DaemonError> {
         Arc::clone(&artifact_service),
         BrokerClient::new(DEFAULT_BROKER_SOCKET),
     );
+    let accessibility_event_sink: Arc<dyn WindowEventSink> = window_event_sink.clone();
+    let accessibility_runtime = spawn_live_accessibility_runtime(
+        config.accessibility(),
+        desktop_id,
+        desktop_generation,
+        accessibility_event_sink,
+    )?;
+    let accessibility_plane = accessibility_runtime.plane();
+    let accessibility_reader = accessibility_runtime.reader();
 
     let readiness = ReadinessHandle::new(ReadinessSnapshot::new(
         DesktopReadiness::Booting,
@@ -253,26 +269,30 @@ async fn run() -> Result<(), DaemonError> {
             window_control_handle.clone(),
             operation_backend_reader,
             window_capability_reader,
+            accessibility_reader,
         ),
     )?;
     let window_control_runtime = control_plane::WindowControlRuntime::new(
         window_control_handle.clone(),
         Arc::clone(&observation_service),
     );
+    let semantic_runtime = accessibility_runtime.semantic_runtime();
     let clipboard_runtime = control_plane::ClipboardRuntime::new(
         clipboard_handle.clone(),
         Arc::clone(&artifact_service),
         Arc::clone(&observation_service),
         window_control_runtime,
         desktop_input,
+        Some(semantic_runtime.clone()),
         desktop_id,
         desktop_generation,
     );
-    let coordinator = control_plane::spawn_with_clipboard_runtime(
+    let coordinator = control_plane::spawn_with_accessibility_runtime(
         &config,
         desktop_id,
         desktop_generation,
         clipboard_runtime,
+        semantic_runtime,
     )?;
     window_event_sink.bind(coordinator.event_ingress())?;
     let clipboard_event_relay = spawn_clipboard_event_relay(
@@ -302,6 +322,7 @@ async fn run() -> Result<(), DaemonError> {
         desktop_generation,
     ));
     let services = ApiServices::new(coordinator.control(), observation_service)
+        .with_accessibility_plane(accessibility_plane)
         .with_artifact_service(artifact_service)
         .with_clipboard_read_service(clipboard_read_service)
         .with_screenshot_service(screenshot_service);
@@ -324,6 +345,7 @@ async fn run() -> Result<(), DaemonError> {
     let signal_window_control_shutdown = window_control_handle.clone();
     let signal_capture_shutdown = capture_handle.clone();
     let signal_clipboard_shutdown = clipboard_handle.clone();
+    let signal_accessibility_shutdown = accessibility_runtime.shutdown_handle();
     let monitor_window_control = window_control_handle.clone();
     let monitor_capture = capture_handle.clone();
     let monitor_clipboard = clipboard_handle.clone();
@@ -366,6 +388,7 @@ async fn run() -> Result<(), DaemonError> {
         let _ = signal_window_control_shutdown.shutdown();
         let _ = signal_capture_shutdown.shutdown();
         let _ = signal_clipboard_shutdown.shutdown();
+        signal_accessibility_shutdown.request();
         signal_observation_shutdown.request();
     })
     .await;
@@ -374,6 +397,7 @@ async fn run() -> Result<(), DaemonError> {
     let operation_backend_monitor_result = operation_backend_monitor.shutdown().await;
     let clipboard_event_result = clipboard_event_relay.shutdown().await;
     let coordinator_result = coordinator.shutdown().await;
+    let accessibility_result = accessibility_runtime.shutdown().await;
     let _ = window_control_handle.shutdown();
     let _ = capture_handle.shutdown();
     let _ = clipboard_handle.shutdown();
@@ -445,6 +469,16 @@ async fn run() -> Result<(), DaemonError> {
     ));
     tracing::info!("clipboard actor stopped");
     tracing::info!("capture actor stopped");
+    if accessibility_result.actor_exit != Some(xenoteer_atspi::AtspiActorExit::Stopped)
+        || !accessibility_result.mirror_stopped
+    {
+        tracing::warn!(
+            ?accessibility_result,
+            "accessibility runtime stopped incompletely"
+        );
+    } else {
+        tracing::info!("accessibility runtime stopped");
+    }
     tracing::info!("xenoteerd stopped");
     Ok(())
 }
@@ -768,6 +802,8 @@ enum DaemonError {
     TransportLimits(#[from] TransportLimitError),
     #[error(transparent)]
     RuntimeCapabilities(#[from] RuntimeCapabilityError),
+    #[error(transparent)]
+    AccessibilityRuntime(#[from] AccessibilityRuntimeError),
     #[error(transparent)]
     WindowCapabilityMonitor(#[from] WindowCapabilityMonitorError),
     #[error(transparent)]

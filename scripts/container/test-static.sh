@@ -46,9 +46,12 @@ required=(
   scripts/container/test-phase4-event-flood.py
   scripts/container/test-phase4-event-flood.sh
   scripts/container/test-phase4-live-fixtures.py
+  scripts/container/test-phase5-atspi-live.py
   fixtures/x11/src/bin/x11-window-churn.rs
   container/rootfs/usr/share/xenoteer/fixtures/desktop-apps/phase4-atspi-text.py
   container/rootfs/usr/share/xenoteer/fixtures/desktop-apps/phase4-clipboard.py
+  container/rootfs/usr/share/xenoteer/fixtures/desktop-apps/phase5-atspi-stress.py
+  container/rootfs/usr/share/xenoteer/fixtures/desktop-apps/phase5-chromium-reload.py
   scripts/container/test-idle-soak.sh
   scripts/container/test-viewer-denial.sh
   container/spikes/novnc/tests/test_rfb_websocket_probe.py
@@ -77,6 +80,14 @@ for phase4_python in \
     "$phase4_python"
   grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' "$phase4_python"
 done
+for phase5_python in \
+  scripts/container/test-phase5-atspi-live.py \
+  container/rootfs/usr/share/xenoteer/fixtures/desktop-apps/phase5-atspi-stress.py \
+  container/rootfs/usr/share/xenoteer/fixtures/desktop-apps/phase5-chromium-reload.py; do
+  python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \
+    "$phase5_python"
+  grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' "$phase5_python"
+done
 bash -n scripts/container/test-phase4-event-flood.sh
 grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
   scripts/container/test-phase4-event-flood.sh
@@ -99,8 +110,20 @@ grep -Fq 'scripts/container/test-phase4-live-fixtures.py xenoteer:desktop-apps-t
   .github/workflows/ci.yml
 grep -Fq 'scripts/container/test-phase4-event-flood.sh xenoteer:phase2' \
   .github/workflows/ci.yml
+grep -Fq 'scripts/container/test-phase5-atspi-live.py xenoteer:desktop-apps-test' \
+  .github/workflows/ci.yml
+if grep -Fq 'XENOTEER_TEST_DAEMON_BINARY' .github/workflows/ci.yml; then
+  printf 'CI Phase 5 acceptance must test the exact immutable image\n' >&2
+  exit 1
+fi
+grep -Fq '"--cpus",' scripts/container/test-phase5-atspi-live.py
+grep -Fq '"--memory",' scripts/container/test-phase5-atspi-live.py
+grep -Fq '"--pids-limit",' scripts/container/test-phase5-atspi-live.py
+grep -Fq '"--shm-size",' scripts/container/test-phase5-atspi-live.py
+grep -Fq '2000000000 6442450944 512 4294967296' \
+  scripts/container/test-phase5-atspi-live.py
 grep -Fq 'timeout-minutes: 10' .github/workflows/ci.yml
-grep -Fq 'build --quiet --release --locked --jobs 4' \
+grep -Fq 'build --quiet --release --locked --jobs 2' \
   scripts/container/test-phase4-event-flood.sh
 grep -Fq -- '--cpus 2' scripts/container/test-phase4-event-flood.sh
 if grep -Fq 'XENOTEERD_BINARY_OVERRIDE' .github/workflows/ci.yml; then
@@ -329,8 +352,36 @@ grep -Fq 'critical-shutdown-claimed' \
   container/rootfs/usr/local/libexec/xenoteer/finish-critical
 grep -Eq '^exit 125$' \
   container/rootfs/usr/local/libexec/xenoteer/finish-critical
+# The static assertion requires the literal variable.
+# shellcheck disable=SC2016
+grep -Fq 'maintenance_marker=$maintenance_parent/$service' \
+  container/rootfs/usr/local/libexec/xenoteer/finish-critical
 grep -Fq '/command/s6-svstat -o wantedup .' \
   container/rootfs/usr/local/libexec/xenoteer/finish-critical
+grep -Fq 'parent_attributes" = 0:0:700' \
+  container/rootfs/usr/local/libexec/xenoteer/finish-critical
+grep -Fq 'marker_attributes" = 0:0:600' \
+  container/rootfs/usr/local/libexec/xenoteer/finish-critical
+# These assertions require the literal shell variables.
+# shellcheck disable=SC2016
+grep -Fq '[ ! -L "$maintenance_parent" ]' \
+  container/rootfs/usr/local/libexec/xenoteer/finish-critical
+# shellcheck disable=SC2016
+grep -Fq '[ ! -L "$maintenance_marker" ]' \
+  container/rootfs/usr/local/libexec/xenoteer/finish-critical
+grep -Fq '"-wD",' scripts/container/test-phase5-atspi-live.py
+grep -Fq '"12000",' scripts/container/test-phase5-atspi-live.py
+grep -Fq 'state == ["false", "false"]' scripts/container/test-phase5-atspi-live.py
+# The static ordering assertion requires the literal shell variable.
+# shellcheck disable=SC2016
+if [[ $(grep -nF 'maintenance_marker=$maintenance_parent/$service' \
+    container/rootfs/usr/local/libexec/xenoteer/finish-critical | cut -d: -f1) \
+    -ge $(grep -nF '/command/s6-svstat -o wantedup .' \
+    container/rootfs/usr/local/libexec/xenoteer/finish-critical | cut -d: -f1) ]]; then
+  printf 'AT-SPI maintenance must be consumed before supervision intent is classified\n' >&2
+  exit 1
+fi
+grep -Fq 'rm -f /usr/share/dbus-1/services/org.a11y.Bus.service' Dockerfile
 if [[ -e container/rootfs/etc/s6-overlay/s6-rc.d/orderly-shutdown ]]; then
   printf 'readiness-dependent orderly-shutdown marker must not be present\n' >&2
   exit 1

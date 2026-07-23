@@ -99,6 +99,38 @@ fn protocol_buttons_and_motion_curves_map_without_backend_guessing() {
         .unwrap_or_else(|_| unreachable!("fixed options are valid"));
     assert_eq!(options.curve(), MotionCurve::Smooth);
     assert_eq!(options.duration_ms(), Some(25));
+
+    let automatic = input_motion_options(PointerCurve::Linear, None, MotionPolicy::default())
+        .unwrap_or_else(|_| unreachable!("automatic interpolation is valid"));
+    assert_eq!(automatic.curve(), MotionCurve::Linear);
+    assert_eq!(automatic.duration_ms(), None);
+}
+
+#[test]
+fn later_multi_click_precondition_failure_is_never_retryable_after_one_click() {
+    let mut partial = failure(InputFailureKind::TargetStale);
+    partial.events_emitted = 2;
+    partial.completed_units = 1;
+    let mapped = map_physical_input_failure(
+        partial,
+        Some(PhysicalClickPreconditionIssue::ResourceExhausted),
+        EffectStage::None,
+    );
+    let RuntimeResult::Failure(mapped) = mapped else {
+        unreachable!("partial multi-click unexpectedly succeeded");
+    };
+    assert_eq!(mapped.effect_stage, EffectStage::PointerClicked);
+    assert_eq!(mapped.retry, RetryAdvice::Never);
+}
+
+#[test]
+fn post_scroll_pre_input_failure_is_never_retryable() {
+    let mapped = resource_exhausted().preserve_prior_effect(EffectStage::SemanticActionDispatched);
+    let RuntimeResult::Failure(mapped) = mapped else {
+        unreachable!("post-scroll queue failure unexpectedly succeeded");
+    };
+    assert_eq!(mapped.effect_stage, EffectStage::SemanticActionDispatched);
+    assert_eq!(mapped.retry, RetryAdvice::Never);
 }
 
 #[test]

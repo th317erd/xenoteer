@@ -1,0 +1,391 @@
+{
+  "$defs": {
+    "AccessibilityEventDetail": {
+      "properties": {
+        "bounds": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rect"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "child": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ElementRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "property": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ElementState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccessibilityTextEventDetail"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AccessibilityEventKind": {
+      "enum": [
+        "element_created",
+        "element_removed",
+        "state_changed",
+        "property_changed",
+        "children_changed",
+        "active_descendant_changed",
+        "focus_changed",
+        "window_activated",
+        "window_deactivated",
+        "window_created",
+        "window_destroyed",
+        "text_inserted",
+        "text_deleted",
+        "text_caret_moved",
+        "text_selection_changed",
+        "value_changed",
+        "selection_changed",
+        "bounds_changed",
+        "visible_data_changed",
+        "cache_added",
+        "cache_removed",
+        "resync_required"
+      ],
+      "type": "string"
+    },
+    "AccessibilityIdentityHash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "AccessibilityRawSource": {
+      "properties": {
+        "bus_name": {
+          "$ref": "#/$defs/AtspiBusName"
+        },
+        "object_path": {
+          "$ref": "#/$defs/AtspiObjectPath"
+        }
+      },
+      "required": [
+        "bus_name",
+        "object_path"
+      ],
+      "type": "object"
+    },
+    "AccessibilityResyncReason": {
+      "enum": [
+        "actor_signal",
+        "generation_changed",
+        "event_gap",
+        "event_queue_overflow"
+      ],
+      "type": "string"
+    },
+    "AccessibilityRevision": {
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "AccessibilityTextEventDetail": {
+      "properties": {
+        "content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "length": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "redacted": {
+          "type": "boolean"
+        },
+        "start": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "length",
+        "redacted"
+      ],
+      "type": "object"
+    },
+    "ApplicationRef": {
+      "properties": {
+        "app_instance_generation": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "atspi_generation": {
+          "$ref": "#/$defs/AtspiGeneration"
+        },
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration"
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId"
+        },
+        "identity_hash": {
+          "$ref": "#/$defs/AccessibilityIdentityHash"
+        },
+        "root_object_path": {
+          "$ref": "#/$defs/AtspiObjectPath"
+        },
+        "unique_bus_name": {
+          "$ref": "#/$defs/AtspiBusName"
+        }
+      },
+      "required": [
+        "desktop_id",
+        "desktop_generation",
+        "atspi_generation",
+        "unique_bus_name",
+        "root_object_path",
+        "app_instance_generation",
+        "identity_hash"
+      ],
+      "type": "object"
+    },
+    "AtspiBusName": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "AtspiGeneration": {
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "AtspiObjectPath": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    },
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ElementRef": {
+      "properties": {
+        "application": {
+          "$ref": "#/$defs/ApplicationRef"
+        },
+        "atspi_generation": {
+          "$ref": "#/$defs/AtspiGeneration"
+        },
+        "cache_sequence": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration"
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId"
+        },
+        "object_identity_hash": {
+          "$ref": "#/$defs/AccessibilityIdentityHash"
+        },
+        "object_path": {
+          "$ref": "#/$defs/AtspiObjectPath"
+        }
+      },
+      "required": [
+        "desktop_id",
+        "desktop_generation",
+        "atspi_generation",
+        "application",
+        "object_path",
+        "object_identity_hash",
+        "cache_sequence"
+      ],
+      "type": "object"
+    },
+    "ElementState": {
+      "enum": [
+        "active",
+        "busy",
+        "checked",
+        "defunct",
+        "editable",
+        "enabled",
+        "expandable",
+        "expanded",
+        "focusable",
+        "focused",
+        "indeterminate",
+        "modal",
+        "multi_selectable",
+        "opaque",
+        "pressed",
+        "protected",
+        "read_only",
+        "required",
+        "selectable",
+        "selected",
+        "sensitive",
+        "showing",
+        "single_line",
+        "stale",
+        "transient",
+        "visible",
+        "visited"
+      ],
+      "type": "string"
+    },
+    "Rect": {
+      "description": "A signed origin and non-empty unsigned extent.",
+      "properties": {
+        "height": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "x": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "y": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "atspi_generation": {
+      "$ref": "#/$defs/AtspiGeneration"
+    },
+    "cache_sequence": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "desktop_generation": {
+      "$ref": "#/$defs/DesktopGeneration"
+    },
+    "desktop_id": {
+      "$ref": "#/$defs/DesktopId"
+    },
+    "detail": {
+      "$ref": "#/$defs/AccessibilityEventDetail"
+    },
+    "kind": {
+      "$ref": "#/$defs/AccessibilityEventKind"
+    },
+    "raw_source": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AccessibilityRawSource"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "resync_reason": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AccessibilityResyncReason"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "revision": {
+      "$ref": "#/$defs/AccessibilityRevision"
+    },
+    "source": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ElementRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source_stale": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "desktop_id",
+    "desktop_generation",
+    "atspi_generation",
+    "kind",
+    "detail",
+    "revision",
+    "cache_sequence",
+    "source_stale"
+  ],
+  "title": "AccessibilityEvent",
+  "type": "object"
+}

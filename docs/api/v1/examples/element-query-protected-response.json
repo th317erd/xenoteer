@@ -1,0 +1,95 @@
+{
+  "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
+  "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+  "atspi_generation": 4,
+  "snapshot_revision": 81,
+  "order": "role_then_name",
+  "elements": [
+    {
+      "snapshot": {
+        "ref": {
+          "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
+          "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+          "atspi_generation": 4,
+          "application": {
+            "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
+            "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+            "atspi_generation": 4,
+            "unique_bus_name": ":1.42",
+            "root_object_path": "/org/a11y/atspi/accessible/root",
+            "app_instance_generation": 2,
+            "identity_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "object_path": "/org/a11y/atspi/accessible/password",
+          "object_identity_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "cache_sequence": 77
+        },
+        "parent": null,
+        "index_in_parent": 3,
+        "child_count": 0,
+        "role": {
+          "role": "password_text",
+          "raw_name": "password text",
+          "raw_numeric": 66
+        },
+        "name": "Password",
+        "description": null,
+        "accessible_id": null,
+        "locale": "en-US",
+        "states": [
+          "editable",
+          "enabled",
+          "focusable",
+          "protected",
+          "sensitive",
+          "showing",
+          "single_line",
+          "visible"
+        ],
+        "interfaces": ["accessible", "component", "editable_text", "text"],
+        "actions": [],
+        "value": null,
+        "text": {
+          "character_count": 12,
+          "caret_offset": 12,
+          "selections": [],
+          "content": null,
+          "content_truncated": false,
+          "protected": true
+        },
+        "component": {
+          "coordinate_space": "atspi_screen",
+          "extents": {"x": 220, "y": 180, "width": 320, "height": 32},
+          "layer": "widget",
+          "z_order": 0,
+          "alpha": 255
+        },
+        "attributes": [],
+        "relations": [],
+        "window_correlation": {
+          "window": {
+            "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
+            "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+            "xid": 4194307,
+            "observed_generation": 3,
+            "identity_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          },
+          "confidence": "strong",
+          "evidence": [
+            {"signal": "process_id", "matched": true, "detail": null},
+            {"signal": "top_level_extents", "matched": true, "detail": null}
+          ],
+          "conflicting_evidence": false
+        },
+        "revision": 81,
+        "completeness": "complete",
+        "truncated": false,
+        "warnings": []
+      }
+    }
+  ],
+  "next_cursor": null,
+  "visited_nodes": 37,
+  "truncated": false,
+  "warnings": []
+}

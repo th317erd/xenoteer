@@ -75,17 +75,53 @@ item, not cleanup work after implementation.
 - [x] Bring OpenAPI/public route documentation up to the implemented Phase-4 API.
 - [x] Run the GTK/Qt/browser/XFCE live clipboard, window, and capture fixture
   matrix; do not substitute fake/unit coverage for these gates.
+- [ ] Re-enable exact clipboard insertion for QtWebEngine after upstream Qt
+  fixes its X11 accessibility-path duplicate-paste defect or after Xenoteer has
+  a truthful toolkit-specific DOM adapter. Keep this isolated exception from
+  weakening exact postconditions for GTK3, Qt6, Chromium, or Firefox.
 - [x] Run targeted, workspace, live-X11, image, security, clippy, rustdoc,
   formatting, license, and adversarial review gates with explicit timeouts.
 - [x] Commit the verified Phase 4 boundary locally.
 
+## Phase 5: accessibility semantics and semantic actions
+
+- [x] Define strict ElementRef, snapshot, selector, query, wait, event, action,
+  correlation, and capability contracts with protected-field redaction rules.
+- [x] Add pure bounded accessibility identity/cache/query/wait models, including
+  deterministic traversal, cycles, malformed parents, ambiguity, and budgets.
+- [x] Implement the single-owner AT-SPI actor with independent degraded state,
+  generation fencing, bounded reconnect, explicit shutdown, and stream failure.
+- [x] Implement bounded Cache `GetItems`, incremental updates, lazy traversal,
+  old-Qt compatibility decoding, reconciliation, and resync-on-gap behavior.
+- [x] Integrate daemon accessibility state, authenticated read APIs, pagination,
+  snapshots, race-free waits, normalized events, and live capability evidence.
+- [x] Correlate applications/elements with process and window evidence without
+  authorizing physical effects from weak title/PID evidence alone.
+- [x] Implement cancellable semantic invoke/focus/value/selection/text/scroll
+  actions with exact reference revalidation and bounded postconditions.
+- [x] Complete `text.insert auto`, protected-field policy, and explicit strategy
+  evidence without silently substituting semantic and physical operations.
+- [x] Implement physical `element.click` with activation, scroll, geometry,
+  occlusion, queue-delay revalidation, and interpolated InputActor execution.
+- [x] Pass full workspace all-feature/all-target tests, Clippy, Rustdoc, schema,
+  API-documentation, container-static, dependency, audit, license, and native
+  gates for the Phase 5 source.
+- [x] Pass the bounded diagnostic live gate against the current daemon for
+  GTK3/Qt6 restart fencing, Chromium reload fencing, semantic/physical effects,
+  the 4,096-node materialized surface, depth-budget rejection, oversized-name
+  isolation, bus reconnect, and a 5,000-mutation event flood.
+- [x] Build the coherent exact production and desktop-app fixture images, record
+  their immutable IDs, rerun the 25-minute Phase 5 live/image gate with no
+  daemon override, finish the closure review, and commit the Phase 5 boundary.
+
 ## Later phases
 
-- [ ] Phase 5: accessibility semantics and semantic actions.
 - [ ] Phase 6: SDKs, CLI, recording/replay, compatibility, and operability.
-- [ ] Phase 7: release hardening, reproducibility, documentation, and final gates.
+- [ ] Phase 7: release hardening, reproducibility, documentation, and final
+  gates, including 10,000-node cold-snapshot timing, selector p95, event-lag,
+  cache-RSS, and large-browser soak measurements.
 
 ## Resource policy
 
-- [x] Keep Rust work at `--jobs 4` and `RUST_TEST_THREADS=4` or lower.
+- [x] Keep Rust work at `--jobs 2` and `RUST_TEST_THREADS=2` or lower.
 - [x] Run heavy work with `nice -n 15 ionice -c 3` and a sane timeout.

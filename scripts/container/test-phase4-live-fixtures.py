@@ -1028,7 +1028,7 @@ class ApiClient:
         text_source: dict[str, Any],
         expected_bytes: int,
         expected_mode: str,
-    ) -> None:
+    ) -> list[str]:
         result = self.submit(
             {
                 "type": "text_insert",
@@ -1048,6 +1048,7 @@ class ApiClient:
         clipboard = evidence.get("clipboard", {})
         transfer = clipboard.get("transfer") or {}
         restoration = clipboard.get("restoration", {})
+        requested_targets = clipboard.get("requested_targets")
         if (
             outcome.get("type") != "text_inserted"
             or evidence.get("selected_strategy") != "clipboard"
@@ -1062,6 +1063,8 @@ class ApiClient:
             # restore the previous owner's identity or arbitrary non-text
             # targets. The protocol deliberately reports that honest scope.
             or restoration.get("kind") != "partial_value_copy"
+            or not isinstance(requested_targets, list)
+            or not all(isinstance(target, str) for target in requested_targets)
         ):
             safe_evidence = {
                 "outcome_type": outcome.get("type"),
@@ -1074,11 +1077,13 @@ class ApiClient:
                 "restoration_requested": restoration.get("requested"),
                 "previous_owner_existed": restoration.get("previous_owner_existed"),
                 "restoration_kind": restoration.get("kind"),
+                "requested_targets": requested_targets,
             }
             raise AcceptanceError(
                 "text insertion/paste/restoration evidence did not converge: "
                 + json.dumps(safe_evidence, sort_keys=True)
             )
+        return requested_targets
 
 
 def wait_public_ready(base_url: str, container: LiveContainer) -> None:
@@ -1299,43 +1304,74 @@ def main() -> int:
                         api.exercise_window_manager(window)
                         api.activate(window)
                     container.focus_entry(fixture.entry_name)
-
-                    container.start_clipboard_owner(
-                        container_paths["restore"],
-                        f"/run/user/1000/phase4-{fixture.name}-restore.ready",
-                    )
-                    if fixture.name == "gtk3":
-                        inserted = incr_body
-                        source = {"source": "artifact", "artifact": incr_artifact}
-                        mode = "incr"
-                    else:
-                        inserted = f"-phase4-{fixture.name}".encode("utf-8")
-                        source = {"source": "inline", "text": inserted.decode("utf-8")}
-                        mode = "direct"
-                    expected = directory / f"expected-{fixture.name}.txt"
-                    expected.write_bytes(fixture.initial_text + inserted)
+                    initial = directory / f"initial-{fixture.name}.txt"
+                    initial.write_bytes(fixture.initial_text)
                     container.copy_fixture_file(
-                        expected, f"/run/user/1000/phase4-expected-{fixture.name}.txt"
+                        initial, f"/run/user/1000/phase4-initial-{fixture.name}.txt"
                     )
-                    api.ensure_lease()
-                    api.text_insert(window, source, len(inserted), mode)
-                    container.stop_clipboard_owner()
-                    try:
-                        container.verify_entry(
-                            fixture.entry_name,
+                    container.verify_entry(
+                        fixture.entry_name,
+                        f"/run/user/1000/phase4-initial-{fixture.name}.txt",
+                    )
+
+                    if fixture.name == "qtwebengine":
+                        print(
+                            json.dumps(
+                                {
+                                    "type": "qtwebengine_clipboard_limitation",
+                                    "exact_insert_skipped": True,
+                                    "reason": "forced_accessibility_duplicate_paste",
+                                },
+                                sort_keys=True,
+                            ),
+                            flush=True,
+                        )
+                    else:
+                        container.start_clipboard_owner(
+                            container_paths["restore"],
+                            f"/run/user/1000/phase4-{fixture.name}-restore.ready",
+                        )
+                        if fixture.name == "gtk3":
+                            inserted = incr_body
+                            source = {"source": "artifact", "artifact": incr_artifact}
+                            mode = "incr"
+                        else:
+                            inserted = f"-phase4-{fixture.name}".encode("utf-8")
+                            source = {
+                                "source": "inline",
+                                "text": inserted.decode("utf-8"),
+                            }
+                            mode = "direct"
+                        expected = directory / f"expected-{fixture.name}.txt"
+                        expected.write_bytes(fixture.initial_text + inserted)
+                        container.copy_fixture_file(
+                            expected,
                             f"/run/user/1000/phase4-expected-{fixture.name}.txt",
                         )
-                    except AcceptanceError as error:
-                        raise AcceptanceError(
-                            f"{fixture.name} editable postcondition failed: {error}"
-                        ) from error
-                    restored = api.clipboard_read()
-                    if restored.get("content") != {
-                        "delivery": "inline_text",
-                        "text": inputs["restore"].read_text(encoding="utf-8"),
-                    }:
-                        raise AcceptanceError("clipboard value-copy restoration was not exact")
-                    api.selection_clear()
+                        api.ensure_lease()
+                        requested_targets = api.text_insert(
+                            window, source, len(inserted), mode
+                        )
+                        container.stop_clipboard_owner()
+                        try:
+                            container.verify_entry(
+                                fixture.entry_name,
+                                f"/run/user/1000/phase4-expected-{fixture.name}.txt",
+                            )
+                        except AcceptanceError as error:
+                            raise AcceptanceError(
+                                f"{fixture.name} editable postcondition failed after targets "
+                                f"{requested_targets!r}: {error}"
+                            ) from error
+                        restored = api.clipboard_read()
+                        if restored.get("content") != {
+                            "delivery": "inline_text",
+                            "text": inputs["restore"].read_text(encoding="utf-8"),
+                        }:
+                            raise AcceptanceError(
+                                "clipboard value-copy restoration was not exact"
+                            )
+                        api.selection_clear()
 
                     api.capture(
                         {

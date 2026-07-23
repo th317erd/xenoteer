@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     error::Error,
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 use xenoteer_processd::{
@@ -29,6 +29,41 @@ struct ScriptedPidCorrelator {
 #[derive(Default)]
 struct PendingPidCorrelator {
     calls: Mutex<Vec<Vec<u32>>>,
+}
+
+struct SingleWindowBackend {
+    snapshot: WindowSnapshotInput,
+}
+
+impl RawObservationBackend for SingleWindowBackend {
+    fn reconcile(
+        &mut self,
+        _control: &ModelActorControl,
+        _timeout: std::time::Duration,
+    ) -> Result<RootInventory, RawBackendFailure> {
+        Ok(RootInventory {
+            windows: vec![self.snapshot.window],
+            source: InventorySource::NetClientList,
+            warnings: Vec::new(),
+        })
+    }
+
+    fn snapshot(
+        &mut self,
+        _window: u32,
+        _control: &ModelActorControl,
+        _timeout: std::time::Duration,
+    ) -> Result<WindowSnapshotInput, RawBackendFailure> {
+        Ok(self.snapshot.clone())
+    }
+
+    fn try_event(&mut self) -> Result<Option<ObservationActorEvent>, RawBackendFailure> {
+        Ok(None)
+    }
+
+    fn shutdown(&mut self, _timeout: std::time::Duration) -> ObservationActorExit {
+        ObservationActorExit::Stopped
+    }
 }
 
 impl PidCorrelator for PendingPidCorrelator {
@@ -532,6 +567,47 @@ async fn every_public_observation_response_shape_is_enriched_and_revalidated()
         WindowProcessConfidence::High
     );
     assert_eq!(correlator.calls().len(), 5);
+    Ok(())
+}
+
+#[tokio::test]
+async fn async_internal_correlation_snapshot_uses_real_broker_enrichment_but_blocking_stays_raw()
+-> Result<(), Box<dyn Error>> {
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let managed = process(generation, 101);
+    let correlator = Arc::new(ScriptedPidCorrelator::new([Ok(vec![leader(101, managed)])]));
+    let (service, shutdown, join) = spawn_model_actor_with_correlator(
+        Box::new(SingleWindowBackend {
+            snapshot: raw(42, 101)?,
+        }),
+        desktop_id,
+        generation,
+        WindowModelLimits::default(),
+        ObservationServiceSettings::for_test(),
+        correlator.clone(),
+    )?;
+
+    let enriched = service.accessibility_correlation_snapshot().await?;
+    assert_eq!(enriched.windows.len(), 1);
+    assert_eq!(enriched.windows[0].process.managed_process, Some(managed));
+    assert_eq!(
+        enriched.windows[0].process.confidence,
+        WindowProcessConfidence::High
+    );
+    assert_eq!(correlator.calls(), vec![(generation, vec![101])]);
+
+    let raw_queue_head = service
+        .accessibility_correlation_snapshot_blocking(std::time::Duration::from_millis(250))?;
+    assert_eq!(raw_queue_head.windows.len(), 1);
+    assert_eq!(raw_queue_head.windows[0].process.managed_process, None);
+    assert_eq!(
+        raw_queue_head.windows[0].process.confidence,
+        WindowProcessConfidence::Low
+    );
+
+    shutdown.request();
+    assert_eq!(join.join(), ObservationServiceExit::Stopped);
     Ok(())
 }
 

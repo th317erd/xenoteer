@@ -8,7 +8,7 @@ FROM ${FIXTURE_BUILDER_IMAGE} AS fixture-builder
 WORKDIR /fixture
 COPY fixtures/x11/Cargo.toml fixtures/x11/Cargo.lock ./
 COPY fixtures/x11/src/ src/
-RUN nice -n 10 cargo build --locked --release --jobs 4 \
+RUN nice -n 10 cargo build --locked --release --jobs 2 \
     --bin x11-event-recorder \
     --bin x11-input-driver
 

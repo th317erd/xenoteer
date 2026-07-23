@@ -75,6 +75,10 @@ Before any operation:
 Never auto-run the original selector on a stale reference. That could click a
 different "OK" button in a replacement dialog.
 
+Public element and application references do not have a wall-clock TTL. Their
+validity is fenced by desktop, AT-SPI connection, application-instance, and
+object-birth generations; only opaque pagination cursors expire by time.
+
 ## 4. Cache and discovery
 
 ### 4.1 Initial load
@@ -152,7 +156,7 @@ types directly. Fields:
 - states (enabled, sensitive, focusable, focused, visible, showing, editable,
   selected, checked, expanded, defunct, protected, etc.);
 - supported semantic interfaces;
-- root-physical rectangle and source coordinate system;
+- AT-SPI-screen component rectangle with its explicit coordinate-space label;
 - action names/descriptions/keybindings;
 - value bounds/current/increment;
 - bounded text metadata or content only when requested/authorized;
@@ -162,6 +166,14 @@ types directly. Fields:
 
 Protected text content is redacted. Snapshots do not include full document text
 by default. Strings and arrays have per-field and aggregate limits.
+
+Phase 5 deliberately exposes only `value`, content-free `text_metadata`, and
+`component` snapshot expansions. Action lists, accessible IDs, attributes,
+relations, and text content need a bounded on-demand hydration lane that does
+not issue unbounded per-node D-Bus calls during a 25,000-node query; those fields
+and their dependent predicates are absent from the Phase 5 request schemas.
+The protocol-owned snapshot model retains their output slots for a future
+additive contract.
 
 ## 6. Selectors
 
@@ -183,6 +195,14 @@ Selectors combine normalized predicates:
 Selector evaluation has deterministic traversal (`preorder` by cache child
 index, with path tie-break). Single-target actions fail ambiguity unless the
 caller explicitly supplies an ordering/selection policy.
+
+The implemented Phase 5 selector subset is role, name, description, state,
+interface, value range, parent index, child count, and component intersection.
+Component intersection is evaluated only in explicitly labeled AT-SPI screen
+coordinates and conservatively fails with capability-unavailable if any cached
+Component node lacks fresh bounds, preventing missing evidence from becoming a
+false negative. Accessible-ID, attribute, action, and relation predicates are held
+for the same bounded hydration lane as their snapshot fields.
 
 Avoid browser-CSS terminology. Names such as `query`, `find`, `role`, and
 `subtree` make the abstraction honest. A future browser-specific adapter can
@@ -274,6 +294,11 @@ Supported predicates include exists/gone, state, name/value/text (authorized),
 focus, child count, geometry, and custom selector count. Poll fallback is bounded
 and disclosed when a toolkit fails to emit the expected event.
 
+For Phase 5, text-content waits are reserved with text-content expansion;
+geometry waits are implemented against fresh `atspi_screen` Component bounds.
+Root-physical geometry requires a later explicit desktop-profile transform and
+must not be inferred from raw AT-SPI coordinates.
+
 ## 10. Toolkit/browser compatibility
 
 ### GTK
@@ -282,6 +307,12 @@ Standard widgets should expose AT-SPI through GTK's accessibility stack. Custom
 widgets must implement accessible roles/properties; otherwise use physical/
 visual fallback. GTK 3 and GTK 4 can differ in cache and role structure, so
 fixtures cover both if both ship in the image.
+
+GTK Cache `GetItems` may expose only the currently materialized subset of a
+native virtual control. Phase 5 therefore keeps native GTK/Qt virtualized
+widgets in the standard conformance fixtures, while its deterministic 4,096-row
+pagination stress surface is explicitly materialized and never described as a
+virtualized 4,096-row proof.
 
 ### Qt
 
@@ -303,7 +334,9 @@ through its app API, but third-party apps may need the Chromium flag.
 Use the image's accessibility-enabled profile and verify an application/document
 tree at runtime. Multi-process content objects can be replaced after navigation.
 Version-specific preferences remain image-profile implementation details, not a
-public guarantee.
+public guarantee. Phase 5 live qualification reloads the controlled Firefox
+document and requires the pre-reload reference to be fenced and reminted, just
+as it does for Chromium.
 
 ### Canvas/custom rendering
 
@@ -381,8 +414,19 @@ lists, canvas, and ARIA errors.
 - Chromium/Firefox navigation invalidates document references;
 - accessibility disabled/missing adapter degrades without blocking physical API.
 
-Performance gates include bounded cold snapshot time for 10k nodes, selector p95,
-event lag under churn, and stable cache RSS during large-browser soak.
+The Phase 5 functional pressure cases use a 4,096-node materialized surface, a
+valid depth-24 tree queried with `max_depth=8`, a 5,000-mutation event flood, and
+an isolated 70,000-byte accessible name with a healthy sibling. Malformed
+parent/cycle traversal is bounded model/unit coverage; a live self-relation does
+not prove relation hydration. After accessibility-bus replacement, a toolkit
+process may retain its dead bridge connection, so qualification must fence the
+old reference and relaunch a controlled client before requiring a fresh
+AT-SPI-generation reference without a desktop-generation change.
+
+Quantitative performance qualification is a Phase 7 reliability task, not a
+passed Phase 5 claim. It must measure bounded cold snapshot time for 10,000
+nodes, selector p95, event lag under churn, stable cache RSS, and a large-browser
+soak.
 
 ## 13. Primary references
 

@@ -49,6 +49,38 @@ pub enum ErrorCode {
     CapabilityUnavailable,
     /// The target cannot perform this operation.
     UnsupportedByTarget,
+    /// The application is absent from or unreachable through AT-SPI.
+    ApplicationNotAccessible,
+    /// The exact generation-fenced accessibility element no longer exists.
+    ElementNotFound,
+    /// A selector that required one target matched more than one.
+    AmbiguousTarget,
+    /// The referenced accessibility object reports or behaves as defunct.
+    ElementDefunct,
+    /// The target does not expose the required AT-SPI interface.
+    InterfaceNotSupported,
+    /// The element is not showing in the accessible hierarchy.
+    ElementNotShowing,
+    /// The element is not sensitive/enabled for the requested action.
+    ElementNotSensitive,
+    /// The element is not editable through the required semantic interface.
+    ElementNotEditable,
+    /// The requested semantic action name or index is absent.
+    ActionNotFound,
+    /// Element-to-X11-window correlation is below the required confidence.
+    WeakWindowCorrelation,
+    /// Accessible component geometry is missing, stale, or invalid.
+    ElementGeometryInvalid,
+    /// Occlusion policy rejected the resolved element click point.
+    ElementOccluded,
+    /// Accessibility traversal exhausted its declared query budget.
+    QueryBudgetExceeded,
+    /// A complete requested accessibility snapshot could not fit its budget.
+    SnapshotTruncated,
+    /// The toolkit returned malformed or contradictory AT-SPI data.
+    ToolkitProtocolError,
+    /// The semantic effect completed but its required postcondition failed.
+    SemanticPostconditionFailed,
     /// Work exceeded its deadline before any effect.
     DeadlineExceededBeforeEffect,
     /// Work exceeded its deadline after a partial effect.
@@ -82,6 +114,22 @@ impl ErrorCode {
             Self::ResourceExhausted => "resource_exhausted",
             Self::CapabilityUnavailable => "capability_unavailable",
             Self::UnsupportedByTarget => "unsupported_by_target",
+            Self::ApplicationNotAccessible => "application_not_accessible",
+            Self::ElementNotFound => "element_not_found",
+            Self::AmbiguousTarget => "ambiguous_target",
+            Self::ElementDefunct => "element_defunct",
+            Self::InterfaceNotSupported => "interface_not_supported",
+            Self::ElementNotShowing => "element_not_showing",
+            Self::ElementNotSensitive => "element_not_sensitive",
+            Self::ElementNotEditable => "element_not_editable",
+            Self::ActionNotFound => "action_not_found",
+            Self::WeakWindowCorrelation => "weak_window_correlation",
+            Self::ElementGeometryInvalid => "element_geometry_invalid",
+            Self::ElementOccluded => "element_occluded",
+            Self::QueryBudgetExceeded => "query_budget_exceeded",
+            Self::SnapshotTruncated => "snapshot_truncated",
+            Self::ToolkitProtocolError => "toolkit_protocol_error",
+            Self::SemanticPostconditionFailed => "semantic_postcondition_failed",
             Self::DeadlineExceededBeforeEffect => "deadline_exceeded_before_effect",
             Self::DeadlineExceededAfterEffect => "deadline_exceeded_after_effect",
             Self::RequestOutcomeUnknown => "request_outcome_unknown",
@@ -416,6 +464,42 @@ mod tests {
             serde_json::to_string(&ErrorCode::DeadlineExceededAfterEffect)?,
             r#""deadline_exceeded_after_effect""#
         );
+        Ok(())
+    }
+
+    #[test]
+    fn accessibility_error_codes_use_stable_catalog_wire_names() -> Result<(), serde_json::Error> {
+        let cases = [
+            (
+                ErrorCode::ApplicationNotAccessible,
+                "application_not_accessible",
+            ),
+            (ErrorCode::ElementNotFound, "element_not_found"),
+            (ErrorCode::AmbiguousTarget, "ambiguous_target"),
+            (ErrorCode::ElementDefunct, "element_defunct"),
+            (ErrorCode::InterfaceNotSupported, "interface_not_supported"),
+            (ErrorCode::ElementNotShowing, "element_not_showing"),
+            (ErrorCode::ElementNotSensitive, "element_not_sensitive"),
+            (ErrorCode::ElementNotEditable, "element_not_editable"),
+            (ErrorCode::ActionNotFound, "action_not_found"),
+            (ErrorCode::WeakWindowCorrelation, "weak_window_correlation"),
+            (
+                ErrorCode::ElementGeometryInvalid,
+                "element_geometry_invalid",
+            ),
+            (ErrorCode::ElementOccluded, "element_occluded"),
+            (ErrorCode::QueryBudgetExceeded, "query_budget_exceeded"),
+            (ErrorCode::SnapshotTruncated, "snapshot_truncated"),
+            (ErrorCode::ToolkitProtocolError, "toolkit_protocol_error"),
+            (
+                ErrorCode::SemanticPostconditionFailed,
+                "semantic_postcondition_failed",
+            ),
+        ];
+        for (code, wire) in cases {
+            assert_eq!(code.as_str(), wire);
+            assert_eq!(serde_json::to_string(&code)?, format!("\"{wire}\""));
+        }
         Ok(())
     }
 }

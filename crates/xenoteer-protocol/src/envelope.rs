@@ -8,12 +8,15 @@ use crate::geometry::{StrictPoint, deserialize_strict_point};
 use crate::version::{StrictProtocolVersion, deserialize_strict_protocol_version};
 use crate::{
     ApplicationLaunchCommand, CommandId, ControlLeaseId, DesktopGeneration, DesktopId,
-    InputValidationError, KeyboardChordCommand, KeyboardPressCommand, KeyboardSequenceCommand,
-    Point, PointerClickCommand, PointerCurve, PointerDragCommand, PointerMoveRelativeCommand,
-    PointerScrollCommand, ProcessStatusCommand, ProcessTerminateCommand, ProtocolVersion,
-    RequestId, SelectionClearCommand, SelectionSetCommand, TextInsertCommand, Timestamp,
-    WindowActivateCommand, WindowCloseCommand, WindowMinimizeCommand, WindowMoveResizeCommand,
-    WindowMoveToWorkspaceCommand, WindowSetStateCommand, WindowStackCommand,
+    ElementFocusCommand, ElementInsertTextCommand, ElementInvokeCommand,
+    ElementPhysicalClickCommand, ElementScrollCommand, ElementSelectionCommand,
+    ElementSetTextCommand, ElementSetValueCommand, InputValidationError, KeyboardChordCommand,
+    KeyboardPressCommand, KeyboardSequenceCommand, Point, PointerClickCommand, PointerCurve,
+    PointerDragCommand, PointerMoveRelativeCommand, PointerScrollCommand, ProcessStatusCommand,
+    ProcessTerminateCommand, ProtocolVersion, RequestId, SelectionClearCommand,
+    SelectionSetCommand, TextInsertCommand, Timestamp, WindowActivateCommand, WindowCloseCommand,
+    WindowMinimizeCommand, WindowMoveResizeCommand, WindowMoveToWorkspaceCommand,
+    WindowSetStateCommand, WindowStackCommand,
 };
 
 /// Maximum delay accepted by one XTEST-timed primitive.
@@ -29,6 +32,8 @@ pub const MIN_PHYSICAL_KEYCODE: u8 = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TracePolicy {
+    /// Do not retain structured trace evidence.
+    None,
     /// Retain only normal audit metadata.
     Normal,
     /// Retain bounded diagnostic effect evidence.
@@ -116,7 +121,7 @@ impl KeyboardKeyCommand {
 pub struct InputResetCommand {}
 
 /// A version-one command body.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
     /// Probe command used by the Phase-0 composition skeleton.
@@ -173,6 +178,22 @@ pub enum Command {
     SelectionClear(SelectionClearCommand),
     /// Insert exact UTF-8 through one bounded strategy.
     TextInsert(TextInsertCommand),
+    /// Invoke one semantic AT-SPI action without synthesizing input.
+    ElementInvoke(ElementInvokeCommand),
+    /// Request semantic focus through AT-SPI Component.
+    ElementFocus(ElementFocusCommand),
+    /// Set a semantic Value and verify readback.
+    ElementSetValue(ElementSetValueCommand),
+    /// Mutate an AT-SPI Selection container.
+    ElementSelection(ElementSelectionCommand),
+    /// Replace editable text semantically.
+    ElementSetText(ElementSetTextCommand),
+    /// Insert editable text at an explicit character offset.
+    ElementInsertText(ElementInsertTextCommand),
+    /// Scroll an accessible component semantically.
+    ElementScroll(ElementScrollCommand),
+    /// Resolve current element geometry and execute serialized physical input.
+    ElementPhysicalClick(ElementPhysicalClickCommand),
 }
 
 impl Command {
@@ -204,6 +225,14 @@ impl Command {
             Self::SelectionSet(command) => command.validate().map_err(Into::into),
             Self::SelectionClear(_) => Ok(()),
             Self::TextInsert(command) => command.validate().map_err(Into::into),
+            Self::ElementInvoke(command) => command.validate().map_err(Into::into),
+            Self::ElementFocus(command) => command.validate().map_err(Into::into),
+            Self::ElementSetValue(command) => command.validate().map_err(Into::into),
+            Self::ElementSelection(command) => command.validate().map_err(Into::into),
+            Self::ElementSetText(command) => command.validate().map_err(Into::into),
+            Self::ElementInsertText(command) => command.validate().map_err(Into::into),
+            Self::ElementScroll(command) => command.validate().map_err(Into::into),
+            Self::ElementPhysicalClick(command) => command.validate().map_err(Into::into),
         }
     }
 
@@ -244,30 +273,83 @@ impl Command {
             Self::TextInsert(command) => command
                 .validate_for_desktop(desktop_id, desktop_generation)
                 .map_err(Into::into),
+            Self::ElementInvoke(command) => crate::accessibility_action::validate_command_scope(
+                desktop_id,
+                desktop_generation,
+                &command.element,
+            )
+            .map_err(Into::into),
+            Self::ElementFocus(command) => crate::accessibility_action::validate_command_scope(
+                desktop_id,
+                desktop_generation,
+                &command.element,
+            )
+            .map_err(Into::into),
+            Self::ElementSetValue(command) => crate::accessibility_action::validate_command_scope(
+                desktop_id,
+                desktop_generation,
+                &command.element,
+            )
+            .map_err(Into::into),
+            Self::ElementSelection(command) => crate::accessibility_action::validate_command_scope(
+                desktop_id,
+                desktop_generation,
+                &command.element,
+            )
+            .map_err(Into::into),
+            Self::ElementSetText(command) => crate::accessibility_action::validate_command_scope(
+                desktop_id,
+                desktop_generation,
+                &command.element,
+            )
+            .map_err(Into::into),
+            Self::ElementInsertText(command) => {
+                crate::accessibility_action::validate_command_scope(
+                    desktop_id,
+                    desktop_generation,
+                    &command.element,
+                )
+                .map_err(Into::into)
+            }
+            Self::ElementScroll(command) => crate::accessibility_action::validate_command_scope(
+                desktop_id,
+                desktop_generation,
+                &command.element,
+            )
+            .map_err(Into::into),
+            Self::ElementPhysicalClick(command) => {
+                crate::accessibility_action::validate_command_scope(
+                    desktop_id,
+                    desktop_generation,
+                    &command.element,
+                )
+                .map_err(Into::into)
+            }
             _ => Ok(()),
         }
     }
 
     /// Returns whether command admission requires the exclusive controller lease.
     #[must_use]
-    pub const fn requires_control_lease(&self) -> bool {
-        matches!(
-            self,
+    pub fn requires_control_lease(&self) -> bool {
+        match self {
+            Self::TextInsert(command) => command.requires_control_lease(),
             Self::PointerMove(_)
-                | Self::PointerMoveRelative(_)
-                | Self::PointerClick(_)
-                | Self::PointerDrag(_)
-                | Self::PointerScroll(_)
-                | Self::PointerButtonDown(_)
-                | Self::PointerButtonUp(_)
-                | Self::KeyboardKeyDown(_)
-                | Self::KeyboardKeyUp(_)
-                | Self::KeyboardPress(_)
-                | Self::KeyboardChord(_)
-                | Self::KeyboardSequence(_)
-                | Self::InputReset(_)
-                | Self::TextInsert(_)
-        )
+            | Self::PointerMoveRelative(_)
+            | Self::PointerClick(_)
+            | Self::PointerDrag(_)
+            | Self::PointerScroll(_)
+            | Self::PointerButtonDown(_)
+            | Self::PointerButtonUp(_)
+            | Self::KeyboardKeyDown(_)
+            | Self::KeyboardKeyUp(_)
+            | Self::KeyboardPress(_)
+            | Self::KeyboardChord(_)
+            | Self::KeyboardSequence(_)
+            | Self::InputReset(_)
+            | Self::ElementPhysicalClick(_) => true,
+            _ => false,
+        }
     }
 }
 
@@ -277,7 +359,7 @@ impl Command {
 pub struct DesktopProbeCommand {}
 
 /// A complete command submission envelope.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CommandEnvelope {
     /// Requested protocol version.
@@ -436,6 +518,9 @@ pub enum EnvelopeValidationError {
     /// A clipboard or text command failed bounded-content validation.
     #[error("clipboard command is invalid: {0}")]
     Clipboard(#[from] crate::ClipboardValidationError),
+    /// A semantic or element-derived physical action failed validation.
+    #[error("accessibility action command is invalid: {0}")]
+    Accessibility(#[from] crate::AccessibilityActionValidationError),
     /// A nested reference belongs to another desktop lifetime.
     #[error("command reference belongs to another desktop lifetime")]
     ReferenceScope,
@@ -631,6 +716,8 @@ mod tests {
             },
             strategy: crate::TextStrategy::Physical,
             clipboard_options: None,
+            semantic_options: None,
+            auto_policy: None,
         });
         assert_eq!(
             CommandEnvelope::new(

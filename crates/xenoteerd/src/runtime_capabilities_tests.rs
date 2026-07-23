@@ -13,6 +13,7 @@ fn baseline() -> RuntimeCapabilitySnapshot {
         capture: ProjectedStatus::AVAILABLE,
         clipboard: ProjectedStatus::AVAILABLE,
         viewer: ProjectedStatus::AVAILABLE,
+        accessibility: ProjectedStatus::AVAILABLE,
         window_actor: ProjectedStatus::AVAILABLE,
         window_capabilities: WindowCapabilitySnapshot {
             evidence_state: WindowCapabilityEvidenceState::Current,
@@ -32,6 +33,69 @@ fn baseline() -> RuntimeCapabilitySnapshot {
             }),
         },
     }
+}
+
+#[test]
+fn accessibility_capability_requires_both_actor_health_and_ready_mirror()
+-> Result<(), RuntimeCapabilityError> {
+    let mut snapshot = baseline();
+    let available = build_report(&snapshot)?;
+    assert_eq!(
+        status(&available, "accessibility.atspi"),
+        Some(CapabilityStatus::Available)
+    );
+
+    snapshot.accessibility = ProjectedStatus::degraded("accessibility_mirror_rebuilding");
+    let rebuilding = build_report(&snapshot)?;
+    assert_eq!(
+        status(&rebuilding, "accessibility.atspi"),
+        Some(CapabilityStatus::Degraded)
+    );
+    assert_eq!(
+        reason(&rebuilding, "accessibility.atspi"),
+        Some(Some("accessibility_mirror_rebuilding"))
+    );
+
+    snapshot.accessibility =
+        ProjectedStatus::new(CapabilityStatus::Disabled, Some("accessibility_disabled"));
+    let disabled = build_report(&snapshot)?;
+    assert_eq!(
+        status(&disabled, "accessibility.atspi"),
+        Some(CapabilityStatus::Disabled)
+    );
+    Ok(())
+}
+
+#[test]
+fn accessibility_runtime_states_project_independently() {
+    let projected = |actor_state, mirror_ready| {
+        project_accessibility(AccessibilityRuntimeSnapshot {
+            actor_state,
+            mirror_ready,
+            accessibility_generation: 1,
+            cache_revision: 1,
+        })
+    };
+    assert_eq!(
+        projected(AtspiActorState::Healthy, true),
+        ProjectedStatus::AVAILABLE
+    );
+    assert_eq!(
+        projected(AtspiActorState::Healthy, false).status,
+        CapabilityStatus::Degraded
+    );
+    assert_eq!(
+        projected(AtspiActorState::Reconnecting, false).status,
+        CapabilityStatus::Degraded
+    );
+    assert_eq!(
+        projected(AtspiActorState::Connecting, false).status,
+        CapabilityStatus::Unavailable
+    );
+    assert_eq!(
+        projected(AtspiActorState::Disabled, false).status,
+        CapabilityStatus::Disabled
+    );
 }
 
 fn status(report: &CapabilityReport, id: &str) -> Option<CapabilityStatus> {

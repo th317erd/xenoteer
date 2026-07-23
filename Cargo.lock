@@ -2122,8 +2122,12 @@ version = "0.1.0"
 dependencies = [
  "atspi-connection",
  "atspi-proxies",
+ "futures-util",
+ "ordered-stream",
+ "sha2",
  "thiserror",
  "tokio",
+ "tokio-util",
  "zbus",
 ]
 

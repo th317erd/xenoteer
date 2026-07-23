@@ -64,6 +64,25 @@ max_live_windows = 4096
 max_tombstones = 8192
 tombstone_ttl_ms = 900000
 
+[accessibility]
+enabled = true
+request_capacity = 128
+event_capacity = 4096
+max_waiters = 128
+token_capacity = 65536
+cursor_ttl_ms = 30000
+max_cached_nodes = 100000
+max_tombstones = 100000
+max_nodes_per_query = 25000
+max_selector_depth = 64
+max_query_matches = 1000
+max_snapshot_nodes = 10000
+max_snapshot_bytes = 16777216
+proxy_timeout_ms = 2000
+query_timeout_ms = 10000
+reconnect_initial_backoff_ms = 100
+reconnect_max_backoff_ms = 5000
+
 [viewer]
 enabled = false
 allowed_origins = []

@@ -1,0 +1,885 @@
+{
+  "$defs": {
+    "AccessibilityIdentityHash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "AccessibilityPageCursor": {
+      "description": "Opaque authenticated cursor into immutable actor-owned query state.\n\nThe server must bind each token to principal, desktop/AT-SPI generations,\nsnapshot revision, selector/scope, traversal order, and expansion. It must\nexpire state after [`ACCESSIBILITY_CURSOR_TTL_MS`] and enforce\n[`MAX_ACCESSIBILITY_CURSORS_PER_PRINCIPAL`]; clients cannot construct or\nextend cursor state from the token contents.",
+      "maxLength": 1024,
+      "minLength": 16,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "AccessibilityRevision": {
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "AccessibilityWarning": {
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ApplicationRef": {
+      "properties": {
+        "app_instance_generation": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "atspi_generation": {
+          "$ref": "#/$defs/AtspiGeneration"
+        },
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration"
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId"
+        },
+        "identity_hash": {
+          "$ref": "#/$defs/AccessibilityIdentityHash"
+        },
+        "root_object_path": {
+          "$ref": "#/$defs/AtspiObjectPath"
+        },
+        "unique_bus_name": {
+          "$ref": "#/$defs/AtspiBusName"
+        }
+      },
+      "required": [
+        "desktop_id",
+        "desktop_generation",
+        "atspi_generation",
+        "unique_bus_name",
+        "root_object_path",
+        "app_instance_generation",
+        "identity_hash"
+      ],
+      "type": "object"
+    },
+    "AtspiBusName": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "AtspiGeneration": {
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "AtspiObjectPath": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    },
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ElementActionSnapshot": {
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key_binding": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "ElementAttribute": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "type": "object"
+    },
+    "ElementCompleteness": {
+      "enum": [
+        "complete",
+        "partial",
+        "truncated",
+        "dirty"
+      ],
+      "type": "string"
+    },
+    "ElementComponentSnapshot": {
+      "properties": {
+        "alpha": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "coordinate_space": {
+          "enum": [
+            "atspi_screen"
+          ],
+          "type": "string"
+        },
+        "extents": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rect"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "layer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "z_order": {
+          "format": "int16",
+          "maximum": 32767,
+          "minimum": -32768,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "coordinate_space"
+      ],
+      "type": "object"
+    },
+    "ElementInterface": {
+      "enum": [
+        "accessible",
+        "action",
+        "application",
+        "collection",
+        "component",
+        "document",
+        "editable_text",
+        "hypertext",
+        "image",
+        "selection",
+        "table",
+        "table_cell",
+        "text",
+        "value"
+      ],
+      "type": "string"
+    },
+    "ElementOrder": {
+      "enum": [
+        "preorder",
+        "reverse_preorder",
+        "name_ascending",
+        "name_descending",
+        "role_then_name",
+        "object_path_ascending"
+      ],
+      "type": "string"
+    },
+    "ElementRef": {
+      "properties": {
+        "application": {
+          "$ref": "#/$defs/ApplicationRef"
+        },
+        "atspi_generation": {
+          "$ref": "#/$defs/AtspiGeneration"
+        },
+        "cache_sequence": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration"
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId"
+        },
+        "object_identity_hash": {
+          "$ref": "#/$defs/AccessibilityIdentityHash"
+        },
+        "object_path": {
+          "$ref": "#/$defs/AtspiObjectPath"
+        }
+      },
+      "required": [
+        "desktop_id",
+        "desktop_generation",
+        "atspi_generation",
+        "application",
+        "object_path",
+        "object_identity_hash",
+        "cache_sequence"
+      ],
+      "type": "object"
+    },
+    "ElementRelation": {
+      "properties": {
+        "relation": {
+          "$ref": "#/$defs/ElementRelationType"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ElementRef"
+          },
+          "maxItems": 128,
+          "type": "array"
+        }
+      },
+      "required": [
+        "relation",
+        "targets"
+      ],
+      "type": "object"
+    },
+    "ElementRelationType": {
+      "enum": [
+        "label_for",
+        "labelled_by",
+        "controller_for",
+        "controlled_by",
+        "member_of",
+        "node_child_of",
+        "flows_to",
+        "flows_from",
+        "description_for",
+        "described_by",
+        "embedded_by",
+        "embeds",
+        "popup_for",
+        "parent_window_of",
+        "error_for",
+        "error_message",
+        "details",
+        "details_for",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "ElementRole": {
+      "enum": [
+        "unknown",
+        "application",
+        "window",
+        "dialog",
+        "alert",
+        "document",
+        "section",
+        "panel",
+        "toolbar",
+        "menu",
+        "menu_item",
+        "tab",
+        "tab_list",
+        "button",
+        "check_box",
+        "radio_button",
+        "toggle_button",
+        "combo_box",
+        "list",
+        "list_item",
+        "tree",
+        "tree_item",
+        "table",
+        "table_cell",
+        "label",
+        "text",
+        "entry",
+        "password_text",
+        "spin_button",
+        "slider",
+        "scroll_bar",
+        "progress_bar",
+        "link",
+        "image",
+        "canvas",
+        "terminal"
+      ],
+      "type": "string"
+    },
+    "ElementRoleSnapshot": {
+      "properties": {
+        "raw_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "raw_numeric": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "role": {
+          "$ref": "#/$defs/ElementRole"
+        }
+      },
+      "required": [
+        "role"
+      ],
+      "type": "object"
+    },
+    "ElementSnapshot": {
+      "properties": {
+        "accessible_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/ElementActionSnapshot"
+          },
+          "maxItems": 128,
+          "type": "array"
+        },
+        "attributes": {
+          "items": {
+            "$ref": "#/$defs/ElementAttribute"
+          },
+          "maxItems": 256,
+          "type": "array"
+        },
+        "child_count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "completeness": {
+          "$ref": "#/$defs/ElementCompleteness"
+        },
+        "component": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ElementComponentSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "index_in_parent": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "interfaces": {
+          "items": {
+            "$ref": "#/$defs/ElementInterface"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "locale": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ElementRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ref": {
+          "$ref": "#/$defs/ElementRef"
+        },
+        "relations": {
+          "items": {
+            "$ref": "#/$defs/ElementRelation"
+          },
+          "maxItems": 128,
+          "type": "array"
+        },
+        "revision": {
+          "$ref": "#/$defs/AccessibilityRevision"
+        },
+        "role": {
+          "$ref": "#/$defs/ElementRoleSnapshot"
+        },
+        "states": {
+          "items": {
+            "$ref": "#/$defs/ElementState"
+          },
+          "maxItems": 128,
+          "type": "array"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ElementTextSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ElementValueSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/AccessibilityWarning"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "window_correlation": {
+          "$ref": "#/$defs/ElementWindowCorrelation"
+        }
+      },
+      "required": [
+        "ref",
+        "role",
+        "states",
+        "interfaces",
+        "actions",
+        "attributes",
+        "relations",
+        "window_correlation",
+        "revision",
+        "completeness",
+        "truncated",
+        "warnings"
+      ],
+      "type": "object"
+    },
+    "ElementSnapshotEntry": {
+      "properties": {
+        "snapshot": {
+          "$ref": "#/$defs/ElementSnapshot"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "ElementState": {
+      "enum": [
+        "active",
+        "busy",
+        "checked",
+        "defunct",
+        "editable",
+        "enabled",
+        "expandable",
+        "expanded",
+        "focusable",
+        "focused",
+        "indeterminate",
+        "modal",
+        "multi_selectable",
+        "opaque",
+        "pressed",
+        "protected",
+        "read_only",
+        "required",
+        "selectable",
+        "selected",
+        "sensitive",
+        "showing",
+        "single_line",
+        "stale",
+        "transient",
+        "visible",
+        "visited"
+      ],
+      "type": "string"
+    },
+    "ElementTextRange": {
+      "properties": {
+        "end": {
+          "format": "int32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "format": "int32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "ElementTextSnapshot": {
+      "properties": {
+        "caret_offset": {
+          "format": "int32",
+          "minimum": -1,
+          "type": "integer"
+        },
+        "character_count": {
+          "format": "int32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content_truncated": {
+          "type": "boolean"
+        },
+        "protected": {
+          "type": "boolean"
+        },
+        "selections": {
+          "items": {
+            "$ref": "#/$defs/ElementTextRange"
+          },
+          "maxItems": 256,
+          "type": "array"
+        }
+      },
+      "required": [
+        "character_count",
+        "caret_offset",
+        "selections",
+        "content_truncated",
+        "protected"
+      ],
+      "type": "object"
+    },
+    "ElementValueSnapshot": {
+      "properties": {
+        "current": {
+          "format": "double",
+          "type": "number"
+        },
+        "increment": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "maximum": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "minimum": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "current"
+      ],
+      "type": "object"
+    },
+    "ElementWindowCorrelation": {
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/WindowCorrelationConfidence"
+        },
+        "conflicting_evidence": {
+          "type": "boolean"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/WindowCorrelationEvidence"
+          },
+          "maxItems": 256,
+          "type": "array"
+        },
+        "window": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "confidence",
+        "evidence",
+        "conflicting_evidence"
+      ],
+      "type": "object"
+    },
+    "Rect": {
+      "description": "A signed origin and non-empty unsigned extent.",
+      "properties": {
+        "height": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "x": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "y": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
+    "WindowCorrelationConfidence": {
+      "enum": [
+        "none",
+        "weak",
+        "strong",
+        "exact_process"
+      ],
+      "type": "string"
+    },
+    "WindowCorrelationEvidence": {
+      "properties": {
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "matched": {
+          "type": "boolean"
+        },
+        "signal": {
+          "$ref": "#/$defs/WindowCorrelationSignal"
+        }
+      },
+      "required": [
+        "signal",
+        "matched"
+      ],
+      "type": "object"
+    },
+    "WindowCorrelationSignal": {
+      "enum": [
+        "process_id",
+        "managed_process",
+        "top_level_extents",
+        "title",
+        "toolkit_identity",
+        "client_leader",
+        "focus_transition",
+        "creation_proximity",
+        "explicit_caller_reference"
+      ],
+      "type": "string"
+    },
+    "WindowIdentityHash": {
+      "description": "Fixed lowercase SHA-256 projection binding an XID birth to initial evidence.",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "WindowRef": {
+      "description": "Stable reference to exactly one observed XID birth in one desktop lifetime.",
+      "properties": {
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration",
+          "description": "Exact X server/session lifetime that owns the XID."
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId",
+          "description": "Desktop resource that owns the window."
+        },
+        "identity_hash": {
+          "$ref": "#/$defs/WindowIdentityHash",
+          "description": "Server-generated binding to first-observed identity evidence."
+        },
+        "observed_generation": {
+          "description": "Per-XID birth marker incremented whenever an absent XID reappears.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "xid": {
+          "description": "Non-zero core X11 window identifier.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "desktop_id",
+        "desktop_generation",
+        "xid",
+        "observed_generation",
+        "identity_hash"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "atspi_generation": {
+      "$ref": "#/$defs/AtspiGeneration"
+    },
+    "desktop_generation": {
+      "$ref": "#/$defs/DesktopGeneration"
+    },
+    "desktop_id": {
+      "$ref": "#/$defs/DesktopId"
+    },
+    "elements": {
+      "items": {
+        "$ref": "#/$defs/ElementSnapshotEntry"
+      },
+      "maxItems": 1000,
+      "type": "array"
+    },
+    "next_cursor": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AccessibilityPageCursor"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "order": {
+      "$ref": "#/$defs/ElementOrder"
+    },
+    "snapshot_revision": {
+      "$ref": "#/$defs/AccessibilityRevision"
+    },
+    "truncated": {
+      "type": "boolean"
+    },
+    "visited_nodes": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "warnings": {
+      "items": {
+        "$ref": "#/$defs/AccessibilityWarning"
+      },
+      "maxItems": 32,
+      "type": "array"
+    }
+  },
+  "required": [
+    "desktop_id",
+    "desktop_generation",
+    "atspi_generation",
+    "snapshot_revision",
+    "order",
+    "elements",
+    "visited_nodes",
+    "truncated",
+    "warnings"
+  ],
+  "title": "ElementListPage",
+  "type": "object"
+}

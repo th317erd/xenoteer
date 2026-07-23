@@ -32,8 +32,9 @@ IMPLEMENTED_BASE_PATHS = {
     "/v1/ws",
 }
 
-PHASE4_ROUTE_SOURCES = (
+CURRENT_ROUTE_SOURCES = (
     "observation.rs",
+    "accessibility.rs",
     "clipboard_read.rs",
     "screenshot.rs",
     "artifacts.rs",
@@ -42,11 +43,11 @@ PHASE4_ROUTE_SOURCES = (
 )
 
 
-def implemented_phase4_routes() -> dict[str, set[str]]:
-    """Extract literal Axum paths and methods from the Phase-4 route modules."""
+def implemented_current_routes() -> dict[str, set[str]]:
+    """Extract literal Axum paths and methods from current public route modules."""
     server_root = REPO_ROOT / "crates" / "xenoteer-server" / "src"
     routes: dict[str, set[str]] = {}
-    for source_name in PHASE4_ROUTE_SOURCES:
+    for source_name in CURRENT_ROUTE_SOURCES:
         source = server_root / source_name
         try:
             text = source.read_text(encoding="utf-8")
@@ -187,8 +188,8 @@ def validate_openapi(document: Any) -> set[Path]:
     if info.get("license", {}).get("identifier") != "Apache-2.0":
         raise ValidationError("public OpenAPI license must be Apache-2.0")
     paths = document.get("paths")
-    phase4_routes = implemented_phase4_routes()
-    implemented_paths = IMPLEMENTED_BASE_PATHS | set(phase4_routes)
+    current_routes = implemented_current_routes()
+    implemented_paths = IMPLEMENTED_BASE_PATHS | set(current_routes)
     documented_paths = set(paths) if isinstance(paths, dict) else set()
     if documented_paths != implemented_paths:
         missing = sorted(implemented_paths - documented_paths)
@@ -196,7 +197,7 @@ def validate_openapi(document: Any) -> set[Path]:
         raise ValidationError(
             f"OpenAPI path set differs from implemented routes; missing={missing}, extra={extra}"
         )
-    for path, implemented_methods in phase4_routes.items():
+    for path, implemented_methods in current_routes.items():
         documented_methods = {
             method for method in ("get", "post", "delete") if method in paths[path]
         }
@@ -315,6 +316,10 @@ def validate_example(value: Any, source: Path) -> None:
             "command.lifecycle",
             "action.lifecycle",
             "process.exited",
+            "accessibility.element_created",
+            "accessibility.element_changed",
+            "accessibility.element_removed",
+            "accessibility.resync_required",
         }
         if event["sequence"] <= 0 or event.get("topic") not in allowed_topics:
             raise ValidationError(f"event example uses an invalid sequence/topic in {source}")
@@ -331,8 +336,10 @@ def validate_example(value: Any, source: Path) -> None:
                 raise ValidationError(
                     f"event example differs from lifecycle payload in {source}"
                 )
-        else:
+        elif event.get("topic") == "process.exited":
             validate_process_exited_payload(payload, source)
+        else:
+            validate_accessibility_event_payload(payload, source)
     if isinstance(value, dict) and value.get("type") == "events.resync_required":
         reasons = {
             "generation_changed",
@@ -410,6 +417,116 @@ def validate_process_exited_payload(payload: Any, source: Path) -> None:
         raise ValidationError(f"process.exited payload discloses private metadata in {source}")
 
 
+def validate_accessibility_event_payload(payload: Any, source: Path) -> None:
+    required = {
+        "desktop_id",
+        "desktop_generation",
+        "atspi_generation",
+        "source",
+        "kind",
+        "detail",
+        "revision",
+        "cache_sequence",
+        "source_stale",
+    }
+    if not isinstance(payload, dict) or not required.issubset(payload):
+        raise ValidationError(f"accessibility event payload has an invalid shape in {source}")
+    if not isinstance(payload["atspi_generation"], int) or payload["atspi_generation"] <= 0:
+        raise ValidationError(f"accessibility event generation is invalid in {source}")
+    if not isinstance(payload["revision"], int) or payload["revision"] <= 0:
+        raise ValidationError(f"accessibility event revision is invalid in {source}")
+    if not isinstance(payload["cache_sequence"], int) or payload["cache_sequence"] <= 0:
+        raise ValidationError(f"accessibility event cache sequence is invalid in {source}")
+    detail = payload["detail"]
+    if not isinstance(detail, dict):
+        raise ValidationError(f"accessibility event detail is invalid in {source}")
+    text = detail.get("text")
+    if isinstance(text, dict) and text.get("redacted") is True and text.get("content") is not None:
+        raise ValidationError(f"redacted accessibility event exposes text in {source}")
+    if payload["kind"] == "resync_required":
+        if (
+            payload["source"] is not None
+            or payload.get("raw_source") is not None
+            or not isinstance(payload.get("resync_reason"), str)
+            or payload["source_stale"] is not False
+        ):
+            raise ValidationError(f"accessibility resync event has a source in {source}")
+    else:
+        if not isinstance(payload.get("raw_source"), dict):
+            raise ValidationError(f"accessibility event lacks a raw source in {source}")
+        if (payload["source"] is None) != (payload["source_stale"] is True):
+            raise ValidationError(f"accessibility event source freshness is inconsistent in {source}")
+    forbidden = {"password", "secret", "token", "text_content"}
+    if any(isinstance(node, dict) and forbidden.intersection(node) for node in iter_nodes(payload)):
+        raise ValidationError(f"accessibility event discloses protected metadata in {source}")
+
+
+def validate_accessibility_request_contract() -> None:
+    """Keep reserved metadata hydration surfaces out of the Phase 5 wire schema."""
+    query_schema = load_json(REPO_ROOT / "schemas" / "v1" / "element-query-request.json")
+    wait_schema = load_json(REPO_ROOT / "schemas" / "v1" / "element-wait-request.json")
+    snapshot_schema = load_json(
+        REPO_ROOT / "schemas" / "v1" / "element-snapshot-request.json"
+    )
+
+    try:
+        predicate_variants = {
+            variant["properties"]["type"]["const"]
+            for variant in query_schema["$defs"]["ElementPredicate"]["oneOf"]
+        }
+        wait_variants = {
+            variant["properties"]["type"]["const"]
+            for variant in wait_schema["$defs"]["ElementWaitPredicate"]["oneOf"]
+        }
+        expansion_fields = set(
+            snapshot_schema["$defs"]["ElementSnapshotExpansion"]["properties"]
+        )
+        component = next(
+            variant
+            for variant in query_schema["$defs"]["ElementPredicate"]["oneOf"]
+            if variant["properties"]["type"]["const"] == "component_intersects"
+        )
+        geometry = next(
+            variant
+            for variant in wait_schema["$defs"]["ElementWaitPredicate"]["oneOf"]
+            if variant["properties"]["type"]["const"] == "geometry"
+        )
+        component_spaces = component["properties"]["coordinate_space"]["enum"]
+        geometry_spaces = geometry["properties"]["coordinate_space"]["enum"]
+    except (KeyError, StopIteration, TypeError) as error:
+        raise ValidationError("accessibility request schemas have an unexpected shape") from error
+
+    expected_predicates = {
+        "role",
+        "name",
+        "description",
+        "state",
+        "interface",
+        "value_range",
+        "index_in_parent",
+        "child_count",
+        "component_intersects",
+    }
+    expected_waits = {
+        "exists",
+        "gone",
+        "state",
+        "name",
+        "value",
+        "child_count",
+        "geometry",
+        "selector_count",
+    }
+    if predicate_variants != expected_predicates:
+        raise ValidationError("Phase 5 accessibility selector schema exposes reserved metadata")
+    if wait_variants != expected_waits:
+        raise ValidationError("Phase 5 accessibility wait schema exposes reserved text content")
+    if expansion_fields != {"value", "text_metadata", "component"}:
+        raise ValidationError("Phase 5 accessibility expansion schema exposes reserved metadata")
+    if component_spaces != ["atspi_screen"] or geometry_spaces != ["atspi_screen"]:
+        raise ValidationError("Phase 5 accessibility geometry is not limited to AT-SPI screen")
+
+
 def main() -> int:
     if not (API_ROOT / "README.md").is_file() or not (API_ROOT / "websocket.md").is_file():
         raise ValidationError("versioned API overview or WebSocket contract is missing")
@@ -432,6 +549,7 @@ def main() -> int:
 
     document = load_json(OPENAPI_PATH)
     linked_rest_examples = validate_openapi(document)
+    validate_accessibility_request_contract()
 
     examples = sorted(EXAMPLES_ROOT.rglob("*.json"))
     if not examples:

@@ -137,7 +137,7 @@ fi
 install -d -m 1777 /tmp/codex
 build_lock=/tmp/codex/xenoteer-heavy-build.lock
 cargo_args=(
-  build --quiet --release --locked --jobs 4
+  build --quiet --release --locked --jobs 2
   --manifest-path "$repo_root/fixtures/x11/Cargo.toml"
   --bin x11-window-churn
   --target "$rust_host"

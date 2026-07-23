@@ -121,7 +121,7 @@ build_recorder() {
   local manifest="$repo_root/fixtures/x11/Cargo.toml"
   local cargo_binary invoking_home invoking_cargo
   local cargo_args=(
-    build --quiet --release --locked --jobs 4
+    build --quiet --release --locked --jobs 2
     --manifest-path "$manifest"
     --bin x11-event-recorder
     --target "$fixture_rust_target"
@@ -154,7 +154,7 @@ build_recorder() {
 run_sdk_smoke() {
   local cargo_binary invoking_home invoking_cargo sdk_binary sdk_output
   local cargo_args=(
-    build --quiet --locked --jobs 4
+    build --quiet --locked --jobs 2
     --manifest-path "$repo_root/Cargo.toml"
     --target-dir "$repo_root/target"
     --target "$fixture_rust_target"

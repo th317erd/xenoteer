@@ -40,7 +40,7 @@ cleanup() {
 trap cleanup EXIT
 
 cargo_args=(
-  build --quiet --release --locked --jobs 4
+  build --quiet --release --locked --jobs 2
   --manifest-path "$repo_root/fixtures/x11/Cargo.toml"
   --bin x11-event-recorder
   --bin x11-input-driver

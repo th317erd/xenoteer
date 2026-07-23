@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ClipboardValidationError, CommandId, ErrorCode, Problem, ProblemValidationError, ProcessRef,
+    AccessibilityActionValidationError, ClipboardValidationError, CommandId, ElementActionResult,
+    ElementPhysicalClickResult, ErrorCode, Problem, ProblemValidationError, ProcessRef,
     ProcessState, ProcessValidationError, ProcessView, TextInsertEvidence, Timestamp,
     TimestampError, WindowControlResult, WindowControlValidationError,
 };
@@ -16,6 +17,203 @@ pub const MAX_WARNING_CODE_BYTES: usize = 64;
 pub const MAX_WARNING_MESSAGE_BYTES: usize = 512;
 /// Maximum number of warnings attached to one result.
 pub const MAX_RESULT_WARNINGS: usize = 16;
+/// Maximum number of content-free stages retained in one detailed trace.
+pub const MAX_COMMAND_TRACE_STEPS: usize = 16;
+
+/// Backend-independent class of one bounded command trace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandTraceDomain {
+    /// A command without a more specific Phase-5 trace contract.
+    General,
+    /// A semantic AT-SPI operation.
+    SemanticAccessibility,
+    /// A physical element click bridged from accessibility geometry to X11.
+    PhysicalElementInput,
+}
+
+/// One content-free trace boundary. No variant can carry caller or target text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandTraceStage {
+    /// The typed command and its authorization-bearing envelope were validated.
+    CommandValidated,
+    /// The exact AT-SPI target lifetime was revalidated.
+    SemanticTargetRevalidated,
+    /// A semantic method crossed its dispatch boundary.
+    SemanticDispatched,
+    /// Content-free semantic result evidence was read back.
+    SemanticReadback,
+    /// Accessibility-to-window correlation was freshly revalidated.
+    PhysicalCorrelationRevalidated,
+    /// The exact X11 window birth and focus policy were freshly revalidated.
+    PhysicalWindowRevalidated,
+    /// Semantic scrolling completed or was explicitly unnecessary.
+    PhysicalScroll,
+    /// Window activation completed or was explicitly unnecessary.
+    PhysicalActivation,
+    /// Bounded non-instant pointer interpolation completed.
+    PhysicalPointerInterpolation,
+    /// The requested physical button press was emitted.
+    PhysicalButtonPress,
+    /// The requested physical button release was emitted.
+    PhysicalButtonRelease,
+    /// A requested postcondition was observed or none was requested.
+    PostconditionObserved,
+    /// Execution returned a terminal success or failure.
+    CommandCompleted,
+}
+
+/// Result of one content-free trace stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandTraceStatus {
+    /// The stage completed with content-free evidence.
+    Completed,
+    /// Policy or live state made the optional stage unnecessary.
+    NotRequired,
+    /// Execution returned a failure at or before this terminal boundary.
+    Failed,
+}
+
+/// One bounded structured trace step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CommandTraceStep {
+    /// Stable content-free stage identifier.
+    pub stage: CommandTraceStage,
+    /// Content-free stage disposition.
+    pub status: CommandTraceStatus,
+}
+
+/// Inline content-free diagnostic evidence requested by `trace_policy=detailed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CommandTrace {
+    /// Trace vocabulary selected for the command class.
+    pub domain: CommandTraceDomain,
+    /// Ordered bounded stages; never free-form diagnostic content.
+    #[schemars(length(min = 2, max = MAX_COMMAND_TRACE_STEPS))]
+    pub steps: Vec<CommandTraceStep>,
+}
+
+impl CommandTrace {
+    /// Creates a checked bounded trace. Trace vocabulary deliberately contains
+    /// no free-form strings, target metadata, or payload bytes.
+    pub fn new(
+        domain: CommandTraceDomain,
+        steps: Vec<CommandTraceStep>,
+    ) -> Result<Self, CommandTraceValidationError> {
+        let trace = Self { domain, steps };
+        trace.validate()?;
+        Ok(trace)
+    }
+
+    /// Revalidates a trace obtained through deserialization.
+    pub fn validate(&self) -> Result<(), CommandTraceValidationError> {
+        if !(2..=MAX_COMMAND_TRACE_STEPS).contains(&self.steps.len()) {
+            return Err(CommandTraceValidationError::StepLimit);
+        }
+        if self.steps.first()
+            != Some(&CommandTraceStep {
+                stage: CommandTraceStage::CommandValidated,
+                status: CommandTraceStatus::Completed,
+            })
+            || self.steps.last().map(|step| step.stage) != Some(CommandTraceStage::CommandCompleted)
+        {
+            return Err(CommandTraceValidationError::Boundary);
+        }
+        let mut previous = None;
+        for step in &self.steps {
+            let rank = trace_stage_rank(self.domain, step.stage)
+                .ok_or(CommandTraceValidationError::DomainStage)?;
+            if previous.is_some_and(|previous| rank <= previous) {
+                return Err(CommandTraceValidationError::StageOrder);
+            }
+            previous = Some(rank);
+            if step.status == CommandTraceStatus::NotRequired
+                && !matches!(
+                    step.stage,
+                    CommandTraceStage::PhysicalScroll
+                        | CommandTraceStage::PhysicalActivation
+                        | CommandTraceStage::PostconditionObserved
+                )
+            {
+                return Err(CommandTraceValidationError::StageStatus);
+            }
+            if step.stage != CommandTraceStage::CommandCompleted
+                && step.status == CommandTraceStatus::Failed
+            {
+                return Err(CommandTraceValidationError::StageStatus);
+            }
+        }
+        Ok(())
+    }
+}
+
+const fn trace_stage_rank(domain: CommandTraceDomain, stage: CommandTraceStage) -> Option<u8> {
+    match (domain, stage) {
+        (_, CommandTraceStage::CommandValidated) => Some(0),
+        (CommandTraceDomain::General, CommandTraceStage::CommandCompleted) => Some(1),
+        (
+            CommandTraceDomain::SemanticAccessibility,
+            CommandTraceStage::SemanticTargetRevalidated,
+        ) => Some(1),
+        (CommandTraceDomain::SemanticAccessibility, CommandTraceStage::SemanticDispatched) => {
+            Some(2)
+        }
+        (CommandTraceDomain::SemanticAccessibility, CommandTraceStage::SemanticReadback) => Some(3),
+        (CommandTraceDomain::SemanticAccessibility, CommandTraceStage::PostconditionObserved) => {
+            Some(4)
+        }
+        (CommandTraceDomain::SemanticAccessibility, CommandTraceStage::CommandCompleted) => Some(5),
+        (
+            CommandTraceDomain::PhysicalElementInput,
+            CommandTraceStage::PhysicalCorrelationRevalidated,
+        ) => Some(1),
+        (
+            CommandTraceDomain::PhysicalElementInput,
+            CommandTraceStage::PhysicalWindowRevalidated,
+        ) => Some(2),
+        (CommandTraceDomain::PhysicalElementInput, CommandTraceStage::PhysicalScroll) => Some(3),
+        (CommandTraceDomain::PhysicalElementInput, CommandTraceStage::PhysicalActivation) => {
+            Some(4)
+        }
+        (
+            CommandTraceDomain::PhysicalElementInput,
+            CommandTraceStage::PhysicalPointerInterpolation,
+        ) => Some(5),
+        (CommandTraceDomain::PhysicalElementInput, CommandTraceStage::PhysicalButtonPress) => {
+            Some(6)
+        }
+        (CommandTraceDomain::PhysicalElementInput, CommandTraceStage::PhysicalButtonRelease) => {
+            Some(7)
+        }
+        (CommandTraceDomain::PhysicalElementInput, CommandTraceStage::PostconditionObserved) => {
+            Some(8)
+        }
+        (CommandTraceDomain::PhysicalElementInput, CommandTraceStage::CommandCompleted) => Some(9),
+        _ => None,
+    }
+}
+
+/// Detailed trace validation failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum CommandTraceValidationError {
+    /// The trace has fewer than two or more than the hard maximum steps.
+    #[error("command trace step count is outside its bound")]
+    StepLimit,
+    /// Validation/completion boundary stages are absent or malformed.
+    #[error("command trace is missing a required boundary")]
+    Boundary,
+    /// A stage does not belong to the declared trace domain.
+    #[error("command trace contains a stage outside its domain")]
+    DomainStage,
+    /// Stages are duplicated or not in canonical order.
+    #[error("command trace stages are duplicated or out of order")]
+    StageOrder,
+    /// A stage uses a disposition that cannot apply at that boundary.
+    #[error("command trace stage status is invalid")]
+    StageStatus,
+}
 
 /// Lifecycle state of one deduplicated command execution.
 ///
@@ -101,6 +299,12 @@ pub enum EffectStage {
     ClipboardOwnershipChanged,
     /// At least one text-insertion effect was emitted.
     TextInserted,
+    /// A semantic AT-SPI method crossed its externally visible dispatch boundary.
+    SemanticActionDispatched,
+    /// A requested semantic state/readback was observed.
+    SemanticStateChanged,
+    /// A physical click derived from revalidated element geometry completed.
+    ElementPhysicallyClicked,
 }
 
 impl EffectStage {
@@ -112,7 +316,7 @@ impl EffectStage {
 }
 
 /// A successful command payload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommandOutcome {
     /// A Phase-0 backend probe acknowledgment.
@@ -147,6 +351,16 @@ pub enum CommandOutcome {
         /// Selected strategy and bounded completed counts.
         evidence: TextInsertEvidence,
     },
+    /// A semantic accessibility operation completed with bounded evidence.
+    ElementAction {
+        /// Exact semantic operation, references, snapshots, and readback evidence.
+        result: ElementActionResult,
+    },
+    /// A distinct physical element click completed through the input actor.
+    ElementPhysicalClick {
+        /// Correlation, geometry revalidation, and serialized input evidence.
+        result: ElementPhysicalClickResult,
+    },
 }
 
 impl CommandOutcome {
@@ -165,6 +379,8 @@ impl CommandOutcome {
             }
             Self::WindowControl { result } => result.validate().map_err(Into::into),
             Self::TextInserted { evidence } => evidence.validate().map_err(Into::into),
+            Self::ElementAction { result } => result.validate().map_err(Into::into),
+            Self::ElementPhysicalClick { result } => result.validate().map_err(Into::into),
         }
     }
 }
@@ -254,6 +470,8 @@ pub struct CommandResult {
     finished_at: Option<Timestamp>,
     outcome: Option<CommandOutcome>,
     error: Option<Problem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trace: Option<CommandTrace>,
     #[schemars(length(max = MAX_RESULT_WARNINGS))]
     warnings: Vec<Warning>,
 }
@@ -271,6 +489,7 @@ impl CommandResult {
             finished_at: None,
             outcome: None,
             error: None,
+            trace: None,
             warnings: Vec::new(),
         }
     }
@@ -344,6 +563,17 @@ impl CommandResult {
         warning.validate()?;
         self.warnings.push(warning);
         Ok(())
+    }
+
+    /// Attaches a checked detailed trace to a terminal result.
+    pub fn with_trace(mut self, trace: CommandTrace) -> Result<Self, ResultInvariantError> {
+        if !self.lifecycle.is_terminal() {
+            return Err(ResultInvariantError::TraceLifecycle);
+        }
+        trace.validate()?;
+        self.trace = Some(trace);
+        self.validate()?;
+        Ok(self)
     }
 
     /// Validates an instance obtained through deserialization.
@@ -434,6 +664,20 @@ impl CommandResult {
                 return Err(ResultInvariantError::ProblemCodeMismatch);
             }
         }
+        if let Some(trace) = &self.trace {
+            if !self.lifecycle.is_terminal() {
+                return Err(ResultInvariantError::TraceLifecycle);
+            }
+            trace.validate()?;
+            let expected = if self.lifecycle == CommandLifecycle::Succeeded {
+                CommandTraceStatus::Completed
+            } else {
+                CommandTraceStatus::Failed
+            };
+            if trace.steps.last().map(|step| step.status) != Some(expected) {
+                return Err(ResultInvariantError::TraceTerminalStatus);
+            }
+        }
 
         let accepted_at = self.accepted_at.unix_timestamp_nanos()?;
         let started_at = self
@@ -493,6 +737,12 @@ impl CommandResult {
     pub const fn error(&self) -> Option<&Problem> {
         self.error.as_ref()
     }
+
+    /// Returns bounded detailed trace evidence when explicitly requested.
+    #[must_use]
+    pub const fn trace(&self) -> Option<&CommandTrace> {
+        self.trace.as_ref()
+    }
 }
 
 /// A command-result construction or transition violation.
@@ -537,12 +787,25 @@ pub enum ResultInvariantError {
     /// A nested clipboard/text outcome is malformed.
     #[error(transparent)]
     InvalidClipboard(#[from] ClipboardValidationError),
+    /// A nested accessibility action outcome is malformed.
+    #[error(transparent)]
+    InvalidAccessibilityAction(#[from] AccessibilityActionValidationError),
+    /// A nested detailed trace is malformed.
+    #[error(transparent)]
+    InvalidTrace(#[from] CommandTraceValidationError),
+    /// Structured traces are terminal evidence and cannot decorate in-progress results.
+    #[error("command trace is present before terminal completion")]
+    TraceLifecycle,
+    /// The final trace status disagrees with command success or failure.
+    #[error("command trace terminal status differs from command lifecycle")]
+    TraceTerminalStatus,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::RetryAdvice;
+    use serde_json::Value;
 
     fn problem(
         code: ErrorCode,
@@ -605,6 +868,134 @@ mod tests {
         object.insert("future_additive_field".to_owned(), serde_json::json!(true));
         let decoded: CommandResult = serde_json::from_value(encoded)?;
         assert_eq!(decoded.lifecycle(), CommandLifecycle::Accepted);
+        Ok(())
+    }
+
+    #[test]
+    fn detailed_trace_is_bounded_content_free_and_additive()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let at = Timestamp::parse("2026-07-20T00:00:00Z")?;
+        let trace = CommandTrace::new(
+            CommandTraceDomain::SemanticAccessibility,
+            vec![
+                CommandTraceStep {
+                    stage: CommandTraceStage::CommandValidated,
+                    status: CommandTraceStatus::Completed,
+                },
+                CommandTraceStep {
+                    stage: CommandTraceStage::SemanticTargetRevalidated,
+                    status: CommandTraceStatus::Completed,
+                },
+                CommandTraceStep {
+                    stage: CommandTraceStage::SemanticDispatched,
+                    status: CommandTraceStatus::Completed,
+                },
+                CommandTraceStep {
+                    stage: CommandTraceStage::SemanticReadback,
+                    status: CommandTraceStatus::Completed,
+                },
+                CommandTraceStep {
+                    stage: CommandTraceStage::CommandCompleted,
+                    status: CommandTraceStatus::Completed,
+                },
+            ],
+        )?;
+        let result = CommandResult::accepted(CommandId::new(), at.clone())
+            .start(at.clone())?
+            .succeed(
+                EffectStage::SemanticStateChanged,
+                CommandOutcome::Acknowledged,
+                at,
+            )?
+            .with_trace(trace)?;
+        let encoded = serde_json::to_value(&result)?;
+        assert_eq!(
+            encoded.pointer("/trace/domain").and_then(Value::as_str),
+            Some("semantic_accessibility")
+        );
+        assert!(!encoded.to_string().contains("phase5-secret-never-print"));
+
+        let mut additive = encoded;
+        additive
+            .as_object_mut()
+            .ok_or_else(|| std::io::Error::other("command result must be an object"))?
+            .insert("future_trace_container".to_owned(), serde_json::json!({}));
+        let decoded: CommandResult = serde_json::from_value(additive)?;
+        decoded.validate()?;
+        assert!(decoded.trace().is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn trace_bounds_domain_and_terminal_status_are_revalidated()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            CommandTrace::new(CommandTraceDomain::General, Vec::new()),
+            Err(CommandTraceValidationError::StepLimit)
+        );
+        let mut over_limit = vec![
+            CommandTraceStep {
+                stage: CommandTraceStage::CommandValidated,
+                status: CommandTraceStatus::Completed,
+            };
+            MAX_COMMAND_TRACE_STEPS + 1
+        ];
+        over_limit[MAX_COMMAND_TRACE_STEPS].stage = CommandTraceStage::CommandCompleted;
+        assert_eq!(
+            CommandTrace::new(CommandTraceDomain::General, over_limit),
+            Err(CommandTraceValidationError::StepLimit)
+        );
+        assert_eq!(
+            CommandTrace::new(
+                CommandTraceDomain::SemanticAccessibility,
+                vec![
+                    CommandTraceStep {
+                        stage: CommandTraceStage::CommandValidated,
+                        status: CommandTraceStatus::Completed,
+                    },
+                    CommandTraceStep {
+                        stage: CommandTraceStage::PhysicalButtonPress,
+                        status: CommandTraceStatus::Completed,
+                    },
+                    CommandTraceStep {
+                        stage: CommandTraceStage::CommandCompleted,
+                        status: CommandTraceStatus::Completed,
+                    },
+                ],
+            ),
+            Err(CommandTraceValidationError::DomainStage)
+        );
+
+        let at = Timestamp::parse("2026-07-20T00:00:00Z")?;
+        let failed_status = CommandTrace::new(
+            CommandTraceDomain::General,
+            vec![
+                CommandTraceStep {
+                    stage: CommandTraceStage::CommandValidated,
+                    status: CommandTraceStatus::Completed,
+                },
+                CommandTraceStep {
+                    stage: CommandTraceStage::CommandCompleted,
+                    status: CommandTraceStatus::Failed,
+                },
+            ],
+        )?;
+        let succeeded = CommandResult::accepted(CommandId::new(), at.clone())
+            .start(at.clone())?
+            .succeed(EffectStage::None, CommandOutcome::Acknowledged, at)?;
+        assert_eq!(
+            succeeded.with_trace(failed_status),
+            Err(ResultInvariantError::TraceTerminalStatus)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn absent_trace_is_omitted_from_the_additive_response_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let at = Timestamp::parse("2026-07-20T00:00:00Z")?;
+        let encoded = serde_json::to_value(CommandResult::accepted(CommandId::new(), at))?;
+        assert!(encoded.get("trace").is_none());
         Ok(())
     }
 

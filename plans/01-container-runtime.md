@@ -161,6 +161,10 @@ Every longrun has:
 - a finish policy that distinguishes expected shutdown from crashes;
 - finish-state inspection through the pinned s6 `wantedup` field, which is set
   false before a requested stop even when startup/readiness is incomplete;
+- a root-only, single-use Phase 5 AT-SPI maintenance marker, validated as a
+  non-symlink `0600` regular file below a non-symlink root-owned `0700`
+  directory and consumed before the bounded stop reaches definitive down;
+  malformed markers fail closed and no other critical service accepts one;
 - a first-writer critical-shutdown claim, with a dedicated supervised
   coordinator waiting on a root-only FIFO; it waits for the claimant's
   definitive down event before contacting the internal shutdown daemon;
@@ -359,7 +363,7 @@ sandbox startup failure with `--no-sandbox` in production.
 | X server accepts unauthenticated clients | Negative Xauthority test; assert `-nolisten tcp`; scan listeners |
 | Saved XFCE session launches stale apps | Clear session cache and disable save in image initialization |
 | Random UID cannot own `/run` | Do not claim arbitrary UID support; dedicated compatibility test when added |
-| PID 1 reports success or stalls after critical child crash | Critical services wait for shutdown-daemon and dedicated shutdown-coordinator readiness. Docker readiness waits for the supervised daemon readiness event and the upward s6-rc transaction to release its lock. The first critical finish claimant reads pinned `wantedup`, atomically records the failure result and coordinator request, then exits 125. The independently supervised coordinator waits for definitive down, retries halt, requires a downward s6-rc transaction with no upward lock holder, and has a supervision-tree fallback. Built tests require clean requested stops, one causally valid claimant, one accepted shutdown, nonzero exits for every critical service in normal/hardened profiles, a frozen upward-lock fallback, and required-viewer failures |
+| PID 1 reports success or stalls after critical child crash | Critical services wait for shutdown-daemon and dedicated shutdown-coordinator readiness. Docker readiness waits for the supervised daemon readiness event and the upward s6-rc transaction to release its lock. The first critical finish claimant reads pinned `wantedup`, atomically records the failure result and coordinator request, then exits 125. The only direct-service recovery exception is a validated, root-only, single-use AT-SPI marker; the runner waits for definitive down and marker consumption before restart, while malformed markers fail closed. The independently supervised coordinator waits for definitive down, retries halt, requires a downward s6-rc transaction with no upward lock holder, and has a supervision-tree fallback. Built tests require clean requested stops, one causally valid claimant, one accepted shutdown, nonzero exits for every critical service in normal/hardened profiles, a frozen upward-lock fallback, authorized AT-SPI replacement, and required-viewer failures |
 | Read-only root breaks packages writing outside declared paths | Run full end-to-end suite with read-only profile |
 | Container stop kills before cleanup | Assert stop timeout exceeds service grace; forced-stop fault test |
 | Host mount recursively chowned | Never boot-time chown unknown mounts; ownership error is explicit |

@@ -11,13 +11,17 @@ publish = false
 
 [features]
 default = []
-live-atspi = ["dep:atspi-connection", "dep:atspi-proxies", "dep:tokio", "dep:zbus"]
+live-atspi = ["dep:atspi-connection", "dep:atspi-proxies", "dep:futures-util", "dep:ordered-stream", "dep:zbus"]
 
 [dependencies]
 atspi-connection = { workspace = true, optional = true }
 atspi-proxies = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+ordered-stream = { workspace = true, optional = true }
+sha2.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["time"], optional = true }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio-util.workspace = true
 zbus = { workspace = true, optional = true }
 
 [dev-dependencies]

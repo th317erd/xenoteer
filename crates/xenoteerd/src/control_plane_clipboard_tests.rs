@@ -7,8 +7,12 @@ use std::{
 };
 
 use xenoteer_protocol::{
-    ArtifactContentType, ArtifactId, ArtifactPurpose, SecretInlineText, SelectionClearCommand,
-    SelectionTransferFailureReason, SelectionTransferMode, TextInsertOptions, WindowIdentityHash,
+    AccessibilityIdentityHash, AccessibilityRevision, ApplicationRef, ArtifactContentType,
+    ArtifactId, ArtifactPurpose, AtspiBusName, AtspiGeneration, AtspiObjectPath,
+    EditableTextSelectionPolicy, ElementRef, SecretInlineText, SelectionClearCommand,
+    SelectionTransferFailureReason, SelectionTransferMode, SemanticTextInsertEvidence,
+    SemanticTextInsertOptions, SemanticTextInsertionPoint, TextAutoFallbackPolicy, TextAutoPolicy,
+    TextInsertOptions, WindowIdentityHash,
 };
 use xenoteer_x11::{
     ClipboardContentDigest,
@@ -31,6 +35,7 @@ struct FakeRuntime {
     arms: Mutex<VecDeque<ArmScript>>,
     focuses: Mutex<VecDeque<Result<EffectStage, RuntimeResult>>>,
     keyboards: Mutex<VecDeque<Result<InputOutcome, ClipboardInputError>>>,
+    semantic_inserts: Mutex<VecDeque<Result<SemanticTextInsertEvidence, SemanticActionFailure>>>,
     keyboard_preconditions: Mutex<Vec<WindowInputPreconditionSpec>>,
     calls: Mutex<Vec<&'static str>>,
     cancel_after_temporary_set: Option<Arc<AtomicU8>>,
@@ -49,6 +54,7 @@ impl FakeRuntime {
             arms: Mutex::new(VecDeque::new()),
             focuses: Mutex::new(VecDeque::new()),
             keyboards: Mutex::new(VecDeque::new()),
+            semantic_inserts: Mutex::new(VecDeque::new()),
             keyboard_preconditions: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
             cancel_after_temporary_set: None,
@@ -76,6 +82,23 @@ impl ClipboardExecutionRuntime for FakeRuntime {
 
     fn generation(&self) -> DesktopGeneration {
         self.generation
+    }
+
+    fn semantic_text_insert<'a>(
+        &'a self,
+        _element: ElementRef,
+        text: String,
+        _options: SemanticTextInsertOptions,
+        _deadline: Instant,
+        _cancellation: CancellationToken,
+    ) -> Option<ClipboardRuntimeFuture<'a, Result<SemanticTextInsertEvidence, SemanticActionFailure>>>
+    {
+        let result = mutex(&self.semantic_inserts).pop_front()?;
+        self.record("semantic_text_insert");
+        // The fake deliberately drops the secret-bearing source before the
+        // scripted result crosses the control-plane evidence boundary.
+        drop(text);
+        Some(Box::pin(async move { result }))
     }
 
     fn read_artifact<'a>(
@@ -261,6 +284,118 @@ fn window_ref(desktop_id: DesktopId, generation: DesktopGeneration) -> WindowRef
     }
 }
 
+fn element_ref(desktop_id: DesktopId, generation: DesktopGeneration) -> ElementRef {
+    let atspi_generation =
+        AtspiGeneration::new(1).unwrap_or_else(|_| unreachable!("fixed generation is valid"));
+    ElementRef {
+        desktop_id,
+        desktop_generation: generation,
+        atspi_generation,
+        application: ApplicationRef {
+            desktop_id,
+            desktop_generation: generation,
+            atspi_generation,
+            unique_bus_name: AtspiBusName::new(":1.42")
+                .unwrap_or_else(|_| unreachable!("fixed bus name is valid")),
+            root_object_path: AtspiObjectPath::new("/org/a11y/atspi/accessible/root")
+                .unwrap_or_else(|_| unreachable!("fixed root path is valid")),
+            app_instance_generation: 1,
+            identity_hash: AccessibilityIdentityHash::new("b".repeat(64))
+                .unwrap_or_else(|_| unreachable!("fixed identity is valid")),
+        },
+        object_path: AtspiObjectPath::new("/org/a11y/atspi/accessible/42")
+            .unwrap_or_else(|_| unreachable!("fixed object path is valid")),
+        object_identity_hash: AccessibilityIdentityHash::new("c".repeat(64))
+            .unwrap_or_else(|_| unreachable!("fixed identity is valid")),
+        cache_sequence: 1,
+    }
+}
+
+fn semantic_options() -> SemanticTextInsertOptions {
+    SemanticTextInsertOptions {
+        insertion_point: SemanticTextInsertionPoint::Caret,
+        selection: EditableTextSelectionPolicy::CollapseAfter,
+        verify_length_only: true,
+        postcondition: None,
+    }
+}
+
+fn element_text_command(
+    desktop_id: DesktopId,
+    generation: DesktopGeneration,
+    strategy: TextStrategy,
+    allowed_strategies: Option<Vec<TextStrategy>>,
+) -> Command {
+    element_text_command_with_value(desktop_id, generation, strategy, allowed_strategies, "bot")
+}
+
+fn element_text_command_with_value(
+    desktop_id: DesktopId,
+    generation: DesktopGeneration,
+    strategy: TextStrategy,
+    allowed_strategies: Option<Vec<TextStrategy>>,
+    value: &str,
+) -> Command {
+    let permits_semantic = strategy == TextStrategy::Semantic
+        || allowed_strategies
+            .as_ref()
+            .is_some_and(|strategies| strategies.contains(&TextStrategy::Semantic));
+    let permits_clipboard = strategy == TextStrategy::Clipboard
+        || allowed_strategies
+            .as_ref()
+            .is_some_and(|strategies| strategies.contains(&TextStrategy::Clipboard));
+    let requires_window = if strategy == TextStrategy::Auto {
+        allowed_strategies.as_ref().is_some_and(|strategies| {
+            strategies
+                .iter()
+                .any(|strategy| strategy.requires_control_lease())
+        })
+    } else {
+        strategy.requires_control_lease()
+    };
+    Command::TextInsert(TextInsertCommand {
+        text: TextSource::Inline {
+            text: SecretInlineText::new(value)
+                .unwrap_or_else(|_| unreachable!("bounded fixture text is valid")),
+        },
+        target: TextTarget::Element {
+            element: Box::new(element_ref(desktop_id, generation)),
+            window_fallback: requires_window.then(|| window_ref(desktop_id, generation)),
+        },
+        strategy,
+        clipboard_options: permits_clipboard.then_some(TextInsertOptions {
+            preserve_clipboard: false,
+            paste_observation_timeout_ms: 250,
+        }),
+        semantic_options: permits_semantic.then_some(semantic_options()),
+        auto_policy: allowed_strategies.map(|allowed_strategies| TextAutoPolicy {
+            allowed_strategies,
+            fallback: TextAutoFallbackPolicy::BeforeEffectOnly,
+        }),
+    })
+}
+
+fn semantic_insert_evidence(
+    element: ElementRef,
+    inserted_characters: u32,
+) -> SemanticTextInsertEvidence {
+    SemanticTextInsertEvidence {
+        element,
+        revision_before: AccessibilityRevision::new(1)
+            .unwrap_or_else(|_| unreachable!("fixed accessibility revision is valid")),
+        revision_after: AccessibilityRevision::new(1)
+            .unwrap_or_else(|_| unreachable!("fixed accessibility revision is valid")),
+        backend_accepted: true,
+        insertion_offset: 2,
+        character_count_before: 2,
+        character_count_after: 2 + inserted_characters,
+        caret_offset_after: Some(2 + inserted_characters),
+        selection_count_after: Some(0),
+        verified_length_only: true,
+        postcondition_satisfied: None,
+    }
+}
+
 fn text_command(
     window: WindowRef,
     value: &str,
@@ -279,6 +414,8 @@ fn text_command(
                 preserve_clipboard,
                 paste_observation_timeout_ms: 250,
             }),
+        semantic_options: None,
+        auto_policy: None,
     })
 }
 
@@ -424,7 +561,9 @@ fn runtime_failure(result: ExecutionOutcome<RuntimeResult>) -> RuntimeFailure {
     let output = match result {
         ExecutionOutcome::Completed { output, .. }
         | ExecutionOutcome::AtomicCompleted { output, .. } => output,
-        ExecutionOutcome::Stopped { .. } => unreachable!("expected a typed runtime failure"),
+        ExecutionOutcome::Stopped { .. } | ExecutionOutcome::StoppedWithEvidence { .. } => {
+            unreachable!("expected a typed runtime failure")
+        }
     };
     match output {
         RuntimeResult::Failure(failure) => failure,
@@ -436,10 +575,12 @@ fn runtime_success(result: ExecutionOutcome<RuntimeResult>) -> RuntimeSuccess {
     let output = match result {
         ExecutionOutcome::Completed { output, .. }
         | ExecutionOutcome::AtomicCompleted { output, .. } => output,
-        ExecutionOutcome::Stopped { .. } => unreachable!("expected a typed runtime success"),
+        ExecutionOutcome::Stopped { .. } | ExecutionOutcome::StoppedWithEvidence { .. } => {
+            unreachable!("expected a typed runtime success")
+        }
     };
     match output {
-        RuntimeResult::Success(success) => success,
+        RuntimeResult::Success(success) => *success,
         RuntimeResult::Failure(_) => unreachable!("expected a success result"),
     }
 }
@@ -491,6 +632,8 @@ async fn artifact_tamper_expiry_and_wrong_generation_fail_before_effect() {
         },
         strategy: TextStrategy::Physical,
         clipboard_options: None,
+        semantic_options: None,
+        auto_policy: None,
     });
     let failure = runtime_failure(
         execute_clipboard_command_with_context(
@@ -517,6 +660,8 @@ async fn artifact_tamper_expiry_and_wrong_generation_fail_before_effect() {
         },
         strategy: TextStrategy::Physical,
         clipboard_options: None,
+        semantic_options: None,
+        auto_policy: None,
     });
     let failure = runtime_failure(
         execute_clipboard_command_with_context(
@@ -541,6 +686,8 @@ async fn artifact_tamper_expiry_and_wrong_generation_fail_before_effect() {
         },
         strategy: TextStrategy::Physical,
         clipboard_options: None,
+        semantic_options: None,
+        auto_policy: None,
     });
     let failure = runtime_failure(
         execute_clipboard_command_with_context(
@@ -734,6 +881,188 @@ async fn physical_and_extended_text_use_redacted_scalar_and_mapping_proofs() {
         assert_eq!(preconditions[0].target, target);
         assert!(preconditions[0].require_focus);
     }
+}
+
+#[tokio::test]
+async fn semantic_only_text_fails_closed_without_physical_or_clipboard_work() {
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    for command in [
+        element_text_command(desktop_id, generation, TextStrategy::Semantic, None),
+        element_text_command(
+            desktop_id,
+            generation,
+            TextStrategy::Auto,
+            Some(vec![TextStrategy::Semantic]),
+        ),
+    ] {
+        let runtime = FakeRuntime::new(desktop_id, generation);
+        let failure = runtime_failure(
+            execute_clipboard_command_with_context(
+                &runtime,
+                CommandId::new(),
+                principal(),
+                command,
+                &mut FakeContext::running(),
+            )
+            .await,
+        );
+        assert_eq!(failure.code, ErrorCode::CapabilityUnavailable);
+        assert_eq!(failure.effect_stage, EffectStage::None);
+        assert!(runtime.calls().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn protected_length_only_text_insert_succeeds_for_semantic_and_auto_without_secret_echo() {
+    const SECRET: &str = "protected-text.insert-control-secret";
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    for (strategy, allowed) in [
+        (TextStrategy::Semantic, None),
+        (
+            TextStrategy::Auto,
+            Some(vec![TextStrategy::Semantic, TextStrategy::Physical]),
+        ),
+    ] {
+        let runtime = FakeRuntime::new(desktop_id, generation);
+        mutex(&runtime.semantic_inserts).push_back(Ok(semantic_insert_evidence(
+            element_ref(desktop_id, generation),
+            u32::try_from(SECRET.chars().count())
+                .unwrap_or_else(|_| unreachable!("bounded secret length fits u32")),
+        )));
+        let command =
+            element_text_command_with_value(desktop_id, generation, strategy, allowed, SECRET);
+        assert!(!format!("{command:?}").contains(SECRET));
+        let success = runtime_success(
+            execute_clipboard_command_with_context(
+                &runtime,
+                CommandId::new(),
+                principal(),
+                command,
+                &mut FakeContext::running(),
+            )
+            .await,
+        );
+        let CommandOutcome::TextInserted { evidence } = success.outcome else {
+            unreachable!("semantic insertion returned the wrong outcome");
+        };
+        assert_eq!(evidence.selected_strategy, TextStrategy::Semantic);
+        assert_eq!(
+            evidence.completed_scalars,
+            u64::try_from(SECRET.chars().count())
+                .unwrap_or_else(|_| unreachable!("bounded secret length fits u64"))
+        );
+        assert!(
+            evidence
+                .semantic
+                .as_ref()
+                .is_some_and(|semantic| semantic.verified_length_only)
+        );
+        assert!(!format!("{evidence:?}").contains(SECRET));
+        assert_eq!(runtime.calls(), vec!["semantic_text_insert"]);
+    }
+}
+
+#[tokio::test]
+async fn text_auto_does_not_fallback_after_backend_rejection_at_dispatch_boundary() {
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let runtime = FakeRuntime::new(desktop_id, generation);
+    mutex(&runtime.semantic_inserts).push_back(Err(SemanticActionFailure::BackendRejected));
+    mutex(&runtime.focuses).push_back(Ok(EffectStage::None));
+    mutex(&runtime.keyboards).push_back(Ok(keyboard_outcome(
+        CommandId::new(),
+        Some(PhysicalTextMode::CurrentLayout),
+        3,
+        3,
+        0,
+    )));
+    let failure = runtime_failure(
+        execute_clipboard_command_with_context(
+            &runtime,
+            CommandId::new(),
+            principal(),
+            element_text_command(
+                desktop_id,
+                generation,
+                TextStrategy::Auto,
+                Some(vec![TextStrategy::Semantic, TextStrategy::Physical]),
+            ),
+            &mut FakeContext::running(),
+        )
+        .await,
+    );
+    assert_eq!(failure.code, ErrorCode::UnsupportedByTarget);
+    assert_eq!(failure.effect_stage, EffectStage::SemanticActionDispatched);
+    assert_eq!(runtime.calls(), vec!["semantic_text_insert"]);
+}
+
+#[tokio::test]
+async fn element_auto_uses_declared_order_and_never_falls_back_after_effect() {
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let command_id = CommandId::new();
+
+    let no_effect = FakeRuntime::new(desktop_id, generation);
+    mutex(&no_effect.focuses).push_back(Ok(EffectStage::None));
+    mutex(&no_effect.keyboards).push_back(Ok(keyboard_outcome(
+        command_id,
+        Some(PhysicalTextMode::CurrentLayout),
+        3,
+        3,
+        0,
+    )));
+    let success = runtime_success(
+        execute_clipboard_command_with_context(
+            &no_effect,
+            command_id,
+            principal(),
+            element_text_command(
+                desktop_id,
+                generation,
+                TextStrategy::Auto,
+                Some(vec![TextStrategy::Semantic, TextStrategy::Physical]),
+            ),
+            &mut FakeContext::running(),
+        )
+        .await,
+    );
+    let CommandOutcome::TextInserted { evidence } = success.outcome else {
+        unreachable!("element Auto returned the wrong outcome");
+    };
+    assert_eq!(evidence.selected_strategy, TextStrategy::Physical);
+    assert_eq!(no_effect.calls(), vec!["focus", "keyboard_physical"]);
+
+    let after_effect = FakeRuntime::new(desktop_id, generation);
+    mutex(&after_effect.focuses).push_back(Ok(EffectStage::None));
+    mutex(&after_effect.keyboards).push_back(Err(ClipboardInputError::Failure(input_failure(
+        command_id,
+        InputFailureKind::TextNotRepresentable,
+        1,
+        0,
+    ))));
+    let failure = runtime_failure(
+        execute_clipboard_command_with_context(
+            &after_effect,
+            command_id,
+            principal(),
+            element_text_command(
+                desktop_id,
+                generation,
+                TextStrategy::Auto,
+                Some(vec![
+                    TextStrategy::Semantic,
+                    TextStrategy::Physical,
+                    TextStrategy::Clipboard,
+                ]),
+            ),
+            &mut FakeContext::running(),
+        )
+        .await,
+    );
+    assert_eq!(failure.effect_stage, EffectStage::TextInserted);
+    assert_eq!(after_effect.calls(), vec!["focus", "keyboard_physical"]);
 }
 
 #[tokio::test]

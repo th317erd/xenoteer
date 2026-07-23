@@ -181,6 +181,58 @@ fn precondition_runs_after_pointer_resolution_and_before_any_xtest_event()
 }
 
 #[test]
+fn window_click_precondition_rejects_before_interpolated_motion()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = MockBackend::new(RootPoint::new(1, 1)?);
+    let root = WindowRect::new(CoordinateSpace::RootPhysical, Rect::new(0, 0, 800, 600)?)?;
+    let client = WindowRect::new(
+        CoordinateSpace::RootPhysical,
+        Rect::new(100, 200, 300, 200)?,
+    )?;
+    backend.set_window_geometry(xenoteer_core::window_geometry::WindowGeometryContext::new(
+        root,
+        WindowGeometry {
+            client_rect: client,
+            frame_rect: None,
+            content_rect: client,
+            frame_extents: None,
+        },
+    )?);
+    let (handle, join) = spawn_test_actor(2, {
+        let backend = backend.clone();
+        move || Ok(backend)
+    })?;
+    let reply = handle.try_submit_operation_with_precondition(
+        context(),
+        InputOperation::WindowPointerClick(WindowPointerClickRequest::new(
+            42,
+            CoordinateSpace::WindowClient,
+            Point::new(20, 30),
+            WindowPointerBoundsPolicy::Reject,
+            MotionOptions::interpolated(xenoteer_core::input::MotionCurve::Smooth)?,
+            LogicalButton::Left,
+            1,
+            0,
+            0,
+            0,
+        )),
+        InputPrecondition::new(|| Err(InputPreconditionFailure::TargetStale)),
+        CancellationToken::new(),
+    )?;
+    let failure = match reply.blocking_recv()? {
+        Err(failure) => failure,
+        Ok(_) => return Err("stale window click unexpectedly succeeded".into()),
+    };
+    assert_eq!(failure.kind, InputFailureKind::TargetStale);
+    assert_eq!(failure.events_emitted, 0);
+    assert_eq!(failure.completed_units, 0);
+    assert!(backend.events().is_empty());
+    let _ = handle.shutdown().blocking_recv();
+    assert_eq!(join.join(), super::InputActorExit::Stopped);
+    Ok(())
+}
+
+#[test]
 fn window_multi_click_revalidates_geometry_identity_and_focus_before_every_button_down()
 -> Result<(), Box<dyn std::error::Error>> {
     let backend = MockBackend::new(RootPoint::new(1, 1)?);
@@ -220,7 +272,7 @@ fn window_multi_click_revalidates_geometry_identity_and_focus_before_every_butto
         )),
         InputPrecondition::new(move || {
             let call = checks_from_precondition.fetch_add(1, Ordering::SeqCst);
-            if call == 0 {
+            if call < 2 {
                 Ok(())
             } else {
                 Err(InputPreconditionFailure::FocusLost)
@@ -235,7 +287,7 @@ fn window_multi_click_revalidates_geometry_identity_and_focus_before_every_butto
     assert_eq!(failure.kind, InputFailureKind::FocusLost);
     assert_eq!(failure.completed_units, 1);
     assert_eq!(failure.events_emitted, 3);
-    assert_eq!(checks.load(Ordering::SeqCst), 2);
+    assert_eq!(checks.load(Ordering::SeqCst), 3);
     assert_eq!(backend.window_geometry_calls(), 3);
     assert_eq!(
         backend
@@ -289,6 +341,8 @@ fn window_click_revalidates_geometry_and_focus_after_motion_and_dwell_before_but
     let expected = RootPoint::new(120, 230)?;
     let check_backend = backend.clone();
     let check_expected = expected;
+    let checks = Arc::new(AtomicUsize::new(0));
+    let checks_from_precondition = Arc::clone(&checks);
     let reply = handle.try_submit_operation_with_precondition(
         context(),
         InputOperation::WindowPointerClick(WindowPointerClickRequest::new(
@@ -304,19 +358,25 @@ fn window_click_revalidates_geometry_and_focus_after_motion_and_dwell_before_but
             0,
         )),
         InputPrecondition::new(move || {
-            assert_eq!(check_backend.window_geometry_calls(), 2);
-            assert!(matches!(
-                check_backend.events().as_slice(),
-                [BackendEvent::Motion { point, delay_ms: 0 }] if *point == check_expected
-            ));
-            assert!(matches!(
-                check_backend.operations().as_slice(),
-                [
-                    MockOperation::Event(BackendEvent::Motion { point, delay_ms: 0 }),
-                    MockOperation::Delay(duration),
-                ] if *point == check_expected
-                    && *duration == std::time::Duration::from_millis(7)
-            ));
+            let call = checks_from_precondition.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                assert_eq!(check_backend.window_geometry_calls(), 1);
+                assert!(check_backend.events().is_empty());
+            } else {
+                assert_eq!(check_backend.window_geometry_calls(), 2);
+                assert!(matches!(
+                    check_backend.events().as_slice(),
+                    [BackendEvent::Motion { point, delay_ms: 0 }] if *point == check_expected
+                ));
+                assert!(matches!(
+                    check_backend.operations().as_slice(),
+                    [
+                        MockOperation::Event(BackendEvent::Motion { point, delay_ms: 0 }),
+                        MockOperation::Delay(duration),
+                    ] if *point == check_expected
+                        && *duration == std::time::Duration::from_millis(7)
+                ));
+            }
             Ok(())
         }),
         CancellationToken::new(),
@@ -324,6 +384,7 @@ fn window_click_revalidates_geometry_and_focus_after_motion_and_dwell_before_but
     let outcome = reply.blocking_recv()??;
     assert_eq!(outcome.requested_pointer, Some(expected));
     assert_eq!(outcome.completed_units, 1);
+    assert_eq!(checks.load(Ordering::SeqCst), 2);
     assert!(matches!(
         backend.events().as_slice(),
         [
@@ -360,6 +421,8 @@ fn window_click_stale_after_motion_and_dwell_never_emits_button_down()
         move || Ok(backend)
     })?;
     let check_backend = backend.clone();
+    let checks = Arc::new(AtomicUsize::new(0));
+    let checks_from_precondition = Arc::clone(&checks);
     let reply = handle.try_submit_operation_with_precondition(
         context(),
         InputOperation::WindowPointerClick(WindowPointerClickRequest::new(
@@ -375,14 +438,21 @@ fn window_click_stale_after_motion_and_dwell_never_emits_button_down()
             0,
         )),
         InputPrecondition::new(move || {
-            assert_eq!(check_backend.window_geometry_calls(), 2);
-            assert!(
-                check_backend
-                    .events()
-                    .iter()
-                    .all(|event| { matches!(event, BackendEvent::Motion { .. }) })
-            );
-            Err(InputPreconditionFailure::TargetStale)
+            let call = checks_from_precondition.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                assert_eq!(check_backend.window_geometry_calls(), 1);
+                assert!(check_backend.events().is_empty());
+                Ok(())
+            } else {
+                assert_eq!(check_backend.window_geometry_calls(), 2);
+                assert!(
+                    check_backend
+                        .events()
+                        .iter()
+                        .all(|event| { matches!(event, BackendEvent::Motion { .. }) })
+                );
+                Err(InputPreconditionFailure::TargetStale)
+            }
         }),
         CancellationToken::new(),
     )?;
@@ -393,6 +463,7 @@ fn window_click_stale_after_motion_and_dwell_never_emits_button_down()
     assert_eq!(failure.kind, InputFailureKind::TargetStale);
     assert_eq!(failure.completed_units, 0);
     assert_eq!(failure.events_emitted, 1);
+    assert_eq!(checks.load(Ordering::SeqCst), 2);
     assert!(
         backend
             .events()
@@ -465,12 +536,72 @@ fn window_click_geometry_change_after_motion_fails_before_focus_check_and_button
     assert_eq!(failure.completed_units, 0);
     assert_eq!(failure.events_emitted, 1);
     assert_eq!(backend.window_geometry_calls(), 2);
-    assert!(!checked.load(Ordering::SeqCst));
+    assert!(checked.load(Ordering::SeqCst));
     assert!(matches!(
         backend.events().as_slice(),
         [BackendEvent::Motion { point, delay_ms: 0 }]
             if *point == RootPoint::new(120, 230)?
     ));
+    let _ = handle.shutdown().blocking_recv();
+    assert_eq!(join.join(), super::InputActorExit::Stopped);
+    Ok(())
+}
+
+#[test]
+fn element_bound_window_click_rejects_changed_root_target_before_motion()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = MockBackend::new(RootPoint::new(1, 1)?);
+    let root = WindowRect::new(CoordinateSpace::RootPhysical, Rect::new(0, 0, 800, 600)?)?;
+    let moved_client = WindowRect::new(
+        CoordinateSpace::RootPhysical,
+        Rect::new(140, 200, 300, 200)?,
+    )?;
+    backend.set_window_geometry(xenoteer_core::window_geometry::WindowGeometryContext::new(
+        root,
+        WindowGeometry {
+            client_rect: moved_client,
+            frame_rect: None,
+            content_rect: moved_client,
+            frame_extents: None,
+        },
+    )?);
+    let (handle, join) = spawn_test_actor(2, {
+        let backend = backend.clone();
+        move || Ok(backend)
+    })?;
+    let checked = Arc::new(AtomicBool::new(false));
+    let checked_from_precondition = Arc::clone(&checked);
+    let request = WindowPointerClickRequest::new(
+        42,
+        CoordinateSpace::WindowClient,
+        Point::new(20, 30),
+        WindowPointerBoundsPolicy::Reject,
+        MotionOptions::interpolated(xenoteer_core::input::MotionCurve::Linear)?,
+        LogicalButton::Left,
+        1,
+        0,
+        0,
+        0,
+    )
+    .with_expected_root_target(RootPoint::new(120, 230)?);
+    let reply = handle.try_submit_operation_with_precondition(
+        context(),
+        InputOperation::WindowPointerClick(request),
+        InputPrecondition::new(move || {
+            checked_from_precondition.store(true, Ordering::SeqCst);
+            Ok(())
+        }),
+        CancellationToken::new(),
+    )?;
+    let failure = match reply.blocking_recv()? {
+        Err(failure) => failure,
+        Ok(_) => return Err("changed root target unexpectedly succeeded".into()),
+    };
+    assert_eq!(failure.kind, InputFailureKind::PostconditionFailed);
+    assert_eq!(failure.events_emitted, 0);
+    assert_eq!(failure.completed_units, 0);
+    assert!(!checked.load(Ordering::SeqCst));
+    assert!(backend.events().is_empty());
     let _ = handle.shutdown().blocking_recv();
     assert_eq!(join.join(), super::InputActorExit::Stopped);
     Ok(())

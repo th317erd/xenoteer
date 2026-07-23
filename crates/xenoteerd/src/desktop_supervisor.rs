@@ -1,4 +1,9 @@
-//! Phase-2 desktop capability supervisor and input-actor lifetime owner.
+//! Required physical-desktop capability supervisor and input-actor owner.
+//!
+//! AT-SPI is intentionally absent from this required-capability boundary. The
+//! Phase-5 accessibility actor owns its connection, reconnect, generation, and
+//! degraded state so semantic loss cannot stop otherwise healthy physical X11
+//! automation.
 
 use std::{future::Future, net::SocketAddr, time::Duration};
 
@@ -11,7 +16,6 @@ use tokio::{
     time::{Instant, interval_at, timeout},
 };
 use tokio_util::sync::CancellationToken;
-use xenoteer_atspi::LiveAtspiProbe;
 use xenoteer_core::{Config, input::InputHealth};
 use xenoteer_protocol::DesktopGeneration;
 use xenoteer_server::{DesktopReadiness, ReadinessHandle, ReadinessSnapshot};
@@ -316,7 +320,6 @@ impl DesktopRuntime {
         };
         let ready = async {
             probe_input(&runtime.input).await?;
-            probe_atspi().await?;
             probe_viewer(spec).await
         }
         .await;
@@ -335,7 +338,7 @@ impl DesktopRuntime {
         )
         .await?;
         probe_input(&self.input).await?;
-        probe_atspi().await
+        Ok(())
     }
 
     async fn shutdown(&mut self) -> Result<(), DesktopSupervisorError> {
@@ -426,18 +429,6 @@ async fn probe_input(input: &InputActorHandle) -> Result<(), ProbeFailure> {
             Err(ProbeFailure::Input)
         }
     }
-}
-
-async fn probe_atspi() -> Result<(), ProbeFailure> {
-    let deadline = Instant::now() + OPERATION_TIMEOUT;
-    let probe = LiveAtspiProbe::connect(deadline)
-        .await
-        .map_err(|_| ProbeFailure::Atspi)?;
-    let _root_count = probe
-        .probe_registry_service(deadline)
-        .await
-        .map_err(|_| ProbeFailure::Atspi)?;
-    Ok(())
 }
 
 async fn probe_viewer(spec: &DesktopProbeSpec) -> Result<(), ProbeFailure> {
@@ -817,7 +808,6 @@ enum ProbeFailure {
     X11,
     InputStart,
     Input,
-    Atspi,
     Viewer,
 }
 
@@ -827,7 +817,6 @@ impl ProbeFailure {
             Self::X11 => "x11_desktop",
             Self::InputStart => "input_actor_start",
             Self::Input => "input_actor_probe",
-            Self::Atspi => "atspi_registry",
             Self::Viewer => "viewer_gateway",
         }
     }
@@ -903,7 +892,6 @@ mod tests {
         assert_eq!(ProbeFailure::X11.code(), "x11_desktop");
         assert_eq!(ProbeFailure::InputStart.code(), "input_actor_start");
         assert_eq!(ProbeFailure::Input.code(), "input_actor_probe");
-        assert_eq!(ProbeFailure::Atspi.code(), "atspi_registry");
         assert_eq!(ProbeFailure::Viewer.code(), "viewer_gateway");
     }
 

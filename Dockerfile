@@ -44,7 +44,7 @@ COPY crates/ crates/
 COPY scripts/licenses/generate-cargo-manifest.sh /usr/local/bin/generate-cargo-manifest
 RUN chmod 0755 /usr/local/bin/generate-cargo-manifest \
     && nice -n 10 cargo build --locked --release \
-      --bin xenoteerd --bin xenoteer-processd --jobs 4 \
+      --bin xenoteerd --bin xenoteer-processd --jobs 2 \
     && /usr/local/bin/generate-cargo-manifest \
       /src \
       /src/target/release/xenoteerd \
@@ -267,6 +267,10 @@ RUN --mount=type=bind,source=scripts/container/verify-apt-metadata.sh,target=/us
     && test "$(fc-match --format='%{family[0]}' 'Noto Sans CJK JP')" = 'Noto Sans CJK JP' \
     && test "$(fc-match --format='%{family[0]}' 'Noto Color Emoji')" = 'Noto Color Emoji' \
     && test "$(fc-match --format='%{family[0]}' 'Noto Sans Mono')" = 'Noto Sans Mono' \
+    # AT-SPI is an explicit supervised critical service. Leaving the package's
+    # session-bus activation entry installed permits an unsupervised launcher
+    # to race a supervised restart and orphan a second accessibility bus.
+    && rm -f /usr/share/dbus-1/services/org.a11y.Bus.service \
     && nice -n 15 /usr/local/libexec/xenoteer/generate-debian-installed-manifest \
       / /usr/share/doc/xenoteer/debian-installed-files.tsv \
       /usr/share/doc/xenoteer/package-manifest.tsv \

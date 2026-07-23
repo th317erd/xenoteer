@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod accessibility;
+pub mod accessibility_action;
 pub mod artifact;
 pub mod capabilities;
 pub mod capture_contract;
@@ -30,10 +32,14 @@ pub mod window_control;
 pub mod window_selector;
 
 #[cfg(test)]
+mod accessibility_tests;
+#[cfg(test)]
 mod compatibility_tests;
 #[cfg(test)]
 mod input_tests;
 
+pub use accessibility::*;
+pub use accessibility_action::*;
 pub use artifact::*;
 
 pub use capabilities::{
@@ -71,8 +77,9 @@ pub use process::{
     ProcessValidationError, ProcessView,
 };
 pub use result::{
-    CommandLifecycle, CommandOutcome, CommandResult, EffectStage, ResultInvariantError, Warning,
-    WarningValidationError,
+    CommandLifecycle, CommandOutcome, CommandResult, CommandTrace, CommandTraceDomain,
+    CommandTraceStage, CommandTraceStatus, CommandTraceStep, CommandTraceValidationError,
+    EffectStage, MAX_COMMAND_TRACE_STEPS, ResultInvariantError, Warning, WarningValidationError,
 };
 pub use timestamp::{Timestamp, TimestampError};
 pub use version::{ProtocolVersion, VersionRange};

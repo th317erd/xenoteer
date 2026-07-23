@@ -1,0 +1,60 @@
+{
+  "command_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0071",
+  "lifecycle": "succeeded",
+  "effect_stage": "text_inserted",
+  "accepted_at": "2026-07-21T20:00:00Z",
+  "started_at": "2026-07-21T20:00:00.100Z",
+  "finished_at": "2026-07-21T20:00:00.300Z",
+  "outcome": {
+    "type": "text_inserted",
+    "evidence": {
+      "selected_strategy": "semantic",
+      "utf8_bytes": 20,
+      "unicode_scalars": 20,
+      "completed_scalars": 20,
+      "clipboard": null,
+      "semantic": {
+        "element": {
+          "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
+          "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+          "atspi_generation": 4,
+          "application": {
+            "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
+            "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+            "atspi_generation": 4,
+            "unique_bus_name": ":1.42",
+            "root_object_path": "/org/a11y/atspi/accessible/root",
+            "app_instance_generation": 2,
+            "identity_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "object_path": "/org/a11y/atspi/accessible/stable-entry",
+          "object_identity_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "cache_sequence": 91
+        },
+        "revision_before": 94,
+        "revision_after": 95,
+        "backend_accepted": true,
+        "insertion_offset": 7,
+        "character_count_before": 7,
+        "character_count_after": 27,
+        "caret_offset_after": 27,
+        "selection_count_after": 0,
+        "verified_length_only": true,
+        "postcondition_satisfied": null
+      }
+    }
+  },
+  "error": null,
+  "trace": {
+    "domain": "semantic_accessibility",
+    "steps": [
+      {"stage": "command_validated", "status": "completed"},
+      {"stage": "semantic_target_revalidated", "status": "completed"},
+      {"stage": "semantic_dispatched", "status": "completed"},
+      {"stage": "semantic_readback", "status": "completed"},
+      {"stage": "postcondition_observed", "status": "not_required"},
+      {"stage": "command_completed", "status": "completed"}
+    ]
+  },
+  "warnings": []
+}

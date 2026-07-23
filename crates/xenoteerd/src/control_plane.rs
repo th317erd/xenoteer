@@ -5,7 +5,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -21,8 +21,10 @@ use tokio::{
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
+use xenoteer_atspi::SemanticRect;
 use xenoteer_core::{
-    Config,
+    AccessibilityCorrelationLimits, Config, ElementClickPlanError, PhysicalElementClickPlan,
+    RevalidatedElementClick,
     coordinator::{
         CancelCommandOutcome, CanonicalCommandHash, CommandEffect, CommandEventMapper,
         CommandExecutor, CommandLedgerError, CommandLedgerLimits, CommandRecord,
@@ -37,6 +39,7 @@ use xenoteer_core::{
         ButtonDirection, Effect, InputAction, LogicalButton, MotionCurve, MotionOptions,
         MotionPlanError, MotionPolicy, PhysicalButton, ScrollAction, ScrollDirection,
     },
+    plan_physical_element_click, revalidate_physical_element_click,
 };
 use xenoteer_processd::{
     BrokerClient, BrokerClientError, BrokerErrorCode, BrokerEventReplay, BrokerLiveEvent,
@@ -46,18 +49,22 @@ use xenoteer_protocol::{
     ACTION_LIFECYCLE_TOPIC, ArtifactRef, COMMAND_LIFECYCLE_TOPIC, ClipboardPasteEvidence,
     ClipboardRestorationEvidence, ClipboardRestorationKind, ClipboardTarget, ClipboardWriteSource,
     Command, CommandEnvelope, CommandId, CommandLifecycle, CommandOutcome, CommandResult,
-    ControlLeaseId, CoordinateSpace, DesktopGeneration, DesktopId, EffectStage, ErrorCode,
+    CommandTrace, CommandTraceDomain, CommandTraceStage, CommandTraceStatus, CommandTraceStep,
+    ControlLeaseId, CoordinateSpace, DesktopGeneration, DesktopId, EffectStage,
+    ElementClickScrollPolicy, ElementOcclusionPolicy, ElementPhysicalClickCommand,
+    ElementPhysicalClickResult, ElementScrollAlignment, ElementScrollCommand, ElementScrollTarget,
+    ElementSnapshotExpansion, ElementSnapshotRequest, ElementWindowActivationPolicy, ErrorCode,
     EventResyncReason, EventTopic, LeaseAcquireRequest, LeaseAvailability, LeaseReleaseRequest,
     LeaseRenewRequest, LeaseStateView, MAX_CLIPBOARD_PRESERVATION_BYTES,
     MAX_PASTE_OBSERVATION_TIMEOUT_MS, MAX_SELECTION_BYTES, MAX_TEXT_INSERT_BYTES, NormalizedEvent,
-    PROCESS_EXITED_TOPIC, PointerClickTarget, PointerCurve, PointerDragTarget,
-    PointerLogicalButton, PointerScrollDirection, Problem, ProcessExitedEvent, RetryAdvice,
+    PROCESS_EXITED_TOPIC, Point, PointerClickTarget, PointerCurve, PointerDragTarget,
+    PointerLogicalButton, PointerScrollDirection, Problem, ProcessExitedEvent, Rect, RetryAdvice,
     SelectionName, SelectionSetCommand, SelectionTransferEvidence, SelectionTransferTerminal,
     SequencedEvent, Sha256Digest, TextInsertCommand, TextInsertEvidence, TextInsertOptions,
-    TextSource, TextStrategy, TextTarget, Timestamp, WindowActivateCommand, WindowActivateResult,
-    WindowCloseOutcome, WindowCloseResult, WindowControlResult, WindowControlWarning,
-    WindowFocusFallback, WindowGeometryRequest, WindowGeometryTarget, WindowManagerState,
-    WindowMoveResizeResult, WindowMoveToWorkspaceResult,
+    TextSource, TextStrategy, TextTarget, Timestamp, TracePolicy, WindowActivateCommand,
+    WindowActivateResult, WindowCloseOutcome, WindowCloseResult, WindowControlResult,
+    WindowControlWarning, WindowFocusFallback, WindowGeometryRequest, WindowGeometryTarget,
+    WindowManagerState, WindowMoveResizeResult, WindowMoveToWorkspaceResult,
     WindowPointerBoundsPolicy as WireWindowPointerBoundsPolicy, WindowPointerCoordinateSpace,
     WindowRect, WindowRef, WindowScreenBoundsPolicy, WindowSnapshot, WindowStackMode,
     WindowStackResult, WindowStateObservation, WindowStateOperation, WindowStateResult,
@@ -90,8 +97,18 @@ use xenoteer_x11::{
 };
 
 use crate::{
+    accessibility_plane::{
+        AccessibilityCorrelationCoordinator, AccessibilityCorrelationCoordinatorConfig,
+        AccessibilityCorrelationCoordinatorError, AccessibilityExplicitCorrelationEvidence,
+        AccessibilityProfiledRect, accessibility_correlation_error_class,
+    },
+    accessibility_runtime::AccessibilitySemanticRuntime,
     artifact_service::{InternalArtifactContext, StoreArtifactService},
-    observation_plane::DaemonObservationService,
+    observation_plane::{DaemonObservationService, WindowOcclusionSnapshot},
+    semantic_actions::{
+        SemanticActionFailure, execute_semantic_action, execute_semantic_text_insert,
+        require_supported_postcondition, wait_for_postcondition,
+    },
 };
 
 const LEASE_TTL_MS: u64 = 60_000;
@@ -119,6 +136,7 @@ pub(crate) struct CoordinatorRuntime {
     join: JoinHandle<()>,
     process_event_cancellation: CancellationToken,
     process_event_join: JoinHandle<Result<(), ProcessEventRelayError>>,
+    accessibility_correlation_join: Option<JoinHandle<()>>,
     // Retained for Phase 4 desktop actors; the relay must remain owned even
     // before the first observation actor is wired in.
     #[allow(dead_code)]
@@ -164,6 +182,10 @@ impl CoordinatorRuntime {
             .await
             .map_err(|_| CoordinatorRuntimeError::ExternalEventTaskPanicked)?;
         external_result?;
+        if let Some(join) = self.accessibility_correlation_join {
+            join.await
+                .map_err(|_| CoordinatorRuntimeError::AccessibilityCorrelationTaskPanicked)?;
+        }
         self.join
             .await
             .map_err(|_| CoordinatorRuntimeError::TaskPanicked)
@@ -193,7 +215,7 @@ pub(crate) fn spawn(
     generation: DesktopGeneration,
     input: watch::Receiver<Option<InputActorHandle>>,
 ) -> Result<CoordinatorRuntime, CoordinatorSetupError> {
-    spawn_inner(config, desktop_id, generation, input, None, None)
+    spawn_inner(config, desktop_id, generation, input, None, None, None)
 }
 
 /// Creates the coordinator with the live Phase-4 window-control runtime.
@@ -212,10 +234,12 @@ pub(crate) fn spawn_with_window_control(
         input,
         Some(window_control),
         None,
+        None,
     )
 }
 
 /// Creates the coordinator with the complete Phase-4 clipboard/text runtime.
+#[allow(dead_code)]
 pub(crate) fn spawn_with_clipboard_runtime(
     config: &Config,
     desktop_id: DesktopId,
@@ -232,6 +256,29 @@ pub(crate) fn spawn_with_clipboard_runtime(
         clipboard.input.clone(),
         Some(clipboard.window_control.clone()),
         Some(clipboard),
+        None,
+    )
+}
+
+/// Creates the coordinator with clipboard and generation-fenced semantic actions.
+pub(crate) fn spawn_with_accessibility_runtime(
+    config: &Config,
+    desktop_id: DesktopId,
+    generation: DesktopGeneration,
+    clipboard: ClipboardRuntime,
+    accessibility: AccessibilitySemanticRuntime,
+) -> Result<CoordinatorRuntime, CoordinatorSetupError> {
+    if clipboard.desktop_id != desktop_id || clipboard.generation != generation {
+        return Err(CoordinatorSetupError::ClipboardScope);
+    }
+    spawn_inner(
+        config,
+        desktop_id,
+        generation,
+        clipboard.input.clone(),
+        Some(clipboard.window_control.clone()),
+        Some(clipboard),
+        Some(accessibility),
     )
 }
 
@@ -242,8 +289,26 @@ fn spawn_inner(
     input: watch::Receiver<Option<InputActorHandle>>,
     window_control: Option<WindowControlRuntime>,
     clipboard: Option<ClipboardRuntime>,
+    accessibility: Option<AccessibilitySemanticRuntime>,
 ) -> Result<CoordinatorRuntime, CoordinatorSetupError> {
     let limits = config.limits();
+    let root_bounds = Rect::new(
+        0,
+        0,
+        config.desktop().display_width(),
+        config.desktop().display_height(),
+    )?;
+    let accessibility_correlation = match (&accessibility, &window_control) {
+        (Some(accessibility), Some(window_control)) => {
+            Some(Arc::new(AccessibilityCorrelationCoordinator::live(
+                accessibility.plane(),
+                accessibility.handle(),
+                Arc::clone(&window_control.observation),
+                AccessibilityCorrelationCoordinatorConfig::default(),
+            )?))
+        }
+        _ => None,
+    };
     let active_global = limits.accepted_commands_per_daemon();
     let settings = CoordinatorSettings::new(
         desktop_id,
@@ -264,18 +329,24 @@ fn spawn_inner(
     )?;
     let clock = ClockProjection::capture()?;
     let broker = BrokerClient::new(DEFAULT_BROKER_SOCKET);
+    let correlation_runtime = accessibility_correlation.clone();
     let executor = RuntimeExecutor {
         input,
         window_control,
         clipboard,
+        accessibility,
+        accessibility_correlation,
         broker: broker.clone(),
         motion_policy: MotionPolicy::from_input_config(config.input())?,
         desktop_id,
         generation,
+        root_bounds,
     };
     let event_mapper = RuntimeEventMapper::new()?;
     let (handle, join) = spawn_coordinator_with_event_mapper(settings, executor, event_mapper)?;
     let process_event_cancellation = CancellationToken::new();
+    let accessibility_correlation_join =
+        correlation_runtime.map(|runtime| runtime.spawn(process_event_cancellation.child_token()));
     let (external_event_ingress, external_event_join) = spawn_external_event_relay(
         handle.clone(),
         generation,
@@ -306,6 +377,7 @@ fn spawn_inner(
         join,
         process_event_cancellation,
         process_event_join,
+        accessibility_correlation_join,
         external_event_ingress,
         external_event_join,
         control,
@@ -317,6 +389,63 @@ fn spawn_inner(
 pub(crate) struct WindowControlRuntime {
     actor: WindowControlActorHandle,
     observation: Arc<DaemonObservationService>,
+}
+
+#[derive(Clone)]
+struct WindowMutationFence {
+    stop_requested: Option<Arc<AtomicBool>>,
+    cancellation: Option<CancellationToken>,
+    deadline: Option<Instant>,
+}
+
+impl WindowMutationFence {
+    fn requested(stop_requested: Arc<AtomicBool>) -> Self {
+        Self {
+            stop_requested: Some(stop_requested),
+            cancellation: None,
+            deadline: None,
+        }
+    }
+
+    fn physical(cancellation: CancellationToken, deadline: Instant) -> Self {
+        Self {
+            stop_requested: None,
+            cancellation: Some(cancellation),
+            deadline: Some(deadline),
+        }
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.stop_requested
+            .as_ref()
+            .is_some_and(|requested| requested.load(Ordering::Acquire))
+            || self
+                .cancellation
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            || self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+}
+
+fn revalidate_at_window_effect_boundary<F>(
+    fence: &WindowMutationFence,
+    revalidate: F,
+) -> Result<(), RawWindowRevalidationError>
+where
+    F: FnOnce() -> Result<(), RawWindowRevalidationError>,
+{
+    if fence.is_stopped() {
+        return Err(RawWindowRevalidationError::Rejected);
+    }
+    revalidate()?;
+    // Window-model revalidation can block. Recheck after it so cancellation
+    // or deadline expiry during that read cannot authorize a later X11 effect.
+    if fence.is_stopped() {
+        return Err(RawWindowRevalidationError::Rejected);
+    }
+    Ok(())
 }
 
 impl WindowControlRuntime {
@@ -336,18 +465,21 @@ pub(crate) struct ClipboardRuntime {
     observation: Arc<DaemonObservationService>,
     window_control: WindowControlRuntime,
     input: watch::Receiver<Option<InputActorHandle>>,
+    accessibility: Option<AccessibilitySemanticRuntime>,
     desktop_id: DesktopId,
     generation: DesktopGeneration,
 }
 
 impl ClipboardRuntime {
     /// Binds every authority-bearing dependency used by clipboard/text commands.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         actor: ClipboardActorHandle,
         artifacts: Arc<StoreArtifactService>,
         observation: Arc<DaemonObservationService>,
         window_control: WindowControlRuntime,
         input: watch::Receiver<Option<InputActorHandle>>,
+        accessibility: Option<AccessibilitySemanticRuntime>,
         desktop_id: DesktopId,
         generation: DesktopGeneration,
     ) -> Self {
@@ -357,6 +489,7 @@ impl ClipboardRuntime {
             observation,
             window_control,
             input,
+            accessibility,
             desktop_id,
             generation,
         }
@@ -405,6 +538,30 @@ trait ClipboardExecutionRuntime: Send + Sync {
     fn desktop_id(&self) -> DesktopId;
 
     fn generation(&self) -> DesktopGeneration;
+
+    fn semantic_runtime(&self) -> Option<AccessibilitySemanticRuntime> {
+        None
+    }
+
+    fn semantic_text_insert<'a>(
+        &'a self,
+        element: xenoteer_protocol::ElementRef,
+        text: String,
+        options: xenoteer_protocol::SemanticTextInsertOptions,
+        deadline: Instant,
+        cancellation: CancellationToken,
+    ) -> Option<
+        ClipboardRuntimeFuture<
+            'a,
+            Result<xenoteer_protocol::SemanticTextInsertEvidence, SemanticActionFailure>,
+        >,
+    > {
+        let runtime = self.semantic_runtime()?;
+        Some(Box::pin(async move {
+            execute_semantic_text_insert(&runtime, element, text, options, deadline, cancellation)
+                .await
+        }))
+    }
 
     fn read_artifact<'a>(
         &'a self,
@@ -481,6 +638,10 @@ impl ClipboardExecutionRuntime for ClipboardRuntime {
 
     fn generation(&self) -> DesktopGeneration {
         self.generation
+    }
+
+    fn semantic_runtime(&self) -> Option<AccessibilitySemanticRuntime> {
+        self.accessibility.clone()
     }
 
     fn read_artifact<'a>(
@@ -719,13 +880,15 @@ struct RuntimeCommand {
     command_id: CommandId,
     principal: PrincipalId,
     authorization: Principal,
+    detailed_trace: bool,
     command: Command,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct RuntimeSuccess {
     outcome: CommandOutcome,
     effect_stage: EffectStage,
+    trace: Option<CommandTrace>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -736,11 +899,13 @@ struct RuntimeFailure {
     detail: &'static str,
     retry: RetryAdvice,
     effect_stage: EffectStage,
+    trace_progress: RuntimeTraceProgress,
+    trace: Option<CommandTrace>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 enum RuntimeResult {
-    Success(RuntimeSuccess),
+    Success(Box<RuntimeSuccess>),
     Failure(RuntimeFailure),
 }
 
@@ -1275,10 +1440,11 @@ const fn terminal_cause_name(cause: TerminalCause) -> &'static str {
 
 impl RuntimeResult {
     fn success(outcome: CommandOutcome, effect_stage: EffectStage) -> Self {
-        Self::Success(RuntimeSuccess {
+        Self::Success(Box::new(RuntimeSuccess {
             outcome,
             effect_stage,
-        })
+            trace: None,
+        }))
     }
 
     fn failure(
@@ -1296,6 +1462,8 @@ impl RuntimeResult {
             detail,
             retry,
             effect_stage,
+            trace_progress: RuntimeTraceProgress::None,
+            trace: None,
         })
     }
 
@@ -1306,14 +1474,294 @@ impl RuntimeResult {
         }
     }
 
+    fn attach_trace(&mut self, trace: CommandTrace) {
+        match self {
+            Self::Success(result) => result.trace = Some(trace),
+            Self::Failure(result) => result.trace = Some(trace),
+        }
+    }
+
+    fn with_trace_progress(mut self, progress: RuntimeTraceProgress) -> Self {
+        if let Self::Failure(failure) = &mut self {
+            failure.trace_progress = progress;
+        }
+        self
+    }
+
+    const fn trace(&self) -> Option<&CommandTrace> {
+        match self {
+            Self::Success(result) => result.trace.as_ref(),
+            Self::Failure(result) => result.trace.as_ref(),
+        }
+    }
+
     fn preserve_prior_effect(mut self, prior: EffectStage) -> Self {
-        if prior.has_visible_effect() && !self.effect_stage().has_visible_effect() {
+        if prior.has_visible_effect() {
+            let retain_prior_stage = !self.effect_stage().has_visible_effect();
             match &mut self {
-                Self::Success(result) => result.effect_stage = prior,
-                Self::Failure(result) => result.effect_stage = prior,
+                Self::Success(result) if retain_prior_stage => result.effect_stage = prior,
+                Self::Failure(result) => {
+                    if retain_prior_stage {
+                        result.effect_stage = prior;
+                    }
+                    result.retry = RetryAdvice::Never;
+                }
+                Self::Success(_) => {}
             }
         }
         self
+    }
+
+    fn forbid_retry_after_effect(mut self) -> Self {
+        if self.effect_stage().has_visible_effect() {
+            match &mut self {
+                Self::Success(_) => {}
+                Self::Failure(failure) => failure.retry = RetryAdvice::Never,
+            }
+        }
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum RuntimeTraceProgress {
+    #[default]
+    None,
+    SemanticDispatched,
+    SemanticReadback,
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeTraceIntent {
+    General,
+    Semantic,
+    TextInsert,
+    PhysicalElement,
+}
+
+impl RuntimeTraceIntent {
+    const fn from_command(command: &Command) -> Self {
+        match command {
+            Command::ElementInvoke(_)
+            | Command::ElementFocus(_)
+            | Command::ElementSetValue(_)
+            | Command::ElementSelection(_)
+            | Command::ElementSetText(_)
+            | Command::ElementInsertText(_)
+            | Command::ElementScroll(_) => Self::Semantic,
+            Command::ElementPhysicalClick(_) => Self::PhysicalElement,
+            Command::TextInsert(_) => Self::TextInsert,
+            _ => Self::General,
+        }
+    }
+}
+
+fn attach_detailed_trace(
+    outcome: ExecutionOutcome<RuntimeResult>,
+    intent: RuntimeTraceIntent,
+) -> ExecutionOutcome<RuntimeResult> {
+    match outcome {
+        ExecutionOutcome::Completed { mut output, effect } => {
+            attach_runtime_trace(&mut output, intent);
+            ExecutionOutcome::Completed { output, effect }
+        }
+        ExecutionOutcome::AtomicCompleted { mut output, effect } => {
+            attach_runtime_trace(&mut output, intent);
+            ExecutionOutcome::AtomicCompleted { output, effect }
+        }
+        ExecutionOutcome::Stopped { effect } => {
+            let stage = if effect == CommandEffect::AfterEffect {
+                EffectStage::SideEffectObserved
+            } else {
+                EffectStage::None
+            };
+            let progress = if effect == CommandEffect::AfterEffect
+                && matches!(intent, RuntimeTraceIntent::Semantic)
+            {
+                RuntimeTraceProgress::SemanticDispatched
+            } else {
+                RuntimeTraceProgress::None
+            };
+            let mut output = RuntimeResult::failure(
+                500,
+                ErrorCode::Internal,
+                "Command stopped",
+                "The coordinator stopped command execution.",
+                RetryAdvice::Never,
+                stage,
+            )
+            .with_trace_progress(progress);
+            attach_runtime_trace(&mut output, intent);
+            ExecutionOutcome::StoppedWithEvidence { output, effect }
+        }
+        ExecutionOutcome::StoppedWithEvidence { mut output, effect } => {
+            attach_runtime_trace(&mut output, intent);
+            ExecutionOutcome::StoppedWithEvidence { output, effect }
+        }
+    }
+}
+
+fn attach_runtime_trace(result: &mut RuntimeResult, intent: RuntimeTraceIntent) {
+    let trace = detailed_runtime_trace(result, intent);
+    match trace {
+        Ok(trace) => result.attach_trace(trace),
+        Err(_) => {
+            let stage = if result.effect_stage().has_visible_effect() {
+                EffectStage::OutcomeUnknown
+            } else {
+                EffectStage::None
+            };
+            *result = RuntimeResult::failure(
+                500,
+                ErrorCode::Internal,
+                "Command trace invariant failed",
+                "The command completed, but its bounded trace evidence was invalid.",
+                RetryAdvice::Never,
+                stage,
+            );
+        }
+    }
+}
+
+fn detailed_runtime_trace(
+    result: &RuntimeResult,
+    intent: RuntimeTraceIntent,
+) -> Result<CommandTrace, xenoteer_protocol::CommandTraceValidationError> {
+    let succeeded = matches!(result, RuntimeResult::Success(_));
+    let terminal_status = if succeeded {
+        CommandTraceStatus::Completed
+    } else {
+        CommandTraceStatus::Failed
+    };
+    let intent = match (intent, result) {
+        (RuntimeTraceIntent::TextInsert, RuntimeResult::Success(success))
+            if matches!(
+                &success.outcome,
+                CommandOutcome::TextInserted { evidence }
+                    if evidence.selected_strategy == TextStrategy::Semantic
+            ) =>
+        {
+            RuntimeTraceIntent::Semantic
+        }
+        (RuntimeTraceIntent::TextInsert, _) => RuntimeTraceIntent::General,
+        (intent, _) => intent,
+    };
+    let completed = CommandTraceStep {
+        stage: CommandTraceStage::CommandCompleted,
+        status: terminal_status,
+    };
+    let mut steps = vec![CommandTraceStep {
+        stage: CommandTraceStage::CommandValidated,
+        status: CommandTraceStatus::Completed,
+    }];
+    let domain = match intent {
+        RuntimeTraceIntent::General | RuntimeTraceIntent::TextInsert => CommandTraceDomain::General,
+        RuntimeTraceIntent::Semantic => {
+            let progress = match result {
+                RuntimeResult::Success(_) => RuntimeTraceProgress::SemanticReadback,
+                RuntimeResult::Failure(failure) => failure.trace_progress,
+            };
+            if progress >= RuntimeTraceProgress::SemanticDispatched {
+                steps.extend([
+                    CommandTraceStep {
+                        stage: CommandTraceStage::SemanticTargetRevalidated,
+                        status: CommandTraceStatus::Completed,
+                    },
+                    CommandTraceStep {
+                        stage: CommandTraceStage::SemanticDispatched,
+                        status: CommandTraceStatus::Completed,
+                    },
+                ]);
+            }
+            if progress >= RuntimeTraceProgress::SemanticReadback {
+                steps.extend([CommandTraceStep {
+                    stage: CommandTraceStage::SemanticReadback,
+                    status: CommandTraceStatus::Completed,
+                }]);
+            }
+            if succeeded {
+                steps.extend([CommandTraceStep {
+                    stage: CommandTraceStage::PostconditionObserved,
+                    status: if result_has_postcondition(result) {
+                        CommandTraceStatus::Completed
+                    } else {
+                        CommandTraceStatus::NotRequired
+                    },
+                }]);
+            }
+            CommandTraceDomain::SemanticAccessibility
+        }
+        RuntimeTraceIntent::PhysicalElement => {
+            if let RuntimeResult::Success(success) = result
+                && let CommandOutcome::ElementPhysicalClick { result } = &success.outcome
+            {
+                steps.extend([
+                    CommandTraceStep {
+                        stage: CommandTraceStage::PhysicalCorrelationRevalidated,
+                        status: CommandTraceStatus::Completed,
+                    },
+                    CommandTraceStep {
+                        stage: CommandTraceStage::PhysicalWindowRevalidated,
+                        status: CommandTraceStatus::Completed,
+                    },
+                    CommandTraceStep {
+                        stage: CommandTraceStage::PhysicalScroll,
+                        status: if result.scrolled {
+                            CommandTraceStatus::Completed
+                        } else {
+                            CommandTraceStatus::NotRequired
+                        },
+                    },
+                    CommandTraceStep {
+                        stage: CommandTraceStage::PhysicalActivation,
+                        status: if result.window_activated {
+                            CommandTraceStatus::Completed
+                        } else {
+                            CommandTraceStatus::NotRequired
+                        },
+                    },
+                    CommandTraceStep {
+                        stage: CommandTraceStage::PhysicalPointerInterpolation,
+                        status: CommandTraceStatus::Completed,
+                    },
+                    CommandTraceStep {
+                        stage: CommandTraceStage::PhysicalButtonPress,
+                        status: CommandTraceStatus::Completed,
+                    },
+                    CommandTraceStep {
+                        stage: CommandTraceStage::PhysicalButtonRelease,
+                        status: CommandTraceStatus::Completed,
+                    },
+                    CommandTraceStep {
+                        stage: CommandTraceStage::PostconditionObserved,
+                        status: if result.postcondition_satisfied == Some(true) {
+                            CommandTraceStatus::Completed
+                        } else {
+                            CommandTraceStatus::NotRequired
+                        },
+                    },
+                ]);
+            }
+            CommandTraceDomain::PhysicalElementInput
+        }
+    };
+    steps.push(completed);
+    CommandTrace::new(domain, steps)
+}
+
+fn result_has_postcondition(result: &RuntimeResult) -> bool {
+    match result {
+        RuntimeResult::Success(success) => match &success.outcome {
+            CommandOutcome::ElementAction { result } => {
+                result.evidence.postcondition_satisfied == Some(true)
+            }
+            CommandOutcome::TextInserted { evidence } => evidence
+                .semantic
+                .as_ref()
+                .is_some_and(|semantic| semantic.postcondition_satisfied == Some(true)),
+            _ => false,
+        },
+        RuntimeResult::Failure(_) => false,
     }
 }
 
@@ -1322,10 +1770,13 @@ struct RuntimeExecutor {
     input: watch::Receiver<Option<InputActorHandle>>,
     window_control: Option<WindowControlRuntime>,
     clipboard: Option<ClipboardRuntime>,
+    accessibility: Option<AccessibilitySemanticRuntime>,
+    accessibility_correlation: Option<Arc<AccessibilityCorrelationCoordinator>>,
     broker: BrokerClient,
     motion_policy: MotionPolicy,
     desktop_id: DesktopId,
     generation: DesktopGeneration,
+    root_bounds: Rect,
 }
 
 impl CommandExecutor<RuntimeCommand, RuntimeResult> for RuntimeExecutor {
@@ -1359,6 +1810,21 @@ impl CommandExecutor<RuntimeCommand, RuntimeResult> for RuntimeExecutor {
 
 impl RuntimeExecutor {
     async fn execute_command(
+        &self,
+        command: RuntimeCommand,
+        context: ExecutionContext,
+    ) -> ExecutionOutcome<RuntimeResult> {
+        let detailed_trace = command.detailed_trace;
+        let trace_intent = RuntimeTraceIntent::from_command(&command.command);
+        let outcome = self.execute_command_untraced(command, context).await;
+        if detailed_trace {
+            attach_detailed_trace(outcome, trace_intent)
+        } else {
+            outcome
+        }
+    }
+
+    async fn execute_command_untraced(
         &self,
         command: RuntimeCommand,
         context: ExecutionContext,
@@ -1678,8 +2144,1417 @@ impl RuntimeExecutor {
                 };
                 execute_clipboard_command(&runtime, command_id, principal, command, context).await
             }
+            command @ (Command::ElementInvoke(_)
+            | Command::ElementFocus(_)
+            | Command::ElementSetValue(_)
+            | Command::ElementSelection(_)
+            | Command::ElementSetText(_)
+            | Command::ElementInsertText(_)
+            | Command::ElementScroll(_)) => {
+                let Some(runtime) = self.accessibility.clone() else {
+                    return completed(capability_unavailable());
+                };
+                execute_semantic_command(&runtime, command, context).await
+            }
+            Command::ElementPhysicalClick(command) => {
+                execute_physical_element_click(self, command_id, command, context).await
+            }
         }
     }
+}
+
+async fn execute_semantic_command(
+    runtime: &AccessibilitySemanticRuntime,
+    command: Command,
+    mut context: ExecutionContext,
+) -> ExecutionOutcome<RuntimeResult> {
+    if !matches!(context.stop_reason(), ExecutionStop::Continue) {
+        return ExecutionOutcome::Stopped {
+            effect: CommandEffect::BeforeEffect,
+        };
+    }
+    let deadline = context
+        .deadline()
+        .unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
+    let cancellation = CancellationToken::new();
+    let mut operation = Box::pin(execute_semantic_action(
+        runtime,
+        command,
+        deadline,
+        cancellation.clone(),
+    ));
+    tokio::select! {
+        result = &mut operation => completed(match result {
+            Ok(result) => {
+                let stage = semantic_success_stage(
+                    result.operation,
+                    result.evidence.postcondition_satisfied == Some(true),
+                );
+                RuntimeResult::success(CommandOutcome::ElementAction { result }, stage)
+            }
+            Err(error) => map_semantic_failure(error),
+        }),
+        _reason = context.wait_for_stop() => {
+            cancellation.cancel();
+            let effect = match tokio::time::timeout(INPUT_CONTROL_TIMEOUT, &mut operation).await {
+                Ok(Ok(_)) => CommandEffect::AfterEffect,
+                Ok(Err(error)) if error.effect_may_have_occurred() => CommandEffect::AfterEffect,
+                Ok(Err(_)) => CommandEffect::BeforeEffect,
+                Err(_) => CommandEffect::AfterEffect,
+            };
+            ExecutionOutcome::Stopped { effect }
+        }
+    }
+}
+
+fn semantic_success_stage(
+    operation: xenoteer_protocol::ElementActionOperation,
+    postcondition_satisfied: bool,
+) -> EffectStage {
+    if postcondition_satisfied {
+        return EffectStage::PostconditionMet;
+    }
+    match operation {
+        xenoteer_protocol::ElementActionOperation::Invoke
+        | xenoteer_protocol::ElementActionOperation::Scroll => {
+            EffectStage::SemanticActionDispatched
+        }
+        xenoteer_protocol::ElementActionOperation::InsertText => EffectStage::TextInserted,
+        xenoteer_protocol::ElementActionOperation::Focus
+        | xenoteer_protocol::ElementActionOperation::SetValue
+        | xenoteer_protocol::ElementActionOperation::Selection
+        | xenoteer_protocol::ElementActionOperation::SetText => EffectStage::SemanticStateChanged,
+    }
+}
+
+fn map_semantic_failure(error: SemanticActionFailure) -> RuntimeResult {
+    let trace_progress = semantic_failure_trace_progress(&error);
+    let after_effect = error.effect_may_have_occurred();
+    let stage = if after_effect {
+        EffectStage::SemanticActionDispatched
+    } else {
+        EffectStage::None
+    };
+    let result = match error {
+        SemanticActionFailure::PlaneBefore(error) => map_semantic_plane_error(error, false),
+        SemanticActionFailure::PlaneAfter(error) => map_semantic_plane_error(error, true),
+        SemanticActionFailure::Actor(error) => match error {
+            xenoteer_atspi::SemanticError::QueueFull => resource_exhausted(),
+            xenoteer_atspi::SemanticError::StaleAccessibilityGeneration { .. }
+            | xenoteer_atspi::SemanticError::StaleApplicationGeneration { .. }
+            | xenoteer_atspi::SemanticError::StaleCacheRevision { .. }
+            | xenoteer_atspi::SemanticError::StaleIdentity => stale_element_reference(),
+            xenoteer_atspi::SemanticError::InterfaceUnavailable(_) => RuntimeResult::failure(
+                422,
+                ErrorCode::InterfaceNotSupported,
+                "Element interface not supported",
+                "The exact element does not expose the interface required by this operation.",
+                RetryAdvice::Never,
+                EffectStage::None,
+            ),
+            xenoteer_atspi::SemanticError::UnclassifiedTextDenied => {
+                semantic_verification_unsupported()
+            }
+            xenoteer_atspi::SemanticError::ActionNotFound => RuntimeResult::failure(
+                404,
+                ErrorCode::ActionNotFound,
+                "Semantic action not found",
+                "The requested semantic action name, index, or default is absent.",
+                RetryAdvice::Never,
+                EffectStage::None,
+            ),
+            xenoteer_atspi::SemanticError::AmbiguousAction => RuntimeResult::failure(
+                409,
+                ErrorCode::AmbiguousTarget,
+                "Semantic action is ambiguous",
+                "The requested semantic action did not resolve to one unique action.",
+                RetryAdvice::Never,
+                EffectStage::None,
+            ),
+            xenoteer_atspi::SemanticError::InvalidRequest(_) => invalid_input(),
+            xenoteer_atspi::SemanticError::CancelledBeforeDispatch => RuntimeResult::failure(
+                409,
+                ErrorCode::CancelledBeforeEffect,
+                "Command cancelled before effect",
+                "Cancellation was observed before the semantic method was dispatched.",
+                RetryAdvice::SameCommandId,
+                EffectStage::None,
+            ),
+            xenoteer_atspi::SemanticError::DeadlineBeforeDispatch => RuntimeResult::failure(
+                504,
+                ErrorCode::DeadlineExceededBeforeEffect,
+                "Command deadline exceeded before effect",
+                "The deadline elapsed before the semantic method was dispatched.",
+                RetryAdvice::SameCommandId,
+                EffectStage::None,
+            ),
+            xenoteer_atspi::SemanticError::CancelledAfterDispatch => RuntimeResult::failure(
+                409,
+                ErrorCode::CancelledAfterEffect,
+                "Command cancelled after effect",
+                "Cancellation raced with a dispatched semantic method.",
+                RetryAdvice::Never,
+                stage,
+            ),
+            xenoteer_atspi::SemanticError::DeadlineAfterDispatch => RuntimeResult::failure(
+                504,
+                ErrorCode::DeadlineExceededAfterEffect,
+                "Command deadline exceeded after effect",
+                "The deadline elapsed after the semantic method was dispatched.",
+                RetryAdvice::Never,
+                stage,
+            ),
+            xenoteer_atspi::SemanticError::ReplyLostAfterAdmission
+            | xenoteer_atspi::SemanticError::BackendAfterDispatch(_) => RuntimeResult::failure(
+                502,
+                ErrorCode::RequestOutcomeUnknown,
+                "Semantic command outcome unknown",
+                "The semantic method may have been dispatched, but completion could not be proven.",
+                RetryAdvice::SameCommandId,
+                EffectStage::OutcomeUnknown,
+            ),
+            xenoteer_atspi::SemanticError::Stopped | xenoteer_atspi::SemanticError::Unavailable => {
+                capability_unavailable()
+            }
+            xenoteer_atspi::SemanticError::Backend(_)
+            | xenoteer_atspi::SemanticError::ReadEpochExhausted => backend_failure(stage),
+        },
+        SemanticActionFailure::Disabled => RuntimeResult::failure(
+            409,
+            ErrorCode::ElementNotSensitive,
+            "Element is not sensitive",
+            "The element is not enabled and sensitive for this semantic action.",
+            RetryAdvice::AfterResync,
+            EffectStage::None,
+        ),
+        SemanticActionFailure::WeakWindowCorrelation => RuntimeResult::failure(
+            409,
+            ErrorCode::WeakWindowCorrelation,
+            "Window correlation required",
+            "The element is not correlated to a current X11 window.",
+            RetryAdvice::AfterResync,
+            EffectStage::None,
+        ),
+        SemanticActionFailure::VerificationUnsupported => semantic_verification_unsupported(),
+        SemanticActionFailure::BackendRejected => RuntimeResult::failure(
+            422,
+            ErrorCode::UnsupportedByTarget,
+            "Semantic action rejected",
+            "The target rejected the semantic operation after it was dispatched.",
+            RetryAdvice::Never,
+            stage,
+        ),
+        SemanticActionFailure::PostconditionFailed => semantic_postcondition_failed(),
+        SemanticActionFailure::DeadlineAfterEffect => RuntimeResult::failure(
+            504,
+            ErrorCode::DeadlineExceededAfterEffect,
+            "Command deadline exceeded after effect",
+            "The semantic method completed, but its required observation exceeded the deadline.",
+            RetryAdvice::Never,
+            stage,
+        ),
+        SemanticActionFailure::InvalidEvidence => RuntimeResult::failure(
+            502,
+            ErrorCode::RequestOutcomeUnknown,
+            "Semantic command outcome unknown",
+            "The backend returned contradictory semantic completion evidence.",
+            RetryAdvice::Never,
+            EffectStage::OutcomeUnknown,
+        ),
+    };
+    result.with_trace_progress(trace_progress)
+}
+
+fn semantic_failure_trace_progress(error: &SemanticActionFailure) -> RuntimeTraceProgress {
+    match error {
+        SemanticActionFailure::PlaneAfter(_)
+        | SemanticActionFailure::PostconditionFailed
+        | SemanticActionFailure::DeadlineAfterEffect => RuntimeTraceProgress::SemanticReadback,
+        SemanticActionFailure::BackendRejected => RuntimeTraceProgress::SemanticDispatched,
+        SemanticActionFailure::Actor(
+            xenoteer_atspi::SemanticError::CancelledAfterDispatch
+            | xenoteer_atspi::SemanticError::DeadlineAfterDispatch
+            | xenoteer_atspi::SemanticError::ReplyLostAfterAdmission
+            | xenoteer_atspi::SemanticError::BackendAfterDispatch(_),
+        ) => RuntimeTraceProgress::SemanticDispatched,
+        _ => RuntimeTraceProgress::None,
+    }
+}
+
+fn map_semantic_plane_error(
+    error: xenoteer_server::AccessibilityPlaneError,
+    after: bool,
+) -> RuntimeResult {
+    if after {
+        return match error {
+            xenoteer_server::AccessibilityPlaneError::ResourceExhausted => resource_exhausted(),
+            _ => semantic_postcondition_failed(),
+        };
+    }
+    match error {
+        xenoteer_server::AccessibilityPlaneError::InvalidRequest => invalid_input(),
+        xenoteer_server::AccessibilityPlaneError::PermissionDenied => permission_denied(),
+        xenoteer_server::AccessibilityPlaneError::NotFound => RuntimeResult::failure(
+            404,
+            ErrorCode::ElementNotFound,
+            "Element not found",
+            "The exact accessibility element does not exist.",
+            RetryAdvice::AfterResync,
+            EffectStage::None,
+        ),
+        xenoteer_server::AccessibilityPlaneError::StaleReference { .. }
+        | xenoteer_server::AccessibilityPlaneError::ResyncRequired { .. } => {
+            stale_element_reference()
+        }
+        xenoteer_server::AccessibilityPlaneError::AmbiguousTarget => RuntimeResult::failure(
+            409,
+            ErrorCode::AmbiguousTarget,
+            "Ambiguous accessibility target",
+            "The semantic target did not resolve to one exact element.",
+            RetryAdvice::AfterResync,
+            EffectStage::None,
+        ),
+        xenoteer_server::AccessibilityPlaneError::QueryLimitExceeded => RuntimeResult::failure(
+            422,
+            ErrorCode::QueryBudgetExceeded,
+            "Accessibility query budget exceeded",
+            "The semantic precondition exceeded its bounded query budget.",
+            RetryAdvice::Never,
+            EffectStage::None,
+        ),
+        xenoteer_server::AccessibilityPlaneError::ResourceExhausted => resource_exhausted(),
+        xenoteer_server::AccessibilityPlaneError::CapabilityUnavailable => capability_unavailable(),
+        xenoteer_server::AccessibilityPlaneError::UnsupportedByTarget => {
+            semantic_verification_unsupported()
+        }
+        xenoteer_server::AccessibilityPlaneError::Internal => backend_failure(EffectStage::None),
+    }
+}
+
+fn stale_element_reference() -> RuntimeResult {
+    RuntimeResult::failure(
+        409,
+        ErrorCode::StaleReference,
+        "Accessibility element changed",
+        "The exact generation-fenced element reference is no longer current.",
+        RetryAdvice::AfterResync,
+        EffectStage::None,
+    )
+}
+
+fn semantic_verification_unsupported() -> RuntimeResult {
+    RuntimeResult::failure(
+        422,
+        ErrorCode::UnsupportedByTarget,
+        "Semantic verification unsupported",
+        "The target cannot provide the content-free verification required by this operation.",
+        RetryAdvice::Never,
+        EffectStage::None,
+    )
+}
+
+fn semantic_postcondition_failed() -> RuntimeResult {
+    RuntimeResult::failure(
+        409,
+        ErrorCode::SemanticPostconditionFailed,
+        "Semantic postcondition failed",
+        "The semantic method was dispatched, but the required readback was not observed.",
+        RetryAdvice::Never,
+        EffectStage::SemanticActionDispatched,
+    )
+}
+
+struct PreparedPhysicalClick {
+    correlation: AccessibilityExplicitCorrelationEvidence,
+    plan: PhysicalElementClickPlan,
+}
+
+#[derive(Debug)]
+enum PhysicalClickPrepareFailure {
+    Correlation(AccessibilityCorrelationCoordinatorError),
+    Plan(ElementClickPlanError),
+    Window(ControlPlaneError),
+    Geometry,
+    BlockingTask,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PhysicalClickPreconditionIssue {
+    Stale,
+    WeakCorrelation,
+    Geometry,
+    Occluded,
+    FocusLost,
+    ResourceExhausted,
+    Unavailable,
+}
+
+impl PhysicalClickPreconditionIssue {
+    const fn input_failure(self) -> InputPreconditionFailure {
+        match self {
+            Self::Stale | Self::WeakCorrelation | Self::Geometry | Self::Occluded => {
+                InputPreconditionFailure::TargetStale
+            }
+            Self::FocusLost => InputPreconditionFailure::FocusLost,
+            Self::ResourceExhausted | Self::Unavailable => InputPreconditionFailure::Unavailable,
+        }
+    }
+}
+
+fn profile_accessibility_rect(
+    bounds: SemanticRect,
+) -> Result<AccessibilityProfiledRect, PhysicalClickPrepareFailure> {
+    let width = u32::try_from(bounds.width).map_err(|_| PhysicalClickPrepareFailure::Geometry)?;
+    let height = u32::try_from(bounds.height).map_err(|_| PhysicalClickPrepareFailure::Geometry)?;
+    let root_physical = Rect::new(bounds.x, bounds.y, width, height)
+        .map_err(|_| PhysicalClickPrepareFailure::Geometry)?;
+    // Release-one owns a fixed single-screen Xvfb profile. This deliberately
+    // binds one exact raw AT-SPI screen rectangle to its root-pixel projection;
+    // it is not a generic claim that arbitrary AT-SPI coordinates are root pixels.
+    Ok(AccessibilityProfiledRect {
+        atspi_screen: bounds,
+        root_physical,
+    })
+}
+
+fn profile_optional_accessibility_rect(
+    bounds: Option<SemanticRect>,
+) -> Result<Option<AccessibilityProfiledRect>, PhysicalClickPrepareFailure> {
+    bounds.map(profile_accessibility_rect).transpose()
+}
+
+fn physical_click_timeout(deadline: Instant) -> Result<Duration, PhysicalClickPrepareFailure> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(PhysicalClickPrepareFailure::Window(
+            ControlPlaneError::CapabilityUnavailable,
+        ));
+    }
+    Ok(remaining.min(WINDOW_REVALIDATION_TIMEOUT))
+}
+
+async fn admission_occlusion_snapshot(
+    observation: Arc<DaemonObservationService>,
+    window: WindowRef,
+    policy: ElementOcclusionPolicy,
+    deadline: Instant,
+) -> Result<Option<WindowOcclusionSnapshot>, PhysicalClickPrepareFailure> {
+    if policy == ElementOcclusionPolicy::Ignore {
+        return Ok(None);
+    }
+    let timeout = physical_click_timeout(deadline)?;
+    tokio::task::spawn_blocking(move || {
+        observation.occlusion_snapshot_exact_blocking(window, timeout)
+    })
+    .await
+    .map_err(|_| PhysicalClickPrepareFailure::BlockingTask)?
+    .map(Some)
+    .map_err(PhysicalClickPrepareFailure::Window)
+}
+
+async fn prepare_physical_click(
+    coordinator: &AccessibilityCorrelationCoordinator,
+    observation: Arc<DaemonObservationService>,
+    command: &ElementPhysicalClickCommand,
+    root_bounds: Rect,
+    deadline: Instant,
+    cancellation: CancellationToken,
+) -> Result<PreparedPhysicalClick, PhysicalClickPrepareFailure> {
+    let correlation = coordinator
+        .correlate_element(
+            &command.element,
+            command.window.clone(),
+            deadline,
+            cancellation,
+        )
+        .await
+        .map_err(PhysicalClickPrepareFailure::Correlation)?;
+    let element_extents = correlation
+        .admission_element_observation()
+        .evidence
+        .bounds
+        .ok_or(PhysicalClickPrepareFailure::Geometry)
+        .and_then(profile_accessibility_rect)?;
+    let top_level_extents = profile_optional_accessibility_rect(
+        correlation
+            .admission_correlation_observation()
+            .evidence
+            .bounds,
+    )?;
+    let click_observation = correlation
+        .click_observation(
+            element_extents,
+            top_level_extents,
+            root_bounds,
+            AccessibilityCorrelationLimits::default(),
+        )
+        .map_err(PhysicalClickPrepareFailure::Correlation)?;
+    let correlated_window =
+        click_observation
+            .correlation
+            .window
+            .clone()
+            .ok_or(PhysicalClickPrepareFailure::Plan(
+                ElementClickPlanError::UnauthorizedCorrelation,
+            ))?;
+    let occlusion = admission_occlusion_snapshot(
+        observation,
+        correlated_window,
+        command.occlusion_policy,
+        deadline,
+    )
+    .await?;
+    let plan = plan_physical_element_click(
+        &click_observation,
+        command.window.as_ref(),
+        command.minimum_correlation,
+        &command.point_policy,
+        command.occlusion_policy,
+        occlusion
+            .as_ref()
+            .map(WindowOcclusionSnapshot::as_click_snapshot),
+    )
+    .map_err(PhysicalClickPrepareFailure::Plan)?;
+    Ok(PreparedPhysicalClick { correlation, plan })
+}
+
+fn map_physical_prepare_failure(
+    failure: PhysicalClickPrepareFailure,
+    prior_stage: EffectStage,
+) -> RuntimeResult {
+    tracing::debug!(
+        error = ?failure,
+        effect_stage = ?prior_stage,
+        "physical element admission failed closed"
+    );
+    let result = match failure {
+        PhysicalClickPrepareFailure::Correlation(error) => map_physical_correlation_failure(error),
+        PhysicalClickPrepareFailure::Plan(error) => map_physical_plan_failure(error),
+        PhysicalClickPrepareFailure::Window(error) => {
+            map_window_model_error(error, EffectStage::None)
+        }
+        PhysicalClickPrepareFailure::Geometry => physical_geometry_invalid(),
+        PhysicalClickPrepareFailure::BlockingTask => backend_failure(EffectStage::None),
+    };
+    result.preserve_prior_effect(prior_stage)
+}
+
+fn map_physical_correlation_failure(
+    error: AccessibilityCorrelationCoordinatorError,
+) -> RuntimeResult {
+    match error {
+        AccessibilityCorrelationCoordinatorError::Cancelled => RuntimeResult::failure(
+            409,
+            ErrorCode::CancelledBeforeEffect,
+            "Physical click cancelled before effect",
+            "Cancellation was observed while resolving element-to-window evidence.",
+            RetryAdvice::SameCommandId,
+            EffectStage::None,
+        ),
+        AccessibilityCorrelationCoordinatorError::StaleEvidenceExhausted => {
+            stale_element_reference()
+        }
+        AccessibilityCorrelationCoordinatorError::Plane(error) => {
+            map_semantic_plane_error(error, false)
+        }
+        AccessibilityCorrelationCoordinatorError::Window(error) => {
+            map_window_model_error(error, EffectStage::None)
+        }
+        AccessibilityCorrelationCoordinatorError::Actor(error) => match error {
+            xenoteer_atspi::SemanticError::QueueFull => resource_exhausted(),
+            xenoteer_atspi::SemanticError::StaleAccessibilityGeneration { .. }
+            | xenoteer_atspi::SemanticError::StaleApplicationGeneration { .. }
+            | xenoteer_atspi::SemanticError::StaleCacheRevision { .. }
+            | xenoteer_atspi::SemanticError::StaleIdentity => stale_element_reference(),
+            xenoteer_atspi::SemanticError::Stopped | xenoteer_atspi::SemanticError::Unavailable => {
+                capability_unavailable()
+            }
+            _ => backend_failure(EffectStage::None),
+        },
+        AccessibilityCorrelationCoordinatorError::Correlation(error) => match error {
+            xenoteer_core::AccessibilityCorrelationError::CandidateLimit
+            | xenoteer_core::AccessibilityCorrelationError::StringLimit => RuntimeResult::failure(
+                422,
+                ErrorCode::QueryBudgetExceeded,
+                "Correlation budget exceeded",
+                "Fresh element-to-window correlation exceeded its bounded evidence budget.",
+                RetryAdvice::Never,
+                EffectStage::None,
+            ),
+            xenoteer_core::AccessibilityCorrelationError::InvalidGeometry => {
+                physical_geometry_invalid()
+            }
+            _ => backend_failure(EffectStage::None),
+        },
+        AccessibilityCorrelationCoordinatorError::InvalidConfiguration => capability_unavailable(),
+    }
+}
+
+fn map_physical_plan_failure(error: ElementClickPlanError) -> RuntimeResult {
+    match error {
+        ElementClickPlanError::UnauthorizedCorrelation
+        | ElementClickPlanError::InvalidMinimumCorrelation
+        | ElementClickPlanError::CorrelationBelowMinimum => weak_physical_correlation(),
+        ElementClickPlanError::Occluded | ElementClickPlanError::OcclusionInconclusive => {
+            RuntimeResult::failure(
+                409,
+                ErrorCode::ElementOccluded,
+                "Element click point is occluded",
+                "The requested occlusion policy could not prove the selected click point clear.",
+                RetryAdvice::AfterResync,
+                EffectStage::None,
+            )
+        }
+        ElementClickPlanError::ElementBirthChanged
+        | ElementClickPlanError::RevisionRegression
+        | ElementClickPlanError::WindowBindingChanged
+        | ElementClickPlanError::ObservationNotFresh
+        | ElementClickPlanError::OcclusionTargetChanged
+        | ElementClickPlanError::OcclusionSnapshotNotFresh => stale_element_reference(),
+        ElementClickPlanError::InvalidElementReference
+        | ElementClickPlanError::InvalidWindowReference
+        | ElementClickPlanError::ReferenceScope
+        | ElementClickPlanError::InvalidGeometry
+        | ElementClickPlanError::NotVisible
+        | ElementClickPlanError::InsetExhausted
+        | ElementClickPlanError::PointOverflow
+        | ElementClickPlanError::PointOutsideVisibleBounds
+        | ElementClickPlanError::InvalidReadEpoch
+        | ElementClickPlanError::GeometryChanged
+        | ElementClickPlanError::InvalidOcclusionEpoch
+        | ElementClickPlanError::MissingQueueHeadOcclusionSnapshot => physical_geometry_invalid(),
+    }
+}
+
+fn weak_physical_correlation() -> RuntimeResult {
+    RuntimeResult::failure(
+        409,
+        ErrorCode::WeakWindowCorrelation,
+        "Element-to-window correlation is insufficient",
+        "Fresh evidence could not authorize this element-derived physical input effect.",
+        RetryAdvice::AfterResync,
+        EffectStage::None,
+    )
+}
+
+fn physical_geometry_invalid() -> RuntimeResult {
+    RuntimeResult::failure(
+        409,
+        ErrorCode::ElementGeometryInvalid,
+        "Element click geometry is invalid",
+        "Fresh element geometry could not be bound to one unchanged root-physical click point.",
+        RetryAdvice::AfterResync,
+        EffectStage::None,
+    )
+}
+
+async fn execute_physical_element_click(
+    executor: &RuntimeExecutor,
+    command_id: CommandId,
+    command: ElementPhysicalClickCommand,
+    mut context: ExecutionContext,
+) -> ExecutionOutcome<RuntimeResult> {
+    if !matches!(context.stop_reason(), ExecutionStop::Continue) {
+        return ExecutionOutcome::Stopped {
+            effect: CommandEffect::BeforeEffect,
+        };
+    }
+    let deadline = context
+        .deadline()
+        .unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
+    let cancellation = CancellationToken::new();
+    let mut operation = Box::pin(execute_physical_element_click_inner(
+        executor,
+        command_id,
+        command,
+        deadline,
+        cancellation.clone(),
+    ));
+    tokio::select! {
+        result = &mut operation => completed(result),
+        _reason = context.wait_for_stop() => {
+            cancellation.cancel();
+            let effect = match tokio::time::timeout(INPUT_CONTROL_TIMEOUT, &mut operation).await {
+                Ok(result) if result.effect_stage().has_visible_effect() => CommandEffect::AfterEffect,
+                Ok(_) => CommandEffect::BeforeEffect,
+                Err(_) => CommandEffect::AfterEffect,
+            };
+            ExecutionOutcome::Stopped { effect }
+        }
+    }
+}
+
+async fn execute_physical_element_click_inner(
+    executor: &RuntimeExecutor,
+    command_id: CommandId,
+    command: ElementPhysicalClickCommand,
+    deadline: Instant,
+    cancellation: CancellationToken,
+) -> RuntimeResult {
+    if command.validate().is_err() {
+        return invalid_input();
+    }
+    if let Err(error) = require_supported_postcondition(command.postcondition.as_ref()) {
+        return map_semantic_failure(error);
+    }
+    let Some(runtime) = executor.accessibility.as_ref() else {
+        return capability_unavailable();
+    };
+    let Some(correlation) = executor.accessibility_correlation.as_ref() else {
+        return capability_unavailable();
+    };
+    let Some(window_control) = executor.window_control.as_ref() else {
+        return capability_unavailable();
+    };
+    let Some(input) = executor.input.borrow().clone() else {
+        return capability_unavailable();
+    };
+
+    let mut prior_stage = EffectStage::None;
+    let mut scrolled = false;
+    if command.scroll_policy == ElementClickScrollPolicy::Always {
+        match perform_physical_click_scroll(runtime, &command, deadline, cancellation.child_token())
+            .await
+        {
+            Ok(stage) => {
+                prior_stage = stage;
+                scrolled = true;
+            }
+            Err(result) => return result,
+        }
+    }
+
+    let mut prepared = loop {
+        let prepared = prepare_physical_click(
+            correlation,
+            Arc::clone(&window_control.observation),
+            &command,
+            executor.root_bounds,
+            deadline,
+            cancellation.child_token(),
+        )
+        .await;
+        match prepared {
+            Ok(prepared) => break prepared,
+            Err(PhysicalClickPrepareFailure::Plan(ElementClickPlanError::NotVisible))
+                if command.scroll_policy == ElementClickScrollPolicy::IfNeeded && !scrolled =>
+            {
+                match perform_physical_click_scroll(
+                    runtime,
+                    &command,
+                    deadline,
+                    cancellation.child_token(),
+                )
+                .await
+                {
+                    Ok(stage) => {
+                        prior_stage = stage;
+                        scrolled = true;
+                    }
+                    Err(result) => return result.preserve_prior_effect(prior_stage),
+                }
+            }
+            Err(error) => return map_physical_prepare_failure(error, prior_stage),
+        }
+    };
+
+    let (window_activated, activation_stage) = match activate_physical_click_window(
+        window_control.clone(),
+        prepared.plan.window().clone(),
+        command.activation_policy,
+        prior_stage,
+        deadline,
+        cancellation.child_token(),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(result) => return result.preserve_prior_effect(prior_stage),
+    };
+    if activation_stage.has_visible_effect() {
+        prior_stage = activation_stage;
+    }
+    if window_activated {
+        let admitted_window = prepared.plan.window().clone();
+        prepared = match prepare_physical_click(
+            correlation,
+            Arc::clone(&window_control.observation),
+            &command,
+            executor.root_bounds,
+            deadline,
+            cancellation.child_token(),
+        )
+        .await
+        {
+            Ok(refreshed) if refreshed.plan.window() == &admitted_window => refreshed,
+            Ok(_) => return stale_element_reference().preserve_prior_effect(prior_stage),
+            Err(error) => return map_physical_prepare_failure(error, prior_stage),
+        };
+    }
+    if cancellation.is_cancelled() {
+        return cancelled_physical_click(prior_stage);
+    }
+
+    let options = match input_motion_options(
+        command.curve,
+        command.move_duration_ms,
+        executor.motion_policy,
+    ) {
+        Ok(options) if options.curve() != MotionCurve::Instant => options,
+        _ => return invalid_input().preserve_prior_effect(prior_stage),
+    };
+    let click_point = prepared.plan.click_point();
+    let expected_root = match RootPoint::try_from_protocol(click_point) {
+        Ok(point) => point,
+        Err(_) => return physical_geometry_invalid().preserve_prior_effect(prior_stage),
+    };
+    let local_point = match client_local_click_point(&prepared.plan, click_point) {
+        Ok(point) => point,
+        Err(result) => return result.preserve_prior_effect(prior_stage),
+    };
+    let interval_ms = match u16::try_from(command.interval_ms) {
+        Ok(value) => value,
+        Err(_) => return invalid_input().preserve_prior_effect(prior_stage),
+    };
+    let request = WindowPointerClickRequest::new(
+        prepared.plan.window().xid,
+        CoordinateSpace::WindowClient,
+        local_point,
+        X11WindowPointerBoundsPolicy::Reject,
+        options,
+        input_logical_button(command.button),
+        command.count,
+        0,
+        0,
+        interval_ms,
+    )
+    .with_expected_root_target(expected_root);
+    let (precondition, latest_queue, precondition_issue) = physical_click_precondition(
+        runtime.clone(),
+        Arc::clone(&window_control.observation),
+        prepared.correlation.clone(),
+        prepared.plan.clone(),
+        executor.root_bounds,
+        command.occlusion_policy,
+        command.activation_policy != ElementWindowActivationPolicy::Never,
+        deadline,
+    );
+    let receiver = match input.try_submit_operation_with_precondition(
+        ActionContext::new(command_id, Some(deadline.into_std())),
+        InputOperation::WindowPointerClick(request),
+        precondition,
+        cancellation,
+    ) {
+        Ok(receiver) => receiver,
+        Err(InputSubmitError::QueueFull) => {
+            return resource_exhausted().preserve_prior_effect(prior_stage);
+        }
+        Err(InputSubmitError::Closed) => {
+            return capability_unavailable().preserve_prior_effect(prior_stage);
+        }
+    };
+    let input_result = match receiver.await {
+        Ok(result) => result,
+        Err(_) => {
+            return backend_failure(EffectStage::OutcomeUnknown).preserve_prior_effect(prior_stage);
+        }
+    };
+    finish_physical_click(
+        runtime,
+        command,
+        prepared.plan,
+        latest_queue,
+        precondition_issue,
+        input_result,
+        scrolled,
+        window_activated,
+        prior_stage,
+        deadline,
+    )
+    .await
+}
+
+async fn perform_physical_click_scroll(
+    runtime: &AccessibilitySemanticRuntime,
+    command: &ElementPhysicalClickCommand,
+    deadline: Instant,
+    cancellation: CancellationToken,
+) -> Result<EffectStage, RuntimeResult> {
+    let scroll = Command::ElementScroll(ElementScrollCommand {
+        element: command.element.clone(),
+        target: ElementScrollTarget::Alignment {
+            alignment: ElementScrollAlignment::Anywhere,
+        },
+        postcondition: None,
+    });
+    execute_semantic_action(runtime, scroll, deadline, cancellation)
+        .await
+        .map(|_| EffectStage::SemanticActionDispatched)
+        .map_err(map_semantic_failure)
+}
+
+async fn activate_physical_click_window(
+    runtime: WindowControlRuntime,
+    window: WindowRef,
+    policy: ElementWindowActivationPolicy,
+    prior_stage: EffectStage,
+    deadline: Instant,
+    cancellation: CancellationToken,
+) -> Result<(bool, EffectStage), RuntimeResult> {
+    if policy == ElementWindowActivationPolicy::Never {
+        return Ok((false, EffectStage::None));
+    }
+    if cancellation.is_cancelled() {
+        return Err(cancelled_physical_click(prior_stage));
+    }
+    if Instant::now() >= deadline {
+        return Err(deadline_exceeded_physical_click(prior_stage));
+    }
+
+    let execution_cancellation = cancellation.clone();
+    let mut activation = tokio::task::spawn_blocking(move || {
+        let snapshot = runtime
+            .observation
+            .snapshot_exact_blocking(window.clone(), WINDOW_REVALIDATION_TIMEOUT)
+            .map_err(|error| map_window_model_error(error, EffectStage::None))?;
+        if snapshot.state.focused {
+            return Ok((false, EffectStage::None));
+        }
+        let result = runtime.execute_fenced(
+            Command::WindowActivate(WindowActivateCommand {
+                window,
+                switch_workspace: true,
+                fallback: WindowFocusFallback::EwmhOnly,
+            }),
+            WindowMutationFence::physical(execution_cancellation, deadline),
+        );
+        match result {
+            RuntimeResult::Success(success) => Ok((true, success.effect_stage)),
+            RuntimeResult::Failure(_) => Err(result),
+        }
+    });
+
+    tokio::select! {
+        biased;
+        result = &mut activation => {
+            finish_physical_window_activation(result, &cancellation, prior_stage, deadline)
+        }
+        () = cancellation.cancelled() => {
+            match tokio::time::timeout(WINDOW_REVALIDATION_TIMEOUT, &mut activation).await {
+                Ok(result) => finish_physical_window_activation(
+                    result,
+                    &cancellation,
+                    prior_stage,
+                    deadline,
+                ),
+                Err(_) => Err(backend_failure(EffectStage::OutcomeUnknown)),
+            }
+        }
+        () = tokio::time::sleep_until(deadline) => {
+            cancellation.cancel();
+            match tokio::time::timeout(WINDOW_REVALIDATION_TIMEOUT, &mut activation).await {
+                Ok(result) => finish_physical_window_activation(
+                    result,
+                    &cancellation,
+                    prior_stage,
+                    deadline,
+                ),
+                Err(_) => Err(backend_failure(EffectStage::OutcomeUnknown)),
+            }
+        }
+    }
+}
+
+fn finish_physical_window_activation(
+    result: Result<Result<(bool, EffectStage), RuntimeResult>, tokio::task::JoinError>,
+    cancellation: &CancellationToken,
+    prior_stage: EffectStage,
+    deadline: Instant,
+) -> Result<(bool, EffectStage), RuntimeResult> {
+    let result = result.unwrap_or_else(|_| Err(backend_failure(EffectStage::OutcomeUnknown)));
+    let effect_stage = match &result {
+        Ok((_, effect_stage)) => *effect_stage,
+        Err(result) => result.effect_stage(),
+    };
+    if effect_stage.has_visible_effect() || effect_stage == EffectStage::OutcomeUnknown {
+        return result;
+    }
+    if Instant::now() >= deadline {
+        return Err(deadline_exceeded_physical_click(prior_stage));
+    }
+    if cancellation.is_cancelled() {
+        return Err(cancelled_physical_click(prior_stage));
+    }
+    result
+}
+
+fn client_local_click_point(
+    plan: &PhysicalElementClickPlan,
+    root: Point,
+) -> Result<Point, RuntimeResult> {
+    let client = plan
+        .geometry()
+        .correlated_client_bounds
+        .ok_or_else(physical_geometry_invalid)?;
+    let origin = client.origin();
+    let x = root
+        .x()
+        .checked_sub(origin.x())
+        .ok_or_else(physical_geometry_invalid)?;
+    let y = root
+        .y()
+        .checked_sub(origin.y())
+        .ok_or_else(physical_geometry_invalid)?;
+    Ok(Point::new(x, y))
+}
+
+fn cancelled_physical_click(prior_stage: EffectStage) -> RuntimeResult {
+    let (code, title, detail, retry) = if prior_stage.has_visible_effect() {
+        (
+            ErrorCode::CancelledAfterEffect,
+            "Physical click cancelled after effect",
+            "Cancellation was observed after semantic scroll or window activation.",
+            RetryAdvice::Never,
+        )
+    } else {
+        (
+            ErrorCode::CancelledBeforeEffect,
+            "Physical click cancelled before effect",
+            "Cancellation was observed before physical input changed the desktop.",
+            RetryAdvice::SameCommandId,
+        )
+    };
+    RuntimeResult::failure(409, code, title, detail, retry, prior_stage)
+}
+
+fn deadline_exceeded_physical_click(prior_stage: EffectStage) -> RuntimeResult {
+    let (code, title, detail, retry) = if prior_stage.has_visible_effect() {
+        (
+            ErrorCode::DeadlineExceededAfterEffect,
+            "Physical click deadline exceeded after effect",
+            "The deadline elapsed after semantic scroll or window activation.",
+            RetryAdvice::Never,
+        )
+    } else {
+        (
+            ErrorCode::DeadlineExceededBeforeEffect,
+            "Physical click deadline exceeded before effect",
+            "The deadline elapsed before physical input changed the desktop.",
+            RetryAdvice::SameCommandId,
+        )
+    };
+    RuntimeResult::failure(504, code, title, detail, retry, prior_stage)
+}
+
+type SharedQueueClickEvidence = Arc<Mutex<Option<RevalidatedElementClick>>>;
+type SharedPhysicalClickIssue = Arc<Mutex<Option<PhysicalClickPreconditionIssue>>>;
+
+#[allow(clippy::too_many_arguments)]
+fn physical_click_precondition(
+    runtime: AccessibilitySemanticRuntime,
+    observation: Arc<DaemonObservationService>,
+    correlation: AccessibilityExplicitCorrelationEvidence,
+    plan: PhysicalElementClickPlan,
+    root_bounds: Rect,
+    occlusion_policy: ElementOcclusionPolicy,
+    require_focus: bool,
+    deadline: Instant,
+) -> (
+    InputPrecondition,
+    SharedQueueClickEvidence,
+    SharedPhysicalClickIssue,
+) {
+    let latest = Arc::new(Mutex::new(None));
+    let issue = Arc::new(Mutex::new(None));
+    let latest_for_check = Arc::clone(&latest);
+    let issue_for_check = Arc::clone(&issue);
+    let precondition = InputPrecondition::new(move || {
+        match run_physical_click_precondition(
+            &runtime,
+            &observation,
+            &correlation,
+            &plan,
+            root_bounds,
+            occlusion_policy,
+            require_focus,
+            deadline,
+        ) {
+            Ok(evidence) => {
+                *latest_for_check
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(evidence);
+                *issue_for_check
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                Ok(())
+            }
+            Err(failure) => {
+                *issue_for_check
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(failure);
+                Err(failure.input_failure())
+            }
+        }
+    });
+    (precondition, latest, issue)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_physical_click_precondition(
+    runtime: &AccessibilitySemanticRuntime,
+    observation: &DaemonObservationService,
+    correlation: &AccessibilityExplicitCorrelationEvidence,
+    plan: &PhysicalElementClickPlan,
+    root_bounds: Rect,
+    occlusion_policy: ElementOcclusionPolicy,
+    require_focus: bool,
+    deadline: Instant,
+) -> Result<RevalidatedElementClick, PhysicalClickPreconditionIssue> {
+    let queue_deadline = deadline.min(Instant::now() + WINDOW_REVALIDATION_TIMEOUT);
+    let plane = runtime.plane();
+    let actor = runtime.handle();
+    let fresh = correlation
+        .refresh_for_queue_head_blocking(
+            plane.as_ref(),
+            &actor,
+            observation,
+            queue_deadline,
+            AccessibilityCorrelationLimits::default(),
+        )
+        .map_err(|error| {
+            tracing::debug!(
+                error_class = accessibility_correlation_error_class(&error),
+                "physical element queue-head correlation failed closed"
+            );
+            map_physical_precondition_correlation_error(error)
+        })?;
+    let element_extents = fresh
+        .admission_element_observation()
+        .evidence
+        .bounds
+        .ok_or(PhysicalClickPreconditionIssue::Geometry)
+        .and_then(|bounds| {
+            profile_accessibility_rect(bounds).map_err(|_| PhysicalClickPreconditionIssue::Geometry)
+        })?;
+    let top_level_extents = fresh
+        .admission_correlation_observation()
+        .evidence
+        .bounds
+        .map(profile_accessibility_rect)
+        .transpose()
+        .map_err(|_| PhysicalClickPreconditionIssue::Geometry)?;
+    let click = fresh
+        .click_observation(
+            element_extents,
+            top_level_extents,
+            root_bounds,
+            AccessibilityCorrelationLimits::default(),
+        )
+        .map_err(map_physical_precondition_correlation_error)?;
+    if require_focus {
+        let focused = observation
+            .snapshot_exact_blocking(
+                plan.window().clone(),
+                remaining_physical_precondition_timeout(deadline)?,
+            )
+            .map_err(map_physical_precondition_window_error)?;
+        if !focused.state.focused {
+            return Err(PhysicalClickPreconditionIssue::FocusLost);
+        }
+    }
+    let occlusion = if occlusion_policy == ElementOcclusionPolicy::Ignore {
+        None
+    } else {
+        Some(
+            observation
+                .occlusion_snapshot_exact_blocking(
+                    plan.window().clone(),
+                    remaining_physical_precondition_timeout(deadline)?,
+                )
+                .map_err(map_physical_precondition_window_error)?,
+        )
+    };
+    revalidate_physical_element_click(
+        plan,
+        &click,
+        occlusion
+            .as_ref()
+            .map(WindowOcclusionSnapshot::as_click_snapshot),
+    )
+    .map_err(map_physical_precondition_plan_error)
+}
+
+fn remaining_physical_precondition_timeout(
+    deadline: Instant,
+) -> Result<Duration, PhysicalClickPreconditionIssue> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        Err(PhysicalClickPreconditionIssue::Unavailable)
+    } else {
+        Ok(remaining.min(WINDOW_REVALIDATION_TIMEOUT))
+    }
+}
+
+fn map_physical_precondition_window_error(
+    error: ControlPlaneError,
+) -> PhysicalClickPreconditionIssue {
+    match error {
+        ControlPlaneError::NotFound
+        | ControlPlaneError::StaleReference { .. }
+        | ControlPlaneError::PermissionDenied => PhysicalClickPreconditionIssue::Stale,
+        ControlPlaneError::ResourceExhausted => PhysicalClickPreconditionIssue::ResourceExhausted,
+        _ => PhysicalClickPreconditionIssue::Unavailable,
+    }
+}
+
+fn map_physical_precondition_correlation_error(
+    error: AccessibilityCorrelationCoordinatorError,
+) -> PhysicalClickPreconditionIssue {
+    match error {
+        AccessibilityCorrelationCoordinatorError::StaleEvidenceExhausted
+        | AccessibilityCorrelationCoordinatorError::Plane(
+            xenoteer_server::AccessibilityPlaneError::NotFound
+            | xenoteer_server::AccessibilityPlaneError::StaleReference { .. }
+            | xenoteer_server::AccessibilityPlaneError::ResyncRequired { .. },
+        ) => PhysicalClickPreconditionIssue::Stale,
+        AccessibilityCorrelationCoordinatorError::Plane(
+            xenoteer_server::AccessibilityPlaneError::ResourceExhausted,
+        )
+        | AccessibilityCorrelationCoordinatorError::Actor(
+            xenoteer_atspi::SemanticError::QueueFull,
+        )
+        | AccessibilityCorrelationCoordinatorError::Window(ControlPlaneError::ResourceExhausted) => {
+            PhysicalClickPreconditionIssue::ResourceExhausted
+        }
+        AccessibilityCorrelationCoordinatorError::Correlation(
+            xenoteer_core::AccessibilityCorrelationError::InvalidGeometry,
+        ) => PhysicalClickPreconditionIssue::Geometry,
+        _ => PhysicalClickPreconditionIssue::Unavailable,
+    }
+}
+
+fn map_physical_precondition_plan_error(
+    error: ElementClickPlanError,
+) -> PhysicalClickPreconditionIssue {
+    match error {
+        ElementClickPlanError::UnauthorizedCorrelation
+        | ElementClickPlanError::InvalidMinimumCorrelation
+        | ElementClickPlanError::CorrelationBelowMinimum => {
+            PhysicalClickPreconditionIssue::WeakCorrelation
+        }
+        ElementClickPlanError::Occluded | ElementClickPlanError::OcclusionInconclusive => {
+            PhysicalClickPreconditionIssue::Occluded
+        }
+        ElementClickPlanError::ElementBirthChanged
+        | ElementClickPlanError::RevisionRegression
+        | ElementClickPlanError::WindowBindingChanged
+        | ElementClickPlanError::ObservationNotFresh
+        | ElementClickPlanError::OcclusionTargetChanged
+        | ElementClickPlanError::OcclusionSnapshotNotFresh => PhysicalClickPreconditionIssue::Stale,
+        _ => PhysicalClickPreconditionIssue::Geometry,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_physical_click(
+    runtime: &AccessibilitySemanticRuntime,
+    command: ElementPhysicalClickCommand,
+    plan: PhysicalElementClickPlan,
+    latest_queue: SharedQueueClickEvidence,
+    precondition_issue: SharedPhysicalClickIssue,
+    input_result: Result<InputOutcome, InputFailure>,
+    scrolled: bool,
+    window_activated: bool,
+    prior_stage: EffectStage,
+    deadline: Instant,
+) -> RuntimeResult {
+    let outcome = match input_result {
+        Ok(outcome) => outcome,
+        Err(failure) => {
+            let issue = *precondition_issue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            return map_physical_input_failure(failure, issue, prior_stage);
+        }
+    };
+    let stage = precise_input_effect_stage(
+        outcome.events_emitted,
+        outcome.completed_units,
+        true,
+        Some(&outcome.effects),
+        InputStage::PointerClick,
+        prior_stage,
+    );
+    match outcome.kind {
+        InputOutcomeKind::CancelledAfterEffect => {
+            return RuntimeResult::failure(
+                409,
+                ErrorCode::CancelledAfterEffect,
+                "Physical click cancelled after effect",
+                "Cancellation was observed after element-derived physical input began.",
+                RetryAdvice::Never,
+                stage,
+            );
+        }
+        InputOutcomeKind::DeadlineExceededAfterEffect => {
+            return RuntimeResult::failure(
+                504,
+                ErrorCode::DeadlineExceededAfterEffect,
+                "Physical click deadline exceeded after effect",
+                "The deadline elapsed after element-derived physical input began.",
+                RetryAdvice::Never,
+                stage,
+            );
+        }
+        InputOutcomeKind::Completed => {}
+    }
+    let queue = *latest_queue
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(queue) = queue else {
+        return backend_failure(EffectStage::OutcomeUnknown).preserve_prior_effect(stage);
+    };
+    let expected_root = RootPoint::try_from_protocol(plan.click_point()).ok();
+    if outcome.completed_units != u16::from(command.count)
+        || outcome.events_emitted == 0
+        || outcome.requested_pointer != expected_root
+        || outcome.observed_pointer != expected_root
+    {
+        return backend_failure(EffectStage::OutcomeUnknown).preserve_prior_effect(stage);
+    }
+
+    let mut postcondition_satisfied = None;
+    let mut final_snapshot = None;
+    if let Some(postcondition) = &command.postcondition {
+        let mut bounded = postcondition.clone();
+        bounded.timeout_ms = bounded.timeout_ms.min(command.settle_timeout_ms);
+        match wait_for_postcondition(
+            &runtime.plane(),
+            &command.element,
+            queue.revision_after_queue,
+            &bounded,
+            deadline,
+        )
+        .await
+        {
+            Ok(wait) => {
+                postcondition_satisfied = Some(true);
+                final_snapshot = wait
+                    .elements
+                    .into_iter()
+                    .find(|entry| entry.snapshot.element == command.element)
+                    .map(|entry| Box::new(entry.snapshot));
+            }
+            Err(_) => return physical_postcondition_failed(),
+        }
+    } else if let Ok(snapshot) = runtime
+        .plane()
+        .snapshot_for(ElementSnapshotRequest {
+            desktop_id: command.element.desktop_id,
+            desktop_generation: command.element.desktop_generation,
+            element: command.element.clone(),
+            expansion: ElementSnapshotExpansion::default(),
+        })
+        .await
+    {
+        final_snapshot = Some(Box::new(snapshot.element.snapshot));
+    }
+
+    let result = ElementPhysicalClickResult {
+        element: command.element,
+        window: plan.window().clone(),
+        correlation: queue.correlation,
+        revision_before_queue: plan.revision_before_queue(),
+        revision_after_queue: queue.revision_after_queue,
+        extents_before_queue: plan.geometry().element_extents,
+        extents_after_queue: queue.extents_after_queue,
+        click_point: plan.click_point(),
+        occlusion_check: queue.occlusion_check,
+        scrolled,
+        window_activated,
+        pointer_interpolated: true,
+        button: command.button,
+        count: command.count,
+        postcondition_satisfied,
+        final_snapshot,
+    };
+    if result.validate().is_err() {
+        return backend_failure(EffectStage::OutcomeUnknown);
+    }
+    RuntimeResult::success(
+        CommandOutcome::ElementPhysicalClick { result },
+        if postcondition_satisfied == Some(true) {
+            EffectStage::PostconditionMet
+        } else {
+            EffectStage::ElementPhysicallyClicked
+        },
+    )
+}
+
+fn map_physical_input_failure(
+    failure: InputFailure,
+    issue: Option<PhysicalClickPreconditionIssue>,
+    prior_stage: EffectStage,
+) -> RuntimeResult {
+    tracing::debug!(
+        error = ?failure,
+        precondition_issue = ?issue,
+        effect_stage = ?prior_stage,
+        "physical element input failed closed"
+    );
+    let effect_stage = precise_input_effect_stage(
+        failure.events_emitted,
+        failure.completed_units,
+        failure.progress_known,
+        failure.effects.as_deref(),
+        InputStage::PointerClick,
+        prior_stage,
+    );
+    if let Some(issue) = issue {
+        let result = match issue {
+            PhysicalClickPreconditionIssue::Stale => stale_element_reference(),
+            PhysicalClickPreconditionIssue::WeakCorrelation => weak_physical_correlation(),
+            PhysicalClickPreconditionIssue::Geometry => physical_geometry_invalid(),
+            PhysicalClickPreconditionIssue::Occluded => RuntimeResult::failure(
+                409,
+                ErrorCode::ElementOccluded,
+                "Element click point became occluded",
+                "Fresh queue-head stacking evidence rejected the selected click point.",
+                RetryAdvice::Never,
+                EffectStage::None,
+            ),
+            PhysicalClickPreconditionIssue::FocusLost => RuntimeResult::failure(
+                409,
+                ErrorCode::WeakWindowCorrelation,
+                "Target window focus was lost",
+                "The activated exact target window was not focused at the input boundary.",
+                RetryAdvice::Never,
+                EffectStage::None,
+            ),
+            PhysicalClickPreconditionIssue::ResourceExhausted => resource_exhausted(),
+            PhysicalClickPreconditionIssue::Unavailable => backend_failure(EffectStage::None),
+        };
+        return result
+            .preserve_prior_effect(effect_stage)
+            .forbid_retry_after_effect();
+    }
+    if failure.kind == InputFailureKind::PostconditionFailed {
+        return physical_geometry_invalid()
+            .preserve_prior_effect(effect_stage)
+            .forbid_retry_after_effect();
+    }
+    input_failure(failure, InputStage::PointerClick, prior_stage).forbid_retry_after_effect()
+}
+
+fn physical_postcondition_failed() -> RuntimeResult {
+    RuntimeResult::failure(
+        409,
+        ErrorCode::SemanticPostconditionFailed,
+        "Physical click postcondition failed",
+        "The click completed, but its requested semantic postcondition was not observed.",
+        RetryAdvice::Never,
+        EffectStage::ElementPhysicallyClicked,
+    )
 }
 
 async fn execute_clipboard_command<R: ClipboardExecutionRuntime + ?Sized>(
@@ -1775,6 +3650,7 @@ async fn execute_clipboard_command_with_context<
     }
 }
 
+#[derive(Clone)]
 struct MaterializedText {
     value: String,
     utf8_bytes: u64,
@@ -1940,17 +3816,26 @@ fn finish_cancellable_mutation(
     if !stopped {
         return outcome;
     }
+    if let ExecutionOutcome::StoppedWithEvidence { .. } = outcome {
+        return outcome;
+    }
     let effect = match outcome {
         ExecutionOutcome::Completed { effect, .. }
         | ExecutionOutcome::AtomicCompleted { effect, .. }
         | ExecutionOutcome::Stopped { effect } => effect,
+        ExecutionOutcome::StoppedWithEvidence { .. } => unreachable!(),
     };
     ExecutionOutcome::Stopped { effect }
 }
 
 enum PhysicalAttempt {
     Terminal(ExecutionOutcome<RuntimeResult>),
-    UseClipboard,
+    TryNextStrategy,
+}
+
+struct TextExecutionTarget {
+    window: Option<WindowRef>,
+    element: Option<xenoteer_protocol::ElementRef>,
 }
 
 async fn execute_text_insert<
@@ -1964,10 +3849,32 @@ async fn execute_text_insert<
     context: &mut C,
 ) -> ExecutionOutcome<RuntimeResult> {
     let target = match command.target {
-        TextTarget::Window { window } => window,
+        TextTarget::Window { window } => TextExecutionTarget {
+            window: Some(window),
+            element: None,
+        },
+        TextTarget::Element {
+            element,
+            window_fallback,
+        } => TextExecutionTarget {
+            window: window_fallback,
+            element: Some(*element),
+        },
     };
     match command.strategy {
+        TextStrategy::Semantic => {
+            let Some(element) = target.element else {
+                return completed(invalid_clipboard_request());
+            };
+            let Some(options) = command.semantic_options else {
+                return completed(invalid_clipboard_request());
+            };
+            execute_semantic_text(runtime, element, text, options, context).await
+        }
         TextStrategy::Physical => {
+            let Some(target) = target.window else {
+                return completed(invalid_clipboard_request());
+            };
             match execute_physical_text(
                 runtime,
                 command_id,
@@ -1980,10 +3887,13 @@ async fn execute_text_insert<
             .await
             {
                 PhysicalAttempt::Terminal(result) => result,
-                PhysicalAttempt::UseClipboard => completed(unsupported_text_strategy()),
+                PhysicalAttempt::TryNextStrategy => completed(unsupported_text_strategy()),
             }
         }
         TextStrategy::PhysicalExtended => {
+            let Some(target) = target.window else {
+                return completed(invalid_clipboard_request());
+            };
             match execute_physical_text(
                 runtime,
                 command_id,
@@ -1996,16 +3906,35 @@ async fn execute_text_insert<
             .await
             {
                 PhysicalAttempt::Terminal(result) => result,
-                PhysicalAttempt::UseClipboard => completed(unsupported_text_strategy()),
+                PhysicalAttempt::TryNextStrategy => completed(unsupported_text_strategy()),
             }
         }
         TextStrategy::Clipboard => {
+            let Some(target) = target.window else {
+                return completed(invalid_clipboard_request());
+            };
             let Some(options) = command.clipboard_options else {
                 return completed(invalid_clipboard_request());
             };
             execute_clipboard_paste(runtime, command_id, target, text, options, context).await
         }
         TextStrategy::Auto => {
+            if let Some(policy) = command.auto_policy {
+                return execute_explicit_text_auto(
+                    runtime,
+                    command_id,
+                    target,
+                    text,
+                    command.clipboard_options,
+                    command.semantic_options,
+                    policy.allowed_strategies,
+                    context,
+                )
+                .await;
+            }
+            let Some(target) = target.window else {
+                return completed(invalid_clipboard_request());
+            };
             let Some(options) = command.clipboard_options else {
                 return completed(invalid_clipboard_request());
             };
@@ -2025,13 +3954,169 @@ async fn execute_text_insert<
             .await
             {
                 PhysicalAttempt::Terminal(result) => result,
-                PhysicalAttempt::UseClipboard => {
+                PhysicalAttempt::TryNextStrategy => {
                     execute_clipboard_paste(runtime, command_id, target, text, options, context)
                         .await
                 }
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_explicit_text_auto<
+    R: ClipboardExecutionRuntime + ?Sized,
+    C: ClipboardExecutionContext + ?Sized,
+>(
+    runtime: &R,
+    command_id: CommandId,
+    target: TextExecutionTarget,
+    text: MaterializedText,
+    clipboard_options: Option<TextInsertOptions>,
+    semantic_options: Option<xenoteer_protocol::SemanticTextInsertOptions>,
+    strategies: Vec<TextStrategy>,
+    context: &mut C,
+) -> ExecutionOutcome<RuntimeResult> {
+    for (index, strategy) in strategies.iter().copied().enumerate() {
+        let has_next = index + 1 < strategies.len();
+        let attempt = match strategy {
+            TextStrategy::Semantic => {
+                let Some(element) = target.element.clone() else {
+                    return completed(invalid_clipboard_request());
+                };
+                let Some(options) = semantic_options.clone() else {
+                    return completed(invalid_clipboard_request());
+                };
+                execute_semantic_text(runtime, element, text.clone(), options, context).await
+            }
+            TextStrategy::Auto => {
+                return completed(invalid_clipboard_request());
+            }
+            TextStrategy::Physical | TextStrategy::PhysicalExtended => {
+                let Some(target) = target.window.clone() else {
+                    return completed(invalid_clipboard_request());
+                };
+                let mode = if strategy == TextStrategy::Physical {
+                    PhysicalTextMode::CurrentLayout
+                } else {
+                    PhysicalTextMode::ExtendedTemporaryMapping
+                };
+                match execute_physical_text(
+                    runtime,
+                    command_id,
+                    target,
+                    text.clone(),
+                    mode,
+                    has_next,
+                    context,
+                )
+                .await
+                {
+                    PhysicalAttempt::TryNextStrategy => continue,
+                    PhysicalAttempt::Terminal(outcome) => outcome,
+                }
+            }
+            TextStrategy::Clipboard => {
+                let Some(target) = target.window.clone() else {
+                    return completed(invalid_clipboard_request());
+                };
+                let Some(options) = clipboard_options else {
+                    return completed(invalid_clipboard_request());
+                };
+                execute_clipboard_paste(runtime, command_id, target, text.clone(), options, context)
+                    .await
+            }
+        };
+        if has_next && text_attempt_can_fallback(&attempt) {
+            continue;
+        }
+        return attempt;
+    }
+    completed(capability_unavailable())
+}
+
+async fn execute_semantic_text<
+    R: ClipboardExecutionRuntime + ?Sized,
+    C: ClipboardExecutionContext + ?Sized,
+>(
+    runtime: &R,
+    element: xenoteer_protocol::ElementRef,
+    text: MaterializedText,
+    options: xenoteer_protocol::SemanticTextInsertOptions,
+    context: &mut C,
+) -> ExecutionOutcome<RuntimeResult> {
+    if context.stop_reason() != ExecutionStop::Continue {
+        return ExecutionOutcome::Stopped {
+            effect: CommandEffect::BeforeEffect,
+        };
+    }
+    let deadline = context
+        .deadline()
+        .unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
+    let cancellation = CancellationToken::new();
+    let Some(mut operation) =
+        runtime.semantic_text_insert(element, text.value, options, deadline, cancellation.clone())
+    else {
+        return completed(capability_unavailable());
+    };
+    let result = tokio::select! {
+        result = &mut operation => Some(result),
+        _reason = context.wait_for_stop() => None,
+    };
+    let Some(result) = result else {
+        cancellation.cancel();
+        let effect = match tokio::time::timeout(INPUT_CONTROL_TIMEOUT, &mut operation).await {
+            Ok(Ok(_)) => CommandEffect::AfterEffect,
+            Ok(Err(error)) if error.effect_may_have_occurred() => CommandEffect::AfterEffect,
+            Ok(Err(_)) => CommandEffect::BeforeEffect,
+            Err(_) => CommandEffect::AfterEffect,
+        };
+        return ExecutionOutcome::Stopped { effect };
+    };
+    let semantic = match result {
+        Ok(semantic) => semantic,
+        Err(error) => return completed(map_semantic_failure(error)),
+    };
+    let exact_delta = semantic
+        .character_count_after
+        .checked_sub(semantic.character_count_before)
+        == u32::try_from(text.unicode_scalars).ok();
+    if !exact_delta {
+        return completed(semantic_postcondition_failed());
+    }
+    let stage = if semantic.postcondition_satisfied == Some(true) {
+        EffectStage::PostconditionMet
+    } else {
+        EffectStage::TextInserted
+    };
+    let evidence = TextInsertEvidence {
+        selected_strategy: TextStrategy::Semantic,
+        utf8_bytes: text.utf8_bytes,
+        unicode_scalars: text.unicode_scalars,
+        completed_scalars: text.unicode_scalars,
+        clipboard: None,
+        semantic: Some(semantic),
+    };
+    if evidence.validate().is_err() {
+        return completed(backend_failure(EffectStage::OutcomeUnknown));
+    }
+    completed(RuntimeResult::success(
+        CommandOutcome::TextInserted { evidence },
+        stage,
+    ))
+}
+
+fn text_attempt_can_fallback(outcome: &ExecutionOutcome<RuntimeResult>) -> bool {
+    matches!(
+        outcome,
+        ExecutionOutcome::Completed {
+            output: RuntimeResult::Failure(RuntimeFailure {
+                code: ErrorCode::CapabilityUnavailable | ErrorCode::UnsupportedByTarget,
+                ..
+            }),
+            effect: CommandEffect::BeforeEffect,
+        }
+    )
 }
 
 async fn execute_physical_text<
@@ -2057,6 +4142,7 @@ async fn execute_physical_text<
             unicode_scalars: 0,
             completed_scalars: 0,
             clipboard: None,
+            semantic: None,
         };
         if evidence.validate().is_err() {
             return PhysicalAttempt::Terminal(completed(backend_failure(focus)));
@@ -2068,7 +4154,7 @@ async fn execute_physical_text<
     }
     if text.unicode_scalars > MAX_PHYSICAL_TEXT_SCALARS as u64 {
         return if allow_clipboard_fallback && mode == PhysicalTextMode::CurrentLayout {
-            PhysicalAttempt::UseClipboard
+            PhysicalAttempt::TryNextStrategy
         } else {
             PhysicalAttempt::Terminal(completed(unsupported_text_strategy()))
         };
@@ -2128,7 +4214,7 @@ async fn execute_physical_text<
                 && failure.events_emitted == 0
                 && failure.completed_units == 0 =>
         {
-            PhysicalAttempt::UseClipboard
+            PhysicalAttempt::TryNextStrategy
         }
         Err(error) => PhysicalAttempt::Terminal(completed(
             map_text_input_error(error).preserve_prior_effect(focus_stage),
@@ -2198,6 +4284,7 @@ fn complete_physical_text(
         unicode_scalars,
         completed_scalars: completed_scalars as u64,
         clipboard: None,
+        semantic: None,
     };
     if evidence.validate().is_err() {
         return completed(backend_failure(stage));
@@ -2488,6 +4575,7 @@ async fn execute_clipboard_paste<
         unicode_scalars: text.unicode_scalars,
         completed_scalars: text.unicode_scalars,
         clipboard: Some(paste),
+        semantic: None,
     };
     if evidence.validate().is_err() {
         tracing::debug!("clipboard text-insert evidence failed final validation");
@@ -2953,6 +5041,13 @@ impl WindowControlRuntime {
         command: Command,
         stop_requested: Arc<AtomicBool>,
     ) -> RuntimeResult {
+        self.execute_fenced(command, WindowMutationFence::requested(stop_requested))
+    }
+
+    fn execute_fenced(&self, command: Command, fence: WindowMutationFence) -> RuntimeResult {
+        if fence.is_stopped() {
+            return backend_failure(EffectStage::None);
+        }
         if command.validate().is_err() {
             return invalid_window_control();
         }
@@ -2971,23 +5066,22 @@ impl WindowControlRuntime {
             Ok(request) => request,
             Err(result) => return *result,
         };
-        if stop_requested.load(Ordering::Acquire) {
+        if fence.is_stopped() {
             return backend_failure(EffectStage::None);
         }
 
         let observation = Arc::clone(&self.observation);
-        let revalidation_stop = Arc::clone(&stop_requested);
+        let revalidation_fence = fence;
         let revalidate_target = target.clone();
         let revalidate_sibling = sibling.clone();
         let reply = match self.actor.try_submit(raw_request.clone(), move || {
-            if revalidation_stop.load(Ordering::Acquire) {
-                return Err(RawWindowRevalidationError::Rejected);
-            }
-            revalidate_window(&observation, revalidate_target)?;
-            if let Some(sibling) = revalidate_sibling {
-                revalidate_window(&observation, sibling)?;
-            }
-            Ok(())
+            revalidate_at_window_effect_boundary(&revalidation_fence, || {
+                revalidate_window(&observation, revalidate_target)?;
+                if let Some(sibling) = revalidate_sibling {
+                    revalidate_window(&observation, sibling)?;
+                }
+                Ok(())
+            })
         }) {
             Ok(reply) => reply,
             Err(error) => return map_window_submit_error(error),
@@ -4447,10 +6541,16 @@ struct CoordinatorControlPlane {
 struct RuntimeLiveEventReceiver {
     live: broadcast::Receiver<u64>,
     handle: RuntimeHandle,
-    principal: PrincipalId,
+    audience: EventAudience,
     desktop_id: DesktopId,
     generation: GenerationToken,
     last_global_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EventAudience {
+    principal: PrincipalId,
+    allow_accessibility: bool,
 }
 
 impl LiveEventReceiver for RuntimeLiveEventReceiver {
@@ -4496,7 +6596,7 @@ impl LiveEventReceiver for RuntimeLiveEventReceiver {
                             };
                         };
                         self.last_global_sequence = sequence;
-                        match project_event(self.desktop_id, &self.principal, record) {
+                        match project_event(self.desktop_id, &self.audience, record) {
                             Ok(ProjectedEvent::Visible(event)) => {
                                 return LiveEvent::Event(event);
                             }
@@ -4563,12 +6663,15 @@ enum ProjectedEvent {
 
 fn project_event(
     desktop_id: DesktopId,
-    principal: &PrincipalId,
+    audience: &EventAudience,
     record: EventRecord<RuntimeEvent>,
 ) -> Result<ProjectedEvent, ControlPlaneError> {
     let event = match record.event {
-        RuntimeEvent::Targeted { audience, event } => {
-            if audience != *principal {
+        RuntimeEvent::Targeted {
+            audience: principal,
+            event,
+        } => {
+            if principal != audience.principal {
                 return Ok(ProjectedEvent::Hidden);
             }
             event
@@ -4580,6 +6683,9 @@ fn project_event(
             });
         }
     };
+    if event.topic.as_str().starts_with("accessibility.") && !audience.allow_accessibility {
+        return Ok(ProjectedEvent::Hidden);
+    }
     let event = SequencedEvent {
         desktop_id,
         desktop_generation: record.generation.generation(),
@@ -4593,14 +6699,14 @@ fn project_event(
 
 fn project_replayed_events(
     desktop_id: DesktopId,
-    principal: &PrincipalId,
+    audience: &EventAudience,
     generation: GenerationToken,
     latest_sequence: u64,
     events: Vec<EventRecord<RuntimeEvent>>,
 ) -> Result<EventReplay, ControlPlaneError> {
     let mut projected = Vec::new();
     for record in events {
-        match project_event(desktop_id, principal, record)? {
+        match project_event(desktop_id, audience, record)? {
             ProjectedEvent::Visible(event) => projected.push(event),
             ProjectedEvent::Hidden => {}
             ProjectedEvent::ResyncBarrier { sequence } => {
@@ -4748,7 +6854,8 @@ impl CoordinatorControlPlane {
                 .output
                 .as_ref()
                 .ok_or(ControlPlaneError::Internal)?;
-            return match output {
+            let trace = output.trace().cloned();
+            let result = match output {
                 RuntimeResult::Success(success) => accepted
                     .start(accepted_at)
                     .and_then(|running| {
@@ -4769,10 +6876,21 @@ impl CoordinatorControlPlane {
                     };
                     result.map_err(|_| ControlPlaneError::Internal)
                 }
+            }?;
+            return match trace {
+                Some(trace) => result
+                    .with_trace(trace)
+                    .map_err(|_| ControlPlaneError::Internal),
+                None => Ok(result),
             };
         }
 
         let (lifecycle, failure) = terminal_failure(terminal, generation);
+        let trace = terminal
+            .output
+            .as_ref()
+            .and_then(RuntimeResult::trace)
+            .cloned();
         let problem = runtime_problem(&failure, generation)?;
         let result =
             if failure.effect_stage.has_visible_effect() || lifecycle == CommandLifecycle::Failed {
@@ -4782,7 +6900,13 @@ impl CoordinatorControlPlane {
             } else {
                 accepted.fail(lifecycle, problem, finished_at)
             };
-        result.map_err(|_| ControlPlaneError::Internal)
+        let result = result.map_err(|_| ControlPlaneError::Internal)?;
+        match trace {
+            Some(trace) => result
+                .with_trace(trace)
+                .map_err(|_| ControlPlaneError::Internal),
+            None => Ok(result),
+        }
     }
 }
 
@@ -4939,6 +7063,7 @@ impl ControlPlane for CoordinatorControlPlane {
                 command_id: envelope.command_id,
                 principal: principal.clone(),
                 authorization: context.principal().clone(),
+                detailed_trace: detailed_trace_requested(envelope.trace_policy),
                 command: envelope.command,
             };
             let submission = self
@@ -5093,6 +7218,10 @@ impl ControlPlane for CoordinatorControlPlane {
                 return Err(ControlPlaneError::NotFound);
             }
             let principal = Self::principal(&context)?;
+            let audience = EventAudience {
+                principal,
+                allow_accessibility: context.principal().has_grant(Grant::AccessibilityRead),
+            };
             let generation = self.token().await?;
             if desktop_generation != generation.generation() {
                 return Err(ControlPlaneError::StaleReference {
@@ -5119,7 +7248,7 @@ impl ControlPlane for CoordinatorControlPlane {
                     ..
                 } => project_replayed_events(
                     self.desktop_id,
-                    &principal,
+                    &audience,
                     generation,
                     latest_sequence,
                     events,
@@ -5141,7 +7270,7 @@ impl ControlPlane for CoordinatorControlPlane {
                 live: Box::new(RuntimeLiveEventReceiver {
                     live: subscription.live,
                     handle: self.handle.clone(),
-                    principal,
+                    audience,
                     desktop_id: self.desktop_id,
                     generation,
                     last_global_sequence,
@@ -5194,6 +7323,8 @@ fn terminal_failure(
                         RetryAdvice::SameCommandId
                     },
                     effect_stage,
+                    trace_progress: RuntimeTraceProgress::None,
+                    trace: None,
                 },
             )
         }
@@ -5220,6 +7351,8 @@ fn terminal_failure(
                         RetryAdvice::SameCommandId
                     },
                     effect_stage,
+                    trace_progress: RuntimeTraceProgress::None,
+                    trace: None,
                 },
             )
         }
@@ -5232,6 +7365,8 @@ fn terminal_failure(
                 detail: "The command belonged to a retired desktop generation.",
                 retry: RetryAdvice::AfterResync,
                 effect_stage,
+                trace_progress: RuntimeTraceProgress::None,
+                trace: None,
             },
         ),
         TerminalCause::Shutdown => (
@@ -5243,6 +7378,8 @@ fn terminal_failure(
                 detail: "The daemon stopped command execution during orderly shutdown.",
                 retry: RetryAdvice::AfterBackoff,
                 effect_stage,
+                trace_progress: RuntimeTraceProgress::None,
+                trace: None,
             },
         ),
         TerminalCause::UnexpectedStop | TerminalCause::ExecutorPanicked => (
@@ -5254,6 +7391,8 @@ fn terminal_failure(
                 detail: "The command executor stopped without a safe typed result.",
                 retry: RetryAdvice::Never,
                 effect_stage,
+                trace_progress: RuntimeTraceProgress::None,
+                trace: None,
             },
         ),
         TerminalCause::Returned => (
@@ -5265,6 +7404,8 @@ fn terminal_failure(
                 detail: "The retained command result violated an internal invariant.",
                 retry: RetryAdvice::Never,
                 effect_stage,
+                trace_progress: RuntimeTraceProgress::None,
+                trace: None,
             },
         ),
     }
@@ -5300,6 +7441,10 @@ fn canonical_hash(envelope: &CommandEnvelope) -> Result<CanonicalCommandHash, Co
     let mut digest = [0_u8; 32];
     digest.copy_from_slice(&hash);
     Ok(CanonicalCommandHash::new(digest))
+}
+
+const fn detailed_trace_requested(policy: Option<TracePolicy>) -> bool {
+    matches!(policy, Some(TracePolicy::Detailed))
 }
 
 fn deadline_duration(
@@ -5400,6 +7545,10 @@ pub(crate) enum CoordinatorSetupError {
     #[error("clipboard runtime belongs to another desktop lifetime")]
     ClipboardScope,
     #[error(transparent)]
+    Geometry(#[from] xenoteer_protocol::GeometryError),
+    #[error(transparent)]
+    AccessibilityCorrelation(#[from] AccessibilityCorrelationCoordinatorError),
+    #[error(transparent)]
     Motion(#[from] MotionPlanError),
     #[error(transparent)]
     Lease(#[from] LeaseError),
@@ -5422,6 +7571,8 @@ pub(crate) enum CoordinatorRuntimeError {
     ProcessEventTaskPanicked,
     #[error("external desktop event relay task panicked")]
     ExternalEventTaskPanicked,
+    #[error("accessibility correlation task panicked")]
+    AccessibilityCorrelationTaskPanicked,
     #[error(transparent)]
     ProcessEvent(#[from] ProcessEventRelayError),
 }
@@ -5479,7 +7630,10 @@ mod tests {
     use tokio::sync::Semaphore;
     use tower::ServiceExt;
     use xenoteer_protocol::{
-        DesktopProbeCommand, LaunchId, ProcessRef, ProcessStatusCommand, RequestId,
+        AccessibilityIdentityHash, AccessibilityRevision, ApplicationRef, AtspiBusName,
+        AtspiGeneration, AtspiObjectPath, DesktopProbeCommand, ElementClickPointPolicy,
+        ElementPostcondition, ElementRef, ElementStringMatch, ElementWaitPredicate, LaunchId,
+        OcclusionCheckResult, ProcessRef, ProcessStatusCommand, RequestId, WindowIdentityHash,
     };
     use xenoteer_server::{
         AllowedOrigins, Authentication, DesktopReadiness, Principal, ReadinessHandle,
@@ -5498,6 +7652,10 @@ mod tests {
                 .capture();
         let alice = PrincipalId::new("alice")?;
         let bob = PrincipalId::new("bob")?;
+        let alice_audience = EventAudience {
+            principal: alice.clone(),
+            allow_accessibility: false,
+        };
         let make = |audience: PrincipalId, sequence: u64, secret: &str| {
             Ok::<_, Box<dyn std::error::Error>>(EventRecord {
                 generation,
@@ -5519,7 +7677,7 @@ mod tests {
         ];
         let visible = records
             .into_iter()
-            .map(|record| project_event(desktop_id, &alice, record))
+            .map(|record| project_event(desktop_id, &alice_audience, record))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| std::io::Error::other("event projection failed"))?
             .into_iter()
@@ -5562,13 +7720,58 @@ mod tests {
             },
         };
         for principal in [PrincipalId::new("alice")?, PrincipalId::new("bob")?] {
-            let projected = project_event(desktop_id, &principal, record.clone())
+            let audience = EventAudience {
+                principal,
+                allow_accessibility: false,
+            };
+            let projected = project_event(desktop_id, &audience, record.clone())
                 .map_err(|_| std::io::Error::other("event projection failed"))?;
             assert!(matches!(
                 projected,
                 ProjectedEvent::Visible(SequencedEvent { sequence: 9, .. })
             ));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn accessibility_events_require_authority_in_daemon_projection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let desktop_id = DesktopId::new();
+        let generation =
+            xenoteer_core::coordinator::GenerationFence::new(desktop_id, DesktopGeneration::new())
+                .capture();
+        let record = EventRecord {
+            generation,
+            sequence: 11,
+            encoded_size: 128,
+            event: RuntimeEvent::Broadcast {
+                event: NormalizedEvent::new(
+                    EventTopic::new("accessibility.element_changed")?,
+                    serde_json::json!({"name": "private value"}),
+                )?,
+            },
+        };
+        let principal = PrincipalId::new("observer")?;
+        let denied = EventAudience {
+            principal: principal.clone(),
+            allow_accessibility: false,
+        };
+        let allowed = EventAudience {
+            principal,
+            allow_accessibility: true,
+        };
+
+        assert_eq!(
+            project_event(desktop_id, &denied, record.clone())
+                .map_err(|_| std::io::Error::other("event projection failed"))?,
+            ProjectedEvent::Hidden
+        );
+        assert!(matches!(
+            project_event(desktop_id, &allowed, record)
+                .map_err(|_| std::io::Error::other("event projection failed"))?,
+            ProjectedEvent::Visible(SequencedEvent { sequence: 11, .. })
+        ));
         Ok(())
     }
 
@@ -5812,7 +8015,10 @@ mod tests {
                 .capture();
         let replay = project_replayed_events(
             desktop_id,
-            &PrincipalId::new("unrelated-observer")?,
+            &EventAudience {
+                principal: PrincipalId::new("unrelated-observer")?,
+                allow_accessibility: false,
+            },
             generation,
             3,
             vec![EventRecord {
@@ -6077,6 +8283,7 @@ mod tests {
                 process_event_join: tokio::spawn(async { Ok(()) }),
                 external_event_ingress,
                 external_event_join,
+                accessibility_correlation_join: None,
                 control,
             };
             let readiness = ReadinessHandle::new(ReadinessSnapshot::new(
@@ -6161,6 +8368,188 @@ mod tests {
             curve: PointerCurve::Smooth,
         });
         assert_ne!(test_hash(&first)?, test_hash(&changed)?);
+
+        let mut no_trace = first.clone();
+        no_trace.trace_policy = Some(TracePolicy::None);
+        let mut detailed = first.clone();
+        detailed.trace_policy = Some(TracePolicy::Detailed);
+        assert_ne!(test_hash(&first)?, test_hash(&no_trace)?);
+        assert_ne!(test_hash(&no_trace)?, test_hash(&detailed)?);
+        Ok(())
+    }
+
+    #[test]
+    fn detailed_trace_distinguishes_semantic_from_physical_stages()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let semantic = RuntimeResult::success(
+            CommandOutcome::Acknowledged,
+            EffectStage::SemanticStateChanged,
+        );
+        let semantic_trace = detailed_runtime_trace(&semantic, RuntimeTraceIntent::Semantic)?;
+        assert_eq!(
+            semantic_trace.domain,
+            CommandTraceDomain::SemanticAccessibility
+        );
+        assert!(semantic_trace.steps.iter().any(|step| {
+            step.stage == CommandTraceStage::SemanticDispatched
+                && step.status == CommandTraceStatus::Completed
+        }));
+        assert!(
+            semantic_trace
+                .steps
+                .iter()
+                .any(|step| step.stage == CommandTraceStage::SemanticReadback)
+        );
+        assert!(!semantic_trace.steps.iter().any(|step| matches!(
+            step.stage,
+            CommandTraceStage::PhysicalButtonPress | CommandTraceStage::PhysicalButtonRelease
+        )));
+
+        let desktop_id = DesktopId::new();
+        let desktop_generation = DesktopGeneration::new();
+        let atspi_generation = AtspiGeneration::new(1)?;
+        let application = ApplicationRef {
+            desktop_id,
+            desktop_generation,
+            atspi_generation,
+            unique_bus_name: AtspiBusName::new(":1.42")?,
+            root_object_path: AtspiObjectPath::new("/org/a11y/atspi/accessible/root")?,
+            app_instance_generation: 1,
+            identity_hash: AccessibilityIdentityHash::new("a".repeat(64))?,
+        };
+        let element = ElementRef {
+            desktop_id,
+            desktop_generation,
+            atspi_generation,
+            application,
+            object_path: AtspiObjectPath::new("/org/a11y/atspi/accessible/button")?,
+            object_identity_hash: AccessibilityIdentityHash::new("b".repeat(64))?,
+            cache_sequence: 3,
+        };
+        let physical = RuntimeResult::success(
+            CommandOutcome::ElementPhysicalClick {
+                result: ElementPhysicalClickResult {
+                    element,
+                    window: WindowRef {
+                        desktop_id,
+                        desktop_generation,
+                        xid: 42,
+                        observed_generation: 1,
+                        identity_hash: WindowIdentityHash::new("c".repeat(64))?,
+                    },
+                    correlation: xenoteer_protocol::WindowCorrelationConfidence::Strong,
+                    revision_before_queue: AccessibilityRevision::new(3)?,
+                    revision_after_queue: AccessibilityRevision::new(4)?,
+                    extents_before_queue: Rect::new(10, 10, 100, 30)?,
+                    extents_after_queue: Rect::new(10, 10, 100, 30)?,
+                    click_point: Point::new(60, 25),
+                    occlusion_check: OcclusionCheckResult::NotRequested,
+                    scrolled: false,
+                    window_activated: true,
+                    pointer_interpolated: true,
+                    button: PointerLogicalButton::Left,
+                    count: 1,
+                    postcondition_satisfied: None,
+                    final_snapshot: None,
+                },
+            },
+            EffectStage::ElementPhysicallyClicked,
+        );
+        let physical_trace =
+            detailed_runtime_trace(&physical, RuntimeTraceIntent::PhysicalElement)?;
+        assert_eq!(
+            physical_trace.domain,
+            CommandTraceDomain::PhysicalElementInput
+        );
+        for stage in [
+            CommandTraceStage::PhysicalCorrelationRevalidated,
+            CommandTraceStage::PhysicalWindowRevalidated,
+            CommandTraceStage::PhysicalScroll,
+            CommandTraceStage::PhysicalActivation,
+            CommandTraceStage::PhysicalPointerInterpolation,
+            CommandTraceStage::PhysicalButtonPress,
+            CommandTraceStage::PhysicalButtonRelease,
+        ] {
+            assert!(physical_trace.steps.iter().any(|step| step.stage == stage));
+        }
+        assert!(
+            !physical_trace
+                .steps
+                .iter()
+                .any(|step| step.stage == CommandTraceStage::SemanticDispatched)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn normal_and_none_trace_policy_omit_inline_trace() {
+        assert!(!detailed_trace_requested(None));
+        assert!(!detailed_trace_requested(Some(TracePolicy::None)));
+        assert!(!detailed_trace_requested(Some(TracePolicy::Normal)));
+        assert!(detailed_trace_requested(Some(TracePolicy::Detailed)));
+    }
+
+    #[test]
+    fn detailed_failure_trace_reports_only_observed_semantic_progress()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let before_dispatch = map_semantic_failure(SemanticActionFailure::Disabled);
+        let before_trace = detailed_runtime_trace(&before_dispatch, RuntimeTraceIntent::Semantic)?;
+        assert!(
+            !before_trace
+                .steps
+                .iter()
+                .any(|step| step.stage == CommandTraceStage::SemanticDispatched)
+        );
+
+        let after_readback = map_semantic_failure(SemanticActionFailure::PostconditionFailed);
+        let after_trace = detailed_runtime_trace(&after_readback, RuntimeTraceIntent::Semantic)?;
+        assert!(
+            after_trace
+                .steps
+                .iter()
+                .any(|step| step.stage == CommandTraceStage::SemanticDispatched)
+        );
+        assert!(
+            after_trace
+                .steps
+                .iter()
+                .any(|step| step.stage == CommandTraceStage::SemanticReadback)
+        );
+        assert_eq!(
+            after_trace.steps.last().map(|step| step.status),
+            Some(CommandTraceStatus::Failed)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn detailed_stopped_outcome_retains_bounded_trace_evidence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let stopped = attach_detailed_trace(
+            ExecutionOutcome::Stopped {
+                effect: CommandEffect::AfterEffect,
+            },
+            RuntimeTraceIntent::Semantic,
+        );
+        let ExecutionOutcome::StoppedWithEvidence { output, effect } = stopped else {
+            return Err("detailed stopped outcome did not retain evidence".into());
+        };
+        assert_eq!(effect, CommandEffect::AfterEffect);
+        let trace = output
+            .trace()
+            .ok_or("detailed stopped outcome omitted its trace")?;
+        assert_eq!(trace.domain, CommandTraceDomain::SemanticAccessibility);
+        assert!(
+            trace
+                .steps
+                .iter()
+                .any(|step| step.stage == CommandTraceStage::SemanticDispatched)
+        );
+        assert_eq!(
+            trace.steps.last().map(|step| step.status),
+            Some(CommandTraceStatus::Failed)
+        );
+        assert!(trace.steps.len() <= xenoteer_protocol::MAX_COMMAND_TRACE_STEPS);
         Ok(())
     }
 
@@ -6191,12 +8580,12 @@ mod tests {
         assert!(matches!(
             process_completion(Ok(process), ProcessOperation::Launch),
             ExecutionOutcome::AtomicCompleted {
-                output: RuntimeResult::Success(RuntimeSuccess {
-                    outcome: CommandOutcome::ApplicationLaunched { process: returned },
-                    ..
-                }),
+                output: RuntimeResult::Success(success),
                 ..
-            } if returned == process
+            } if matches!(
+                &success.outcome,
+                CommandOutcome::ApplicationLaunched { process: returned } if returned == &process
+            )
         ));
 
         let view = xenoteer_protocol::ProcessView {
@@ -6211,12 +8600,12 @@ mod tests {
         assert!(matches!(
             process_completion(Ok(view.clone()), ProcessOperation::Terminate),
             ExecutionOutcome::AtomicCompleted {
-                output: RuntimeResult::Success(RuntimeSuccess {
-                    outcome: CommandOutcome::ProcessTerminated { process: returned },
-                    ..
-                }),
+                output: RuntimeResult::Success(success),
                 ..
-            } if returned == view
+            } if matches!(
+                &success.outcome,
+                CommandOutcome::ProcessTerminated { process: returned } if returned == &view
+            )
         ));
         assert!(matches!(
             process_completion(Ok(view), ProcessOperation::Status),
@@ -6655,5 +9044,212 @@ mod tests {
     fn test_hash(envelope: &CommandEnvelope) -> Result<CanonicalCommandHash, std::io::Error> {
         canonical_hash(envelope)
             .map_err(|_| std::io::Error::other("canonical hash construction failed"))
+    }
+
+    #[test]
+    fn semantic_success_stages_distinguish_dispatch_state_text_and_postcondition() {
+        use xenoteer_protocol::ElementActionOperation;
+
+        assert_eq!(
+            semantic_success_stage(ElementActionOperation::Invoke, false),
+            EffectStage::SemanticActionDispatched
+        );
+        assert_eq!(
+            semantic_success_stage(ElementActionOperation::Scroll, false),
+            EffectStage::SemanticActionDispatched
+        );
+        for operation in [
+            ElementActionOperation::Focus,
+            ElementActionOperation::SetValue,
+            ElementActionOperation::Selection,
+            ElementActionOperation::SetText,
+        ] {
+            assert_eq!(
+                semantic_success_stage(operation, false),
+                EffectStage::SemanticStateChanged
+            );
+        }
+        assert_eq!(
+            semantic_success_stage(ElementActionOperation::InsertText, false),
+            EffectStage::TextInserted
+        );
+        assert_eq!(
+            semantic_success_stage(ElementActionOperation::Invoke, true),
+            EffectStage::PostconditionMet
+        );
+    }
+
+    #[test]
+    fn semantic_failures_preserve_before_and_after_effect_boundaries() {
+        let rejected = map_semantic_failure(SemanticActionFailure::BackendRejected);
+        assert!(matches!(rejected, RuntimeResult::Failure(_)));
+        let RuntimeResult::Failure(rejected) = rejected else {
+            return;
+        };
+        assert_eq!(rejected.code, ErrorCode::UnsupportedByTarget);
+        assert_eq!(rejected.effect_stage, EffectStage::SemanticActionDispatched);
+
+        let queue_full = map_semantic_failure(SemanticActionFailure::Actor(
+            xenoteer_atspi::SemanticError::QueueFull,
+        ));
+        assert!(matches!(queue_full, RuntimeResult::Failure(_)));
+        let RuntimeResult::Failure(queue_full) = queue_full else {
+            return;
+        };
+        assert_eq!(queue_full.code, ErrorCode::ResourceExhausted);
+        assert_eq!(queue_full.effect_stage, EffectStage::None);
+
+        let cancelled_after = map_semantic_failure(SemanticActionFailure::Actor(
+            xenoteer_atspi::SemanticError::CancelledAfterDispatch,
+        ));
+        assert!(matches!(cancelled_after, RuntimeResult::Failure(_)));
+        let RuntimeResult::Failure(cancelled_after) = cancelled_after else {
+            return;
+        };
+        assert_eq!(cancelled_after.code, ErrorCode::CancelledAfterEffect);
+        assert_eq!(
+            cancelled_after.effect_stage,
+            EffectStage::SemanticActionDispatched
+        );
+
+        let reply_lost = map_semantic_failure(SemanticActionFailure::Actor(
+            xenoteer_atspi::SemanticError::ReplyLostAfterAdmission,
+        ));
+        assert!(matches!(reply_lost, RuntimeResult::Failure(_)));
+        let RuntimeResult::Failure(reply_lost) = reply_lost else {
+            return;
+        };
+        assert_eq!(reply_lost.code, ErrorCode::RequestOutcomeUnknown);
+        assert_eq!(reply_lost.effect_stage, EffectStage::OutcomeUnknown);
+    }
+
+    #[tokio::test]
+    async fn physical_click_rejects_unsupported_postconditions_before_any_effect()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let desktop_id = DesktopId::new();
+        let generation = DesktopGeneration::new();
+        let atspi_generation = AtspiGeneration::new(1)?;
+        let application = ApplicationRef {
+            desktop_id,
+            desktop_generation: generation,
+            atspi_generation,
+            unique_bus_name: AtspiBusName::new(":1.42")?,
+            root_object_path: AtspiObjectPath::new("/org/a11y/atspi/accessible/root")?,
+            app_instance_generation: 1,
+            identity_hash: AccessibilityIdentityHash::new("a".repeat(64))?,
+        };
+        let element = ElementRef {
+            desktop_id,
+            desktop_generation: generation,
+            atspi_generation,
+            application,
+            object_path: AtspiObjectPath::new("/org/a11y/atspi/accessible/42")?,
+            object_identity_hash: AccessibilityIdentityHash::new("b".repeat(64))?,
+            cache_sequence: 7,
+        };
+        let (_input_sender, input) = tokio::sync::watch::channel(None::<InputActorHandle>);
+        let executor = RuntimeExecutor {
+            input,
+            window_control: None,
+            clipboard: None,
+            accessibility: None,
+            accessibility_correlation: None,
+            broker: BrokerClient::new("/path/that/must/not/exist"),
+            motion_policy: MotionPolicy::default(),
+            desktop_id,
+            generation,
+            root_bounds: Rect::new(0, 0, 1_024, 768)?,
+        };
+
+        for predicate in [ElementWaitPredicate::Text {
+            matcher: ElementStringMatch::Exact {
+                value: "never-read".to_owned(),
+                case_sensitive: true,
+            },
+        }] {
+            let result = execute_physical_element_click_inner(
+                &executor,
+                CommandId::new(),
+                ElementPhysicalClickCommand {
+                    element: element.clone(),
+                    window: None,
+                    minimum_correlation: xenoteer_protocol::WindowCorrelationConfidence::Strong,
+                    point_policy: ElementClickPointPolicy::Center,
+                    scroll_policy: ElementClickScrollPolicy::Always,
+                    activation_policy: ElementWindowActivationPolicy::Require,
+                    occlusion_policy: ElementOcclusionPolicy::BestEffortReject,
+                    button: PointerLogicalButton::Left,
+                    count: 1,
+                    interval_ms: 0,
+                    move_duration_ms: Some(100),
+                    curve: PointerCurve::Smooth,
+                    settle_timeout_ms: 1_000,
+                    postcondition: Some(ElementPostcondition {
+                        predicate,
+                        timeout_ms: 1_000,
+                        allow_poll_fallback: false,
+                    }),
+                },
+                Instant::now() + Duration::from_secs(2),
+                CancellationToken::new(),
+            )
+            .await;
+            let RuntimeResult::Failure(failure) = result else {
+                return Err("unsupported physical postcondition unexpectedly succeeded".into());
+            };
+            assert_eq!(failure.code, ErrorCode::InvalidRequest);
+            assert_eq!(failure.effect_stage, EffectStage::None);
+            assert_eq!(failure.retry, RetryAdvice::Never);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn text_auto_falls_back_only_for_explicit_pre_dispatch_semantic_failures() {
+        let unsupported = completed(map_semantic_failure(
+            SemanticActionFailure::VerificationUnsupported,
+        ));
+        assert!(text_attempt_can_fallback(&unsupported));
+
+        let rejected = completed(map_semantic_failure(SemanticActionFailure::BackendRejected));
+        assert!(!text_attempt_can_fallback(&rejected));
+
+        let stale = completed(map_semantic_failure(SemanticActionFailure::Actor(
+            xenoteer_atspi::SemanticError::StaleIdentity,
+        )));
+        assert!(!text_attempt_can_fallback(&stale));
+
+        let after_effect = completed(map_semantic_failure(
+            SemanticActionFailure::PostconditionFailed,
+        ));
+        assert!(!text_attempt_can_fallback(&after_effect));
+
+        let unknown = completed(map_semantic_failure(SemanticActionFailure::Actor(
+            xenoteer_atspi::SemanticError::ReplyLostAfterAdmission,
+        )));
+        assert!(!text_attempt_can_fallback(&unknown));
+    }
+
+    #[test]
+    fn semantic_action_resolution_failures_use_specific_codes() {
+        let not_found = map_semantic_failure(SemanticActionFailure::Actor(
+            xenoteer_atspi::SemanticError::ActionNotFound,
+        ));
+        assert!(matches!(not_found, RuntimeResult::Failure(_)));
+        let RuntimeResult::Failure(not_found) = not_found else {
+            return;
+        };
+        assert_eq!(not_found.code, ErrorCode::ActionNotFound);
+        assert_eq!(not_found.effect_stage, EffectStage::None);
+
+        let ambiguous = map_semantic_failure(SemanticActionFailure::Actor(
+            xenoteer_atspi::SemanticError::AmbiguousAction,
+        ));
+        assert!(matches!(ambiguous, RuntimeResult::Failure(_)));
+        let RuntimeResult::Failure(ambiguous) = ambiguous else {
+            return;
+        };
+        assert_eq!(ambiguous.code, ErrorCode::AmbiguousTarget);
+        assert_eq!(ambiguous.effect_stage, EffectStage::None);
     }
 }

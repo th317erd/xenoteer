@@ -1,5 +1,11 @@
 {
   "$defs": {
+    "AccessibilityIdentityHash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
     "ApplicationArgument": {
       "description": "A bounded, non-control application argument.",
       "maxLength": 1024,
@@ -11,6 +17,44 @@
       "minLength": 1,
       "pattern": "^[a-z0-9][a-z0-9._-]*$",
       "type": "string"
+    },
+    "ApplicationRef": {
+      "additionalProperties": false,
+      "properties": {
+        "app_instance_generation": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "atspi_generation": {
+          "$ref": "#/$defs/AtspiGeneration"
+        },
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration"
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId"
+        },
+        "identity_hash": {
+          "$ref": "#/$defs/AccessibilityIdentityHash"
+        },
+        "root_object_path": {
+          "$ref": "#/$defs/AtspiObjectPath"
+        },
+        "unique_bus_name": {
+          "$ref": "#/$defs/AtspiBusName"
+        }
+      },
+      "required": [
+        "desktop_id",
+        "desktop_generation",
+        "atspi_generation",
+        "unique_bus_name",
+        "root_object_path",
+        "app_instance_generation",
+        "identity_hash"
+      ],
+      "type": "object"
     },
     "ArtifactContentType": {
       "description": "A validated HTTP media type without attacker-controlled control characters.",
@@ -101,6 +145,21 @@
         "expires_at"
       ],
       "type": "object"
+    },
+    "AtspiBusName": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "AtspiGeneration": {
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "AtspiObjectPath": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
     },
     "ClipboardTarget": {
       "description": "A bounded X11 target atom name.",
@@ -942,6 +1001,17 @@
           "additionalProperties": false,
           "description": "Insert exact UTF-8 through one bounded strategy.",
           "properties": {
+            "auto_policy": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TextAutoPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Explicit policy required for element-target `auto`. Omission on a\nwindow-target `auto` preserves the legacy physical/clipboard/extended\npolicy and its existing wire shape."
+            },
             "clipboard_options": {
               "anyOf": [
                 {
@@ -952,6 +1022,17 @@
                 }
               ],
               "description": "Clipboard-specific bounds, present only when clipboard might be selected."
+            },
+            "semantic_options": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SemanticTextInsertOptions"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Semantic options, present exactly when semantic insertion may be selected."
             },
             "strategy": {
               "$ref": "#/$defs/TextStrategy",
@@ -975,6 +1056,360 @@
             "text",
             "target",
             "strategy"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Invoke one semantic AT-SPI action without synthesizing input.",
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/ElementActionTarget"
+            },
+            "allow_disabled": {
+              "type": "boolean"
+            },
+            "element": {
+              "$ref": "#/$defs/ElementRef"
+            },
+            "postcondition": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ElementPostcondition"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "const": "element_invoke",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "element",
+            "action",
+            "allow_disabled"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Request semantic focus through AT-SPI Component.",
+          "properties": {
+            "element": {
+              "$ref": "#/$defs/ElementRef"
+            },
+            "postcondition": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ElementPostcondition"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "require_window_focus_correlation": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "element_focus",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "element",
+            "require_window_focus_correlation"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Set a semantic Value and verify readback.",
+          "properties": {
+            "element": {
+              "$ref": "#/$defs/ElementRef"
+            },
+            "postcondition": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ElementPostcondition"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tolerance": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "element_set_value",
+              "type": "string"
+            },
+            "value": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "type",
+            "element",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Mutate an AT-SPI Selection container.",
+          "properties": {
+            "element": {
+              "$ref": "#/$defs/ElementRef"
+            },
+            "operation": {
+              "$ref": "#/$defs/ElementSelectionOperation"
+            },
+            "postcondition": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ElementPostcondition"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "const": "element_selection",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "element",
+            "operation"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Replace editable text semantically.",
+          "properties": {
+            "element": {
+              "$ref": "#/$defs/ElementRef"
+            },
+            "postcondition": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ElementPostcondition"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "selection": {
+              "$ref": "#/$defs/EditableTextSelectionPolicy"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "const": "element_set_text",
+              "type": "string"
+            },
+            "verify_length_only": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "element",
+            "text",
+            "selection",
+            "verify_length_only"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Insert editable text at an explicit character offset.",
+          "properties": {
+            "element": {
+              "$ref": "#/$defs/ElementRef"
+            },
+            "offset": {
+              "format": "int32",
+              "maximum": 2147483646,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "postcondition": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ElementPostcondition"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "selection": {
+              "$ref": "#/$defs/EditableTextSelectionPolicy"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "const": "element_insert_text",
+              "type": "string"
+            },
+            "verify_length_only": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "element",
+            "offset",
+            "text",
+            "selection",
+            "verify_length_only"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Scroll an accessible component semantically.",
+          "properties": {
+            "element": {
+              "$ref": "#/$defs/ElementRef"
+            },
+            "postcondition": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ElementPostcondition"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "target": {
+              "$ref": "#/$defs/ElementScrollTarget"
+            },
+            "type": {
+              "const": "element_scroll",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "element",
+            "target"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Resolve current element geometry and execute serialized physical input.",
+          "properties": {
+            "activation_policy": {
+              "$ref": "#/$defs/ElementWindowActivationPolicy"
+            },
+            "button": {
+              "$ref": "#/$defs/PointerLogicalButton"
+            },
+            "count": {
+              "format": "uint8",
+              "maximum": 5,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "curve": {
+              "$ref": "#/$defs/PointerCurve"
+            },
+            "element": {
+              "$ref": "#/$defs/ElementRef"
+            },
+            "interval_ms": {
+              "format": "uint32",
+              "maximum": 249,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "minimum_correlation": {
+              "$ref": "#/$defs/WindowCorrelationConfidence"
+            },
+            "move_duration_ms": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "occlusion_policy": {
+              "$ref": "#/$defs/ElementOcclusionPolicy"
+            },
+            "point_policy": {
+              "$ref": "#/$defs/ElementClickPointPolicy"
+            },
+            "postcondition": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ElementPostcondition"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "scroll_policy": {
+              "$ref": "#/$defs/ElementClickScrollPolicy"
+            },
+            "settle_timeout_ms": {
+              "format": "uint32",
+              "maximum": 30000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "type": {
+              "const": "element_physical_click",
+              "type": "string"
+            },
+            "window": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WindowRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "element",
+            "minimum_correlation",
+            "point_policy",
+            "scroll_policy",
+            "activation_policy",
+            "occlusion_policy",
+            "button",
+            "count",
+            "interval_ms",
+            "curve",
+            "settle_timeout_ms"
           ],
           "type": "object"
         }
@@ -1070,6 +1505,655 @@
     "DesktopId": {
       "description": "Identifies a desktop resource.",
       "format": "uuid",
+      "type": "string"
+    },
+    "EditableTextSelectionPolicy": {
+      "enum": [
+        "preserve",
+        "collapse_before",
+        "collapse_after",
+        "select_inserted"
+      ],
+      "type": "string"
+    },
+    "ElementActionTarget": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "const": "name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "index": {
+              "format": "uint16",
+              "maximum": 127,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "index",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "index"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "default",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ElementClickPointPolicy": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "center",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "inset_pixels": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "inset_center",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "inset_pixels"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "offset": {
+              "$ref": "#/$defs/Point"
+            },
+            "type": {
+              "const": "offset",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "offset"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "nearest_visible",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ElementClickScrollPolicy": {
+      "enum": [
+        "never",
+        "if_needed",
+        "always"
+      ],
+      "type": "string"
+    },
+    "ElementOcclusionPolicy": {
+      "enum": [
+        "ignore",
+        "best_effort_reject",
+        "require_unoccluded"
+      ],
+      "type": "string"
+    },
+    "ElementPostcondition": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_poll_fallback": {
+          "type": "boolean"
+        },
+        "predicate": {
+          "$ref": "#/$defs/ElementWaitPredicate"
+        },
+        "timeout_ms": {
+          "format": "uint32",
+          "maximum": 30000,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "predicate",
+        "timeout_ms",
+        "allow_poll_fallback"
+      ],
+      "type": "object"
+    },
+    "ElementRef": {
+      "additionalProperties": false,
+      "properties": {
+        "application": {
+          "$ref": "#/$defs/ApplicationRef"
+        },
+        "atspi_generation": {
+          "$ref": "#/$defs/AtspiGeneration"
+        },
+        "cache_sequence": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "desktop_generation": {
+          "$ref": "#/$defs/DesktopGeneration"
+        },
+        "desktop_id": {
+          "$ref": "#/$defs/DesktopId"
+        },
+        "object_identity_hash": {
+          "$ref": "#/$defs/AccessibilityIdentityHash"
+        },
+        "object_path": {
+          "$ref": "#/$defs/AtspiObjectPath"
+        }
+      },
+      "required": [
+        "desktop_id",
+        "desktop_generation",
+        "atspi_generation",
+        "application",
+        "object_path",
+        "object_identity_hash",
+        "cache_sequence"
+      ],
+      "type": "object"
+    },
+    "ElementScrollAlignment": {
+      "enum": [
+        "top_left",
+        "bottom_right",
+        "top_edge",
+        "bottom_edge",
+        "left_edge",
+        "right_edge",
+        "anywhere"
+      ],
+      "type": "string"
+    },
+    "ElementScrollTarget": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "alignment": {
+              "$ref": "#/$defs/ElementScrollAlignment"
+            },
+            "type": {
+              "const": "alignment",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "alignment"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "point": {
+              "$ref": "#/$defs/Point"
+            },
+            "type": {
+              "const": "screen_point",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "point"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ElementSelectionOperation": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "index": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "select_child",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "index"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "index": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "deselect_child",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "index"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "select_all",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "clear",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ElementState": {
+      "enum": [
+        "active",
+        "busy",
+        "checked",
+        "defunct",
+        "editable",
+        "enabled",
+        "expandable",
+        "expanded",
+        "focusable",
+        "focused",
+        "indeterminate",
+        "modal",
+        "multi_selectable",
+        "opaque",
+        "pressed",
+        "protected",
+        "read_only",
+        "required",
+        "selectable",
+        "selected",
+        "sensitive",
+        "showing",
+        "single_line",
+        "stale",
+        "transient",
+        "visible",
+        "visited"
+      ],
+      "type": "string"
+    },
+    "ElementStringMatch": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case_sensitive": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "exact",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value",
+            "case_sensitive"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case_sensitive": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "contains",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value",
+            "case_sensitive"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case_sensitive": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "prefix",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value",
+            "case_sensitive"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case_sensitive": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "suffix",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value",
+            "case_sensitive"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case_sensitive": {
+              "type": "boolean"
+            },
+            "pattern": {
+              "type": "string"
+            },
+            "type": {
+              "const": "regex",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "pattern",
+            "case_sensitive"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ElementWaitPredicate": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "exists",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "gone",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/ElementState"
+            },
+            "type": {
+              "const": "state",
+              "type": "string"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "matcher": {
+              "$ref": "#/$defs/ElementStringMatch"
+            },
+            "type": {
+              "const": "name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "matcher"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "maximum": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "minimum": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "value",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "maximum": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "minimum": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "child_count",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "coordinate_space": {
+              "enum": [
+                "atspi_screen"
+              ],
+              "type": "string"
+            },
+            "intersects": {
+              "$ref": "#/$defs/Rect"
+            },
+            "type": {
+              "const": "geometry",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "coordinate_space",
+            "intersects"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "maximum": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "minimum": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "selector_count",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "minimum"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ElementWindowActivationPolicy": {
+      "enum": [
+        "never",
+        "if_needed",
+        "require"
+      ],
       "type": "string"
     },
     "EventTopic": {
@@ -1889,6 +2973,37 @@
       ],
       "type": "object"
     },
+    "Rect": {
+      "additionalProperties": false,
+      "description": "Closed request-direction rectangle object.",
+      "properties": {
+        "height": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "x": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "y": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
     "RequestId": {
       "description": "Correlates one transport request and response.",
       "format": "uuid",
@@ -1937,12 +3052,122 @@
         }
       ]
     },
+    "SemanticTextInsertOptions": {
+      "additionalProperties": false,
+      "description": "Bounded AT-SPI EditableText behavior. There is intentionally no\n`allow_protected` or equivalent caller-controlled policy bypass.",
+      "properties": {
+        "insertion_point": {
+          "$ref": "#/$defs/SemanticTextInsertionPoint",
+          "description": "Live caret or explicit character offset."
+        },
+        "postcondition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ElementPostcondition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional content-free semantic postcondition."
+        },
+        "selection": {
+          "$ref": "#/$defs/EditableTextSelectionPolicy",
+          "description": "Selection handling around the insertion."
+        },
+        "verify_length_only": {
+          "description": "Verify only character counts/caret/selection metadata, never content.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "insertion_point",
+        "selection",
+        "verify_length_only"
+      ],
+      "type": "object"
+    },
+    "SemanticTextInsertionPoint": {
+      "description": "Where AT-SPI EditableText inserts the first scalar.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Resolve the live caret immediately before the semantic effect.",
+          "properties": {
+            "kind": {
+              "const": "caret",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Insert at this non-negative AT-SPI character offset.",
+          "properties": {
+            "kind": {
+              "const": "offset",
+              "type": "string"
+            },
+            "offset": {
+              "description": "AT-SPI character offset, not a UTF-8 byte offset.",
+              "format": "int32",
+              "maximum": 2147483646,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "offset"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "Sha256Digest": {
       "description": "Canonical lowercase hexadecimal SHA-256 content identity.",
       "maxLength": 64,
       "minLength": 64,
       "pattern": "^[0-9a-f]{64}$",
       "type": "string"
+    },
+    "TextAutoFallbackPolicy": {
+      "description": "Auto may advance only when the preceding strategy produced no effect.",
+      "oneOf": [
+        {
+          "const": "before_effect_only",
+          "description": "Stop selection permanently once any concrete strategy has an effect.",
+          "type": "string"
+        }
+      ]
+    },
+    "TextAutoPolicy": {
+      "additionalProperties": false,
+      "description": "Explicit bounded strategy union in canonical evaluation order:\nsemantic, current-layout physical, clipboard, physical-extended.",
+      "properties": {
+        "allowed_strategies": {
+          "description": "Non-empty canonical subset of concrete strategies.",
+          "items": {
+            "$ref": "#/$defs/TextStrategy"
+          },
+          "maxItems": 4,
+          "minItems": 1,
+          "type": "array"
+        },
+        "fallback": {
+          "$ref": "#/$defs/TextAutoFallbackPolicy",
+          "description": "Explicit no-fallback-after-effect rule."
+        }
+      },
+      "required": [
+        "allowed_strategies",
+        "fallback"
+      ],
+      "type": "object"
     },
     "TextInsertOptions": {
       "additionalProperties": false,
@@ -2010,16 +3235,16 @@
       ]
     },
     "TextStrategy": {
-      "description": "Release-four exact text strategies.",
+      "description": "Concrete text strategies plus the bounded policy-selection sentinel.",
       "oneOf": [
         {
-          "const": "physical",
-          "description": "Current-layout XTEST keycodes only.",
+          "const": "semantic",
+          "description": "AT-SPI EditableText insertion against an exact element generation.",
           "type": "string"
         },
         {
-          "const": "physical_extended",
-          "description": "Explicit global temporary-keymap strategy.",
+          "const": "physical",
+          "description": "Current-layout XTEST keycodes only.",
           "type": "string"
         },
         {
@@ -2028,8 +3253,13 @@
           "type": "string"
         },
         {
+          "const": "physical_extended",
+          "description": "Explicit global temporary-keymap strategy.",
+          "type": "string"
+        },
+        {
           "const": "auto",
-          "description": "Deterministic policy selection among available release-four strategies.",
+          "description": "Deterministic selection from an explicit or legacy ordered policy.",
           "type": "string"
         }
       ]
@@ -2055,6 +3285,37 @@
             "window"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Exact AT-SPI element, with an explicit correlated X11 fallback when a\npolicy may synthesize physical input or request clipboard paste.",
+          "properties": {
+            "element": {
+              "$ref": "#/$defs/ElementRef",
+              "description": "Generation-fenced semantic target."
+            },
+            "target": {
+              "const": "element",
+              "type": "string"
+            },
+            "window_fallback": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WindowRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Exact X11 target for any permitted non-semantic fallback."
+            }
+          },
+          "required": [
+            "target",
+            "element"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -2066,6 +3327,11 @@
     "TracePolicy": {
       "description": "The amount of trace detail requested by a client.",
       "oneOf": [
+        {
+          "const": "none",
+          "description": "Do not retain structured trace evidence.",
+          "type": "string"
+        },
         {
           "const": "normal",
           "description": "Retain only normal audit metadata.",
@@ -2092,6 +3358,15 @@
           "type": "string"
         }
       ]
+    },
+    "WindowCorrelationConfidence": {
+      "enum": [
+        "none",
+        "weak",
+        "strong",
+        "exact_process"
+      ],
+      "type": "string"
     },
     "WindowFocusFallback": {
       "description": "Explicit fallback policy for activation when EWMH cannot establish focus.",

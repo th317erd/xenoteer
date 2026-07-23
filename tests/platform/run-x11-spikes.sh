@@ -90,7 +90,7 @@ export XENOTEER_TEST_DISPLAY="$display"
 # integration tests require the distinct 1920x1080 Phase-2 XFCE profile and are
 # exercised by the container desktop/live-fixture gates instead.
 timeout --signal=TERM --kill-after=10s 120s \
-    cargo test -j 4 -p xenoteer-x11 --all-features --test x11_live -- \
+    cargo test -j 2 -p xenoteer-x11 --all-features --test x11_live -- \
     --ignored --test-threads=1 \
     --skip desktop_probe_proves_ewmh_lifecycle_workspace_and_capture \
     --skip frame_relative_clamp_uses_live_extents_and_waits_for_quiet_geometry
@@ -98,15 +98,15 @@ timeout --signal=TERM --kill-after=10s 120s \
 # concrete X11 backend directly. Keep them on this same authenticated, isolated
 # display and serialize them because they deliberately mutate root/window state.
 timeout --signal=TERM --kill-after=10s 120s \
-    cargo test -j 4 -p xenoteer-x11 --all-features --lib \
+    cargo test -j 2 -p xenoteer-x11 --all-features --lib \
     capture::x11::live_tests:: -- --ignored --test-threads=1
 # Exercise the daemon's normalized identity/query/wait boundary against the
 # same real X server. These adversarial cases deliberately reuse an XID and
 # race wait admission against MapNotify, so they remain serialized.
 timeout --signal=TERM --kill-after=10s 120s \
-    cargo test -j 4 -p xenoteerd --bin xenoteerd \
+    cargo test -j 2 -p xenoteerd --bin xenoteerd \
     observation_plane::live_tests:: -- --ignored --test-threads=1
-cargo build -j 4 --manifest-path fixtures/x11/Cargo.toml
+cargo build -j 2 --manifest-path fixtures/x11/Cargo.toml
 fixtures/x11/target/debug/x11-color-bars --exit-after-expose >"$test_dir/color-bars.jsonl"
 # Keep the recorder connection (and therefore its window) alive until the
 # independent driver has completed its QueryPointer assertion.  Letting the

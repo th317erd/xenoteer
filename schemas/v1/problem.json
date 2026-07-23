@@ -117,6 +117,21 @@
           "const": "text_inserted",
           "description": "At least one text-insertion effect was emitted.",
           "type": "string"
+        },
+        {
+          "const": "semantic_action_dispatched",
+          "description": "A semantic AT-SPI method crossed its externally visible dispatch boundary.",
+          "type": "string"
+        },
+        {
+          "const": "semantic_state_changed",
+          "description": "A requested semantic state/readback was observed.",
+          "type": "string"
+        },
+        {
+          "const": "element_physically_clicked",
+          "description": "A physical click derived from revalidated element geometry completed.",
+          "type": "string"
         }
       ]
     },
@@ -176,6 +191,86 @@
         {
           "const": "unsupported_by_target",
           "description": "The target cannot perform this operation.",
+          "type": "string"
+        },
+        {
+          "const": "application_not_accessible",
+          "description": "The application is absent from or unreachable through AT-SPI.",
+          "type": "string"
+        },
+        {
+          "const": "element_not_found",
+          "description": "The exact generation-fenced accessibility element no longer exists.",
+          "type": "string"
+        },
+        {
+          "const": "ambiguous_target",
+          "description": "A selector that required one target matched more than one.",
+          "type": "string"
+        },
+        {
+          "const": "element_defunct",
+          "description": "The referenced accessibility object reports or behaves as defunct.",
+          "type": "string"
+        },
+        {
+          "const": "interface_not_supported",
+          "description": "The target does not expose the required AT-SPI interface.",
+          "type": "string"
+        },
+        {
+          "const": "element_not_showing",
+          "description": "The element is not showing in the accessible hierarchy.",
+          "type": "string"
+        },
+        {
+          "const": "element_not_sensitive",
+          "description": "The element is not sensitive/enabled for the requested action.",
+          "type": "string"
+        },
+        {
+          "const": "element_not_editable",
+          "description": "The element is not editable through the required semantic interface.",
+          "type": "string"
+        },
+        {
+          "const": "action_not_found",
+          "description": "The requested semantic action name or index is absent.",
+          "type": "string"
+        },
+        {
+          "const": "weak_window_correlation",
+          "description": "Element-to-X11-window correlation is below the required confidence.",
+          "type": "string"
+        },
+        {
+          "const": "element_geometry_invalid",
+          "description": "Accessible component geometry is missing, stale, or invalid.",
+          "type": "string"
+        },
+        {
+          "const": "element_occluded",
+          "description": "Occlusion policy rejected the resolved element click point.",
+          "type": "string"
+        },
+        {
+          "const": "query_budget_exceeded",
+          "description": "Accessibility traversal exhausted its declared query budget.",
+          "type": "string"
+        },
+        {
+          "const": "snapshot_truncated",
+          "description": "A complete requested accessibility snapshot could not fit its budget.",
+          "type": "string"
+        },
+        {
+          "const": "toolkit_protocol_error",
+          "description": "The toolkit returned malformed or contradictory AT-SPI data.",
+          "type": "string"
+        },
+        {
+          "const": "semantic_postcondition_failed",
+          "description": "The semantic effect completed but its required postcondition failed.",
           "type": "string"
         },
         {

@@ -1,6 +1,39 @@
-//! AT-SPI connection probes and platform capability boundaries.
+//! Bounded AT-SPI actor, cache normalization, probes, and platform boundaries.
 
 #![forbid(unsafe_code)]
+
+mod actor;
+mod cache;
+#[cfg(feature = "live-atspi")]
+mod live_backend;
+mod semantic;
+
+pub use actor::{
+    AtspiActorConfig, AtspiActorError, AtspiActorEvent, AtspiActorExit, AtspiActorHealth,
+    AtspiActorJoin, AtspiActorSnapshot, AtspiActorSpawnError, AtspiActorState, AtspiBackend,
+    AtspiBackendConnector, AtspiEventReceiver, AtspiHandle, AtspiTryRecv, BackendEvent,
+    BackendEventIngress, BackendFailure, BackendFailureKind, BackendFuture, BackendRefreshRequest,
+    EventOfferResult, SpawnedAtspiActor, spawn_atspi_actor,
+};
+pub use cache::{
+    BoundedCache, CacheError, CacheEvent, CacheLimits, CacheMutation, CacheMutationDetail,
+    CacheMutationKind, CachePage, CachedLiveMetadata, CachedNode, CachedTextMetadata,
+    LegacyCacheItem, MAX_ADDRESS_BYTES, MAX_BUS_NAME_BYTES, MAX_LEGACY_CHILDREN,
+    MAX_MUTATION_ADDRESSES, ModernCacheItem, NormalizedCacheItem, ObjectAddress,
+    RefreshedCacheItem, normalize_legacy, normalize_modern,
+};
+#[cfg(feature = "live-atspi")]
+pub use live_backend::{LiveAtspiBackend, LiveAtspiConnector};
+pub use semantic::{
+    ActionEvidence, ActionSelector, BackendObservationRequest, BackendSemanticRequest,
+    IdentityFingerprint, MAX_ACTION_EVIDENCE_BYTES, MAX_ACTION_FIELD_BYTES, MAX_ACTIONS,
+    MAX_SELECTION_RANGES, MAX_SEMANTIC_TEXT_BYTES, RedactedText, ScrollPlacement,
+    SelectionOperation, SelectionRangeEvidence, SemanticDispatchMarker, SemanticDispatchPermit,
+    SemanticError, SemanticEvidence, SemanticObservationEvidence, SemanticObservationRequest,
+    SemanticObservationResult, SemanticOperation, SemanticReconcileResult, SemanticRect,
+    SemanticRequest, SemanticResult, SemanticTarget, SemanticTargetRequest, SemanticValueEvidence,
+    TextInsertPosition, TextProtection, TextReadbackEvidence, TextSelectionPolicy,
+};
 
 /// Errors from the accessibility backend probe.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]

@@ -132,6 +132,9 @@ jobs:
       - name: Exercise Phase 4 clipboard, window-control, and capture API matrix
         timeout-minutes: 20
         run: sudo scripts/container/test-phase4-live-fixtures.py xenoteer:desktop-apps-test
+      - name: Exercise Phase 5 bounded AT-SPI and semantic-control matrix
+        timeout-minutes: 25
+        run: sudo nice -n 15 ionice -c 3 scripts/container/test-phase5-atspi-live.py xenoteer:desktop-apps-test
 
   container-phase2-soak:
     name: Phase 2 30-minute idle soak

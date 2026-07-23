@@ -447,6 +447,14 @@ struct EventWatch {
     task: Option<JoinHandle<()>>,
 }
 
+struct EventDeliveryTarget {
+    request_id: RequestId,
+    desktop_id: DesktopId,
+    desktop_generation: DesktopGeneration,
+    topics: Vec<EventTopic>,
+    allow_accessibility: bool,
+}
+
 impl EventWatch {
     const fn new() -> Self {
         Self { task: None }
@@ -455,21 +463,11 @@ impl EventWatch {
     fn start(
         &mut self,
         subscription: EventSubscription,
-        request_id: RequestId,
-        desktop_id: DesktopId,
-        desktop_generation: DesktopGeneration,
-        topics: Vec<EventTopic>,
+        target: EventDeliveryTarget,
         outbound: OutboundQueues,
     ) {
         self.stop();
-        self.task = Some(tokio::spawn(deliver_events(
-            subscription,
-            request_id,
-            desktop_id,
-            desktop_generation,
-            topics,
-            outbound,
-        )));
+        self.task = Some(tokio::spawn(deliver_events(subscription, target, outbound)));
     }
 
     fn stop(&mut self) -> bool {
@@ -677,10 +675,13 @@ async fn read_session(
     if let Some((resume, subscription)) = resumed {
         event_watch.start(
             subscription,
-            hello.request_id,
-            resume.desktop_id,
-            resume.desktop_generation,
-            Vec::new(),
+            EventDeliveryTarget {
+                request_id: hello.request_id,
+                desktop_id: resume.desktop_id,
+                desktop_generation: resume.desktop_generation,
+                topics: Vec::new(),
+                allow_accessibility: principal.has_grant(Grant::AccessibilityRead),
+            },
             outbound.clone(),
         );
     }
@@ -1424,6 +1425,10 @@ async fn handle_events_subscribe(
     if !principal.has_grant(Grant::DesktopObserve) {
         return send_permission_denied(outbound, request_id).await;
     }
+    let allow_accessibility = principal.has_grant(Grant::AccessibilityRead);
+    if !allow_accessibility && topics.iter().any(is_accessibility_topic) {
+        return send_permission_denied(outbound, request_id).await;
+    }
     if request_id.as_uuid().is_nil()
         || topics.len() > MAX_EVENT_TOPICS
         || topics.iter().any(|topic| topic.validate().is_err())
@@ -1456,10 +1461,13 @@ async fn handle_events_subscribe(
         .await?;
     event_watch.start(
         subscription,
-        request_id,
-        desktop_id,
-        desktop_generation,
-        topics,
+        EventDeliveryTarget {
+            request_id,
+            desktop_id,
+            desktop_generation,
+            topics,
+            allow_accessibility,
+        },
         outbound.clone(),
     );
     Ok(())
@@ -1523,12 +1531,16 @@ async fn publish_lease(
 
 async fn deliver_events(
     mut subscription: EventSubscription,
-    request_id: RequestId,
-    desktop_id: DesktopId,
-    desktop_generation: DesktopGeneration,
-    topics: Vec<EventTopic>,
+    target: EventDeliveryTarget,
     outbound: OutboundQueues,
 ) {
+    let EventDeliveryTarget {
+        request_id,
+        desktop_id,
+        desktop_generation,
+        topics,
+        allow_accessibility,
+    } = target;
     let replay = core::mem::replace(
         &mut subscription.replay,
         EventReplay::Events {
@@ -1542,7 +1554,7 @@ async fn deliver_events(
             events,
         } => {
             for event in events {
-                if !topic_matches(&topics, &event.topic) {
+                if !topic_matches(&topics, &event.topic, allow_accessibility) {
                     continue;
                 }
                 match outbound.droppable_json(&ServerEvent {
@@ -1621,7 +1633,7 @@ async fn deliver_events(
                     .await;
                     return;
                 }
-                if !topic_matches(&topics, &event.topic) {
+                if !topic_matches(&topics, &event.topic, allow_accessibility) {
                     continue;
                 }
                 match outbound.droppable_json(&ServerEvent {
@@ -1669,8 +1681,13 @@ async fn deliver_events(
     }
 }
 
-fn topic_matches(topics: &[EventTopic], topic: &EventTopic) -> bool {
-    topics.is_empty() || topics.iter().any(|candidate| candidate == topic)
+fn topic_matches(topics: &[EventTopic], topic: &EventTopic, allow_accessibility: bool) -> bool {
+    (allow_accessibility || !is_accessibility_topic(topic))
+        && (topics.is_empty() || topics.iter().any(|candidate| candidate == topic))
+}
+
+fn is_accessibility_topic(topic: &EventTopic) -> bool {
+    topic.as_str().starts_with("accessibility.")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2700,10 +2717,13 @@ mod tests {
         let (outbound, mut receiver) = OutboundQueues::bounded(4, 2);
         deliver_events(
             subscription,
-            RequestId::new(),
-            desktop_id,
-            generation,
-            vec![selected],
+            EventDeliveryTarget {
+                request_id: RequestId::new(),
+                desktop_id,
+                desktop_generation: generation,
+                topics: vec![selected],
+                allow_accessibility: false,
+            },
             outbound,
         )
         .await;
@@ -2720,6 +2740,45 @@ mod tests {
         assert_eq!(complete["type"], "events.replay_complete");
         assert_eq!(complete["through_sequence"], 3);
         Ok(())
+    }
+
+    #[test]
+    fn accessibility_topics_are_filtered_from_catch_all_without_the_read_grant()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let semantic = EventTopic::new("accessibility.object.changed")?;
+        let ordinary = EventTopic::new("window.lifecycle")?;
+        assert!(!topic_matches(&[], &semantic, false));
+        assert!(topic_matches(&[], &semantic, true));
+        assert!(topic_matches(&[], &ordinary, false));
+        assert!(!topic_matches(
+            std::slice::from_ref(&semantic),
+            &ordinary,
+            true
+        ));
+        assert!(topic_matches(
+            &[semantic],
+            &EventTopic::new("accessibility.object.changed")?,
+            true
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_accessibility_event_subscription_requires_the_read_grant()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let desktop_id = DesktopId::new();
+        let generation = DesktopGeneration::new();
+        let control = Arc::new(CountingControl::default());
+        let state = test_state_with_control(desktop_id, generation, Arc::clone(&control))?;
+        let principal = Principal::new("desktop-observer", [Grant::DesktopObserve])?;
+        let message = ClientMessage::EventsSubscribe {
+            request_id: RequestId::new(),
+            desktop_id,
+            desktop_generation: generation,
+            topics: vec![EventTopic::new("accessibility.object.changed")?],
+            since_sequence: None,
+        };
+        assert_permission_denied_before_control(&state, &principal, &control, &message).await
     }
 
     #[tokio::test]
@@ -2748,10 +2807,13 @@ mod tests {
             .await?;
         deliver_events(
             subscription,
-            RequestId::new(),
-            desktop_id,
-            generation,
-            Vec::new(),
+            EventDeliveryTarget {
+                request_id: RequestId::new(),
+                desktop_id,
+                desktop_generation: generation,
+                topics: Vec::new(),
+                allow_accessibility: false,
+            },
             outbound,
         )
         .await;
@@ -3014,6 +3076,7 @@ mod tests {
             Grant::ApplicationTerminate,
             Grant::WindowControl,
             Grant::ClipboardWrite,
+            Grant::AccessibilityWrite,
         ] {
             let command_id = CommandId::new();
             let control = Arc::new(CountingControl::default());
@@ -3060,6 +3123,7 @@ mod tests {
             Grant::ArtifactRead,
             Grant::ArtifactDelete,
             Grant::ViewerRead,
+            Grant::AccessibilityRead,
         ] {
             let control = Arc::new(CountingControl::default());
             let state = test_state_with_control(desktop_id, generation, Arc::clone(&control))?;

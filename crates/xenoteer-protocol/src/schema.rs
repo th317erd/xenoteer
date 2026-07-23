@@ -10,18 +10,20 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    ArtifactRef, CapabilityReport, ClientHello, ClipboardReadRequest, ClipboardReadResult,
-    CommandEnvelope, CommandResult, LeaseAcquireRequest, LeaseReleaseRequest, LeaseRenewRequest,
-    LeaseStateView, OneTimeViewerTicket, Problem, ProcessExitedEvent, ProcessRef, ProcessView,
-    ScreenshotRequest, ScreenshotResult, ViewerSessionEvidence, ViewerTicketRequest,
-    WebSocketClientMessage, WebSocketServerMessage, WindowListPage, WindowListRequest,
-    WindowManagerCapabilities, WindowQueryPage, WindowQueryRequest, WindowResolveRequest,
-    WindowResolveResult, WindowSnapshotRequest, WindowSnapshotResult, WindowWaitRequest,
-    WindowWaitResult,
+    AccessibilityEvent, ApplicationRef, ArtifactRef, CapabilityReport, ClientHello,
+    ClipboardReadRequest, ClipboardReadResult, CommandEnvelope, CommandResult, ElementListPage,
+    ElementListRequest, ElementQueryPage, ElementQueryRequest, ElementRef, ElementResolveRequest,
+    ElementResolveResult, ElementSnapshotRequest, ElementSnapshotResult, ElementWaitRequest,
+    ElementWaitResult, LeaseAcquireRequest, LeaseReleaseRequest, LeaseRenewRequest, LeaseStateView,
+    OneTimeViewerTicket, Problem, ProcessExitedEvent, ProcessRef, ProcessView, ScreenshotRequest,
+    ScreenshotResult, ViewerSessionEvidence, ViewerTicketRequest, WebSocketClientMessage,
+    WebSocketServerMessage, WindowListPage, WindowListRequest, WindowManagerCapabilities,
+    WindowQueryPage, WindowQueryRequest, WindowResolveRequest, WindowResolveResult,
+    WindowSnapshotRequest, WindowSnapshotResult, WindowWaitRequest, WindowWaitResult,
 };
 
 /// Checked-in schema filenames for protocol version one.
-pub const SCHEMA_FILENAMES: [&str; 33] = [
+pub const SCHEMA_FILENAMES: [&str; 46] = [
     "capabilities.json",
     "command-envelope.json",
     "command-result.json",
@@ -55,6 +57,19 @@ pub const SCHEMA_FILENAMES: [&str; 33] = [
     "viewer-ticket-request.json",
     "viewer-ticket.json",
     "viewer-session-evidence.json",
+    "application-ref.json",
+    "element-ref.json",
+    "element-list-request.json",
+    "element-list-page.json",
+    "element-query-request.json",
+    "element-query-page.json",
+    "element-snapshot-request.json",
+    "element-snapshot-result.json",
+    "element-wait-request.json",
+    "element-wait-result.json",
+    "element-resolve-request.json",
+    "element-resolve-result.json",
+    "accessibility-event.json",
 ];
 
 /// Returns the repository's checked-in version-one schema directory.
@@ -198,6 +213,58 @@ pub fn generated_schemas() -> Result<Vec<(&'static str, String)>, SchemaError> {
             SCHEMA_FILENAMES[32],
             serde_json::to_value(schemars::schema_for!(ViewerSessionEvidence))?,
         ),
+        (
+            SCHEMA_FILENAMES[33],
+            serde_json::to_value(schemars::schema_for!(ApplicationRef))?,
+        ),
+        (
+            SCHEMA_FILENAMES[34],
+            serde_json::to_value(schemars::schema_for!(ElementRef))?,
+        ),
+        (
+            SCHEMA_FILENAMES[35],
+            serde_json::to_value(schemars::schema_for!(ElementListRequest))?,
+        ),
+        (
+            SCHEMA_FILENAMES[36],
+            serde_json::to_value(schemars::schema_for!(ElementListPage))?,
+        ),
+        (
+            SCHEMA_FILENAMES[37],
+            serde_json::to_value(schemars::schema_for!(ElementQueryRequest))?,
+        ),
+        (
+            SCHEMA_FILENAMES[38],
+            serde_json::to_value(schemars::schema_for!(ElementQueryPage))?,
+        ),
+        (
+            SCHEMA_FILENAMES[39],
+            serde_json::to_value(schemars::schema_for!(ElementSnapshotRequest))?,
+        ),
+        (
+            SCHEMA_FILENAMES[40],
+            serde_json::to_value(schemars::schema_for!(ElementSnapshotResult))?,
+        ),
+        (
+            SCHEMA_FILENAMES[41],
+            serde_json::to_value(schemars::schema_for!(ElementWaitRequest))?,
+        ),
+        (
+            SCHEMA_FILENAMES[42],
+            serde_json::to_value(schemars::schema_for!(ElementWaitResult))?,
+        ),
+        (
+            SCHEMA_FILENAMES[43],
+            serde_json::to_value(schemars::schema_for!(ElementResolveRequest))?,
+        ),
+        (
+            SCHEMA_FILENAMES[44],
+            serde_json::to_value(schemars::schema_for!(ElementResolveResult))?,
+        ),
+        (
+            SCHEMA_FILENAMES[45],
+            serde_json::to_value(schemars::schema_for!(AccessibilityEvent))?,
+        ),
     ];
 
     schemas
@@ -323,6 +390,11 @@ mod tests {
             "window-resolve-request.json",
             "window-wait-request.json",
             "viewer-ticket-request.json",
+            "element-list-request.json",
+            "element-query-request.json",
+            "element-resolve-request.json",
+            "element-snapshot-request.json",
+            "element-wait-request.json",
         ];
         for name in object_root_names {
             let schema = generated_schema(name)?;
@@ -357,6 +429,14 @@ mod tests {
             "window-manager-capabilities.json",
             "viewer-ticket.json",
             "viewer-session-evidence.json",
+            "application-ref.json",
+            "element-ref.json",
+            "element-list-page.json",
+            "element-query-page.json",
+            "element-resolve-result.json",
+            "element-snapshot-result.json",
+            "element-wait-result.json",
+            "accessibility-event.json",
         ] {
             let schema = generated_schema(name)?;
             assert_open_object(&schema, name);

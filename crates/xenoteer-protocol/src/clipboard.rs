@@ -8,9 +8,27 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::accessibility::{StrictElementRef, deserialize_strict_element_ref};
+use crate::accessibility_action::{
+    EditableTextSelectionPolicy, ElementPostcondition, MAX_EDITABLE_TEXT_OFFSET,
+};
 use crate::artifact::{StrictArtifactRef, deserialize_strict_artifact_ref};
-use crate::window::{StrictWindowRef, deserialize_strict_window_ref};
-use crate::{ArtifactPurpose, ArtifactRef, DesktopGeneration, DesktopId, Sha256Digest, WindowRef};
+use crate::window::{
+    StrictWindowRef, deserialize_optional_strict_window_ref, deserialize_strict_window_ref,
+};
+use crate::{
+    AccessibilityRevision, ArtifactPurpose, ArtifactRef, DesktopGeneration, DesktopId, ElementRef,
+    Sha256Digest, WindowRef,
+};
+
+fn deserialize_boxed_strict_element_ref<'de, D>(
+    deserializer: D,
+) -> Result<Box<ElementRef>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_strict_element_ref(deserializer).map(Box::new)
+}
 
 /// Largest inline clipboard body carried in an ordinary JSON message.
 pub const MAX_INLINE_CLIPBOARD_BYTES: usize = 256 * 1_024;
@@ -725,18 +743,41 @@ impl ClipboardPasteEvidence {
     }
 }
 
-/// Release-four exact text strategies.
+/// Concrete text strategies plus the bounded policy-selection sentinel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TextStrategy {
+    /// AT-SPI EditableText insertion against an exact element generation.
+    Semantic,
     /// Current-layout XTEST keycodes only.
     Physical,
-    /// Explicit global temporary-keymap strategy.
-    PhysicalExtended,
     /// Temporary CLIPBOARD ownership plus an observed paste request.
     Clipboard,
-    /// Deterministic policy selection among available release-four strategies.
+    /// Explicit global temporary-keymap strategy.
+    PhysicalExtended,
+    /// Deterministic selection from an explicit or legacy ordered policy.
     Auto,
+}
+
+impl TextStrategy {
+    const fn policy_rank(self) -> Option<u8> {
+        match self {
+            Self::Semantic => Some(0),
+            Self::Physical => Some(1),
+            Self::Clipboard => Some(2),
+            Self::PhysicalExtended => Some(3),
+            Self::Auto => None,
+        }
+    }
+
+    /// Whether this concrete strategy uses the exclusive physical-input plane.
+    #[must_use]
+    pub const fn requires_control_lease(self) -> bool {
+        matches!(
+            self,
+            Self::Physical | Self::Clipboard | Self::PhysicalExtended | Self::Auto
+        )
+    }
 }
 
 /// Text body carried inline or by a purpose-bound private upload.
@@ -804,6 +845,161 @@ pub enum TextTarget {
         #[schemars(with = "StrictWindowRef")]
         window: WindowRef,
     },
+    /// Exact AT-SPI element, with an explicit correlated X11 fallback when a
+    /// policy may synthesize physical input or request clipboard paste.
+    Element {
+        /// Generation-fenced semantic target.
+        #[serde(deserialize_with = "deserialize_boxed_strict_element_ref")]
+        #[schemars(with = "StrictElementRef")]
+        element: Box<ElementRef>,
+        /// Exact X11 target for any permitted non-semantic fallback.
+        #[serde(default, deserialize_with = "deserialize_optional_strict_window_ref")]
+        #[schemars(with = "Option<StrictWindowRef>")]
+        window_fallback: Option<WindowRef>,
+    },
+}
+
+/// Where AT-SPI EditableText inserts the first scalar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SemanticTextInsertionPoint {
+    /// Resolve the live caret immediately before the semantic effect.
+    Caret,
+    /// Insert at this non-negative AT-SPI character offset.
+    Offset {
+        /// AT-SPI character offset, not a UTF-8 byte offset.
+        #[schemars(range(min = 0, max = MAX_EDITABLE_TEXT_OFFSET))]
+        offset: i32,
+    },
+}
+
+impl SemanticTextInsertionPoint {
+    fn validate(self) -> Result<(), ClipboardValidationError> {
+        if let Self::Offset { offset } = self
+            && !(0..=MAX_EDITABLE_TEXT_OFFSET).contains(&offset)
+        {
+            return Err(ClipboardValidationError::SemanticOptions);
+        }
+        Ok(())
+    }
+}
+
+/// Bounded AT-SPI EditableText behavior. There is intentionally no
+/// `allow_protected` or equivalent caller-controlled policy bypass.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticTextInsertOptions {
+    /// Live caret or explicit character offset.
+    pub insertion_point: SemanticTextInsertionPoint,
+    /// Selection handling around the insertion.
+    pub selection: EditableTextSelectionPolicy,
+    /// Verify only character counts/caret/selection metadata, never content.
+    pub verify_length_only: bool,
+    /// Optional content-free semantic postcondition.
+    pub postcondition: Option<ElementPostcondition>,
+}
+
+impl SemanticTextInsertOptions {
+    /// Validates the insertion point and bounded postcondition.
+    pub fn validate(&self) -> Result<(), ClipboardValidationError> {
+        self.insertion_point.validate()?;
+        if let Some(postcondition) = &self.postcondition {
+            postcondition
+                .validate()
+                .map_err(|_| ClipboardValidationError::SemanticOptions)?;
+        }
+        Ok(())
+    }
+}
+
+/// Auto may advance only when the preceding strategy produced no effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TextAutoFallbackPolicy {
+    /// Stop selection permanently once any concrete strategy has an effect.
+    BeforeEffectOnly,
+}
+
+/// Explicit bounded strategy union in canonical evaluation order:
+/// semantic, current-layout physical, clipboard, physical-extended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TextAutoPolicy {
+    /// Non-empty canonical subset of concrete strategies.
+    #[schemars(length(min = 1, max = 4))]
+    pub allowed_strategies: Vec<TextStrategy>,
+    /// Explicit no-fallback-after-effect rule.
+    pub fallback: TextAutoFallbackPolicy,
+}
+
+impl TextAutoPolicy {
+    /// Requires a non-empty, duplicate-free canonical concrete-strategy list.
+    pub fn validate(&self) -> Result<(), ClipboardValidationError> {
+        if self.allowed_strategies.is_empty() || self.allowed_strategies.len() > 4 {
+            return Err(ClipboardValidationError::AutoPolicy);
+        }
+        let mut previous = None;
+        for strategy in &self.allowed_strategies {
+            let rank = strategy
+                .policy_rank()
+                .ok_or(ClipboardValidationError::AutoPolicy)?;
+            if previous.is_some_and(|previous| rank <= previous) {
+                return Err(ClipboardValidationError::AutoPolicy);
+            }
+            previous = Some(rank);
+        }
+        Ok(())
+    }
+
+    /// Whether the policy may select this concrete strategy.
+    #[must_use]
+    pub fn permits(&self, strategy: TextStrategy) -> bool {
+        strategy != TextStrategy::Auto && self.allowed_strategies.contains(&strategy)
+    }
+}
+
+/// Union of concrete text planes used by admission/authentication decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextStrategyUnion {
+    /// Semantic accessibility write may be selected.
+    pub semantic: bool,
+    /// Current-layout physical typing may be selected.
+    pub physical: bool,
+    /// Clipboard paste may be selected.
+    pub clipboard: bool,
+    /// Temporary-keymap physical typing may be selected.
+    pub physical_extended: bool,
+}
+
+impl TextStrategyUnion {
+    const EMPTY: Self = Self {
+        semantic: false,
+        physical: false,
+        clipboard: false,
+        physical_extended: false,
+    };
+
+    fn insert(&mut self, strategy: TextStrategy) {
+        match strategy {
+            TextStrategy::Semantic => self.semantic = true,
+            TextStrategy::Physical => self.physical = true,
+            TextStrategy::Clipboard => self.clipboard = true,
+            TextStrategy::PhysicalExtended => self.physical_extended = true,
+            TextStrategy::Auto => {}
+        }
+    }
+
+    /// Whether any permitted strategy needs the controller lease.
+    #[must_use]
+    pub const fn requires_control_lease(self) -> bool {
+        self.physical || self.clipboard || self.physical_extended
+    }
+
+    /// Whether semantic accessibility write authority may be exercised.
+    #[must_use]
+    pub const fn requires_accessibility_write(self) -> bool {
+        self.semantic
+    }
 }
 
 /// Clipboard-specific text insertion policy.
@@ -830,7 +1026,7 @@ impl TextInsertOptions {
 }
 
 /// Insert exact UTF-8 using one declared strategy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TextInsertCommand {
     /// Secret inline text or private artifact.
@@ -841,6 +1037,12 @@ pub struct TextInsertCommand {
     pub strategy: TextStrategy,
     /// Clipboard-specific bounds, present only when clipboard might be selected.
     pub clipboard_options: Option<TextInsertOptions>,
+    /// Semantic options, present exactly when semantic insertion may be selected.
+    pub semantic_options: Option<SemanticTextInsertOptions>,
+    /// Explicit policy required for element-target `auto`. Omission on a
+    /// window-target `auto` preserves the legacy physical/clipboard/extended
+    /// policy and its existing wire shape.
+    pub auto_policy: Option<TextAutoPolicy>,
 }
 
 impl TextInsertCommand {
@@ -851,11 +1053,7 @@ impl TextInsertCommand {
             return Err(ClipboardValidationError::TextTooLarge);
         }
         self.target.validate()?;
-        match (self.strategy, self.clipboard_options) {
-            (TextStrategy::Clipboard | TextStrategy::Auto, Some(options)) => options.validate(),
-            (TextStrategy::Physical | TextStrategy::PhysicalExtended, None) => Ok(()),
-            _ => Err(ClipboardValidationError::TextOptions),
-        }
+        self.validate_strategy_options()
     }
 
     /// Performs structural validation and binds artifact/window references to
@@ -876,10 +1074,76 @@ impl TextInsertCommand {
         }
         self.target
             .validate_for_desktop(desktop_id, desktop_generation)?;
-        match (self.strategy, self.clipboard_options) {
-            (TextStrategy::Clipboard | TextStrategy::Auto, Some(options)) => options.validate(),
-            (TextStrategy::Physical | TextStrategy::PhysicalExtended, None) => Ok(()),
-            _ => Err(ClipboardValidationError::TextOptions),
+        self.validate_strategy_options()
+    }
+
+    /// Returns the complete union of concrete strategies that authorization
+    /// must allow before dispatch. Invalid requests still require validation.
+    #[must_use]
+    pub fn strategy_union(&self) -> TextStrategyUnion {
+        let mut union = TextStrategyUnion::EMPTY;
+        match self.strategy {
+            TextStrategy::Auto => {
+                if let Some(policy) = &self.auto_policy {
+                    for strategy in &policy.allowed_strategies {
+                        union.insert(*strategy);
+                    }
+                } else if matches!(self.target, TextTarget::Window { .. }) {
+                    // Backwards-compatible release-four window Auto policy.
+                    union.insert(TextStrategy::Physical);
+                    union.insert(TextStrategy::Clipboard);
+                    union.insert(TextStrategy::PhysicalExtended);
+                }
+            }
+            strategy => union.insert(strategy),
+        }
+        union
+    }
+
+    /// Whether admission requires the exclusive physical controller lease.
+    #[must_use]
+    pub fn requires_control_lease(&self) -> bool {
+        self.strategy_union().requires_control_lease()
+    }
+
+    fn validate_strategy_options(&self) -> Result<(), ClipboardValidationError> {
+        let union = self.strategy_union();
+        if self.strategy == TextStrategy::Auto {
+            match (&self.target, &self.auto_policy) {
+                (TextTarget::Window { .. }, None) => {}
+                (TextTarget::Window { .. } | TextTarget::Element { .. }, Some(policy)) => {
+                    policy.validate()?;
+                }
+                (TextTarget::Element { .. }, None) => {
+                    return Err(ClipboardValidationError::AutoPolicy);
+                }
+            }
+        } else if self.auto_policy.is_some() {
+            return Err(ClipboardValidationError::AutoPolicy);
+        }
+
+        if union.clipboard != self.clipboard_options.is_some()
+            || union.semantic != self.semantic_options.is_some()
+        {
+            return Err(ClipboardValidationError::TextOptions);
+        }
+        if let Some(options) = self.clipboard_options {
+            options.validate()?;
+        }
+        if let Some(options) = &self.semantic_options {
+            options.validate()?;
+        }
+
+        match &self.target {
+            TextTarget::Window { .. } if union.semantic => {
+                Err(ClipboardValidationError::TextTarget)
+            }
+            TextTarget::Element {
+                window_fallback, ..
+            } if union.requires_control_lease() != window_fallback.is_some() => {
+                Err(ClipboardValidationError::TextTarget)
+            }
+            TextTarget::Window { .. } | TextTarget::Element { .. } => Ok(()),
         }
     }
 }
@@ -891,6 +1155,25 @@ impl TextTarget {
             Self::Window { window } => window
                 .validate()
                 .map_err(|_| ClipboardValidationError::TextTarget),
+            Self::Element {
+                element,
+                window_fallback,
+            } => {
+                element
+                    .validate()
+                    .map_err(|_| ClipboardValidationError::TextTarget)?;
+                if let Some(window) = window_fallback {
+                    window
+                        .validate()
+                        .map_err(|_| ClipboardValidationError::TextTarget)?;
+                    if window.desktop_id != element.desktop_id
+                        || window.desktop_generation != element.desktop_generation
+                    {
+                        return Err(ClipboardValidationError::ReferenceScope);
+                    }
+                }
+                Ok(())
+            }
         }
     }
 
@@ -908,7 +1191,67 @@ impl TextTarget {
                 Ok(())
             }
             Self::Window { .. } => Err(ClipboardValidationError::ReferenceScope),
+            Self::Element {
+                element,
+                window_fallback,
+            } if element.desktop_id == desktop_id
+                && element.desktop_generation == desktop_generation
+                && window_fallback.as_ref().is_none_or(|window| {
+                    window.desktop_id == desktop_id
+                        && window.desktop_generation == desktop_generation
+                }) =>
+            {
+                Ok(())
+            }
+            Self::Element { .. } => Err(ClipboardValidationError::ReferenceScope),
         }
+    }
+}
+
+/// Content-free AT-SPI EditableText acceptance and readback evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SemanticTextInsertEvidence {
+    /// Exact element generation accepted by the backend.
+    pub element: ElementRef,
+    /// Actor-owned revision immediately before insertion.
+    pub revision_before: AccessibilityRevision,
+    /// Actor-owned revision after readback.
+    pub revision_after: AccessibilityRevision,
+    /// Whether EditableText accepted the insertion call.
+    pub backend_accepted: bool,
+    /// Resolved character offset used for the effect.
+    pub insertion_offset: u32,
+    /// Content-free character-count readback before insertion.
+    pub character_count_before: u32,
+    /// Content-free character-count readback after insertion.
+    pub character_count_after: u32,
+    /// Optional caret metadata read back after insertion.
+    pub caret_offset_after: Option<u32>,
+    /// Optional selection-count metadata read back after insertion.
+    pub selection_count_after: Option<u32>,
+    /// Whether verification intentionally inspected lengths only.
+    pub verified_length_only: bool,
+    /// Independently evaluated postcondition result, when requested.
+    pub postcondition_satisfied: Option<bool>,
+}
+
+impl SemanticTextInsertEvidence {
+    /// Validates monotonic revisions and content-free length/caret readback.
+    pub fn validate(&self) -> Result<(), ClipboardValidationError> {
+        self.element
+            .validate()
+            .map_err(|_| ClipboardValidationError::TextEvidence)?;
+        if self.revision_after < self.revision_before
+            || !self.backend_accepted
+            || self.insertion_offset > self.character_count_before
+            || self
+                .caret_offset_after
+                .is_some_and(|offset| offset > self.character_count_after)
+            || self.postcondition_satisfied == Some(false)
+        {
+            return Err(ClipboardValidationError::TextEvidence);
+        }
+        Ok(())
     }
 }
 
@@ -926,6 +1269,8 @@ pub struct TextInsertEvidence {
     pub completed_scalars: u64,
     /// Required exactly when clipboard strategy was selected.
     pub clipboard: Option<ClipboardPasteEvidence>,
+    /// Required exactly when AT-SPI semantic insertion was selected.
+    pub semantic: Option<SemanticTextInsertEvidence>,
 }
 
 impl TextInsertEvidence {
@@ -937,11 +1282,15 @@ impl TextInsertEvidence {
             || self.completed_scalars > self.unicode_scalars
             || self.selected_strategy == TextStrategy::Auto
             || (self.selected_strategy == TextStrategy::Clipboard) != self.clipboard.is_some()
+            || (self.selected_strategy == TextStrategy::Semantic) != self.semantic.is_some()
         {
             return Err(ClipboardValidationError::TextEvidence);
         }
         if let Some(clipboard) = &self.clipboard {
             clipboard.validate()?;
+        }
+        if let Some(semantic) = &self.semantic {
+            semantic.validate()?;
         }
         Ok(())
     }
@@ -1113,6 +1462,12 @@ pub enum ClipboardValidationError {
     /// Strategy and clipboard-option presence are inconsistent.
     #[error("text insertion options are inconsistent with the strategy")]
     TextOptions,
+    /// Semantic insertion options are invalid.
+    #[error("semantic text insertion options are invalid")]
+    SemanticOptions,
+    /// Auto strategy order, bounds, or fallback policy is invalid.
+    #[error("automatic text insertion policy is invalid")]
+    AutoPolicy,
     /// The generation-bound text target is invalid.
     #[error("text insertion target is invalid")]
     TextTarget,
@@ -1124,9 +1479,56 @@ pub enum ClipboardValidationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Command;
 
     fn digest() -> Result<Sha256Digest, crate::ArtifactValidationError> {
         Sha256Digest::new("00".repeat(32))
+    }
+
+    fn window_reference(
+        desktop_id: DesktopId,
+        desktop_generation: DesktopGeneration,
+    ) -> Result<WindowRef, crate::WindowValidationError> {
+        Ok(WindowRef {
+            desktop_id,
+            desktop_generation,
+            xid: 42,
+            observed_generation: 1,
+            identity_hash: crate::WindowIdentityHash::new("a".repeat(64))?,
+        })
+    }
+
+    fn element_reference(
+        desktop_id: DesktopId,
+        desktop_generation: DesktopGeneration,
+    ) -> Result<ElementRef, crate::AccessibilityValidationError> {
+        let atspi_generation = crate::AtspiGeneration::new(1)?;
+        Ok(ElementRef {
+            desktop_id,
+            desktop_generation,
+            atspi_generation,
+            application: crate::ApplicationRef {
+                desktop_id,
+                desktop_generation,
+                atspi_generation,
+                unique_bus_name: crate::AtspiBusName::new(":1.42")?,
+                root_object_path: crate::AtspiObjectPath::new("/org/a11y/atspi/accessible/root")?,
+                app_instance_generation: 1,
+                identity_hash: crate::AccessibilityIdentityHash::new("b".repeat(64))?,
+            },
+            object_path: crate::AtspiObjectPath::new("/org/a11y/atspi/accessible/42")?,
+            object_identity_hash: crate::AccessibilityIdentityHash::new("c".repeat(64))?,
+            cache_sequence: 7,
+        })
+    }
+
+    fn semantic_options() -> SemanticTextInsertOptions {
+        SemanticTextInsertOptions {
+            insertion_point: SemanticTextInsertionPoint::Caret,
+            selection: EditableTextSelectionPolicy::CollapseAfter,
+            verify_length_only: true,
+            postcondition: None,
+        }
     }
 
     #[test]
@@ -1286,6 +1688,7 @@ mod tests {
             unicode_scalars: 3,
             completed_scalars: 3,
             clipboard: None,
+            semantic: None,
         };
         assert_eq!(
             result.validate(),
@@ -1298,6 +1701,7 @@ mod tests {
             unicode_scalars: 2,
             completed_scalars: 0,
             clipboard: None,
+            semantic: None,
         };
         assert_eq!(
             impossible_counts.validate(),
@@ -1324,10 +1728,256 @@ mod tests {
             },
             strategy: TextStrategy::Physical,
             clipboard_options: None,
+            semantic_options: None,
+            auto_policy: None,
         };
         assert_eq!(
             command.validate_for_desktop(route_desktop, route_generation),
             Err(ClipboardValidationError::ReferenceScope)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_window_auto_shape_remains_valid_and_inspectable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let desktop_id = DesktopId::new();
+        let desktop_generation = DesktopGeneration::new();
+        let value = serde_json::json!({
+            "text": { "source": "inline", "text": "secret" },
+            "target": {
+                "target": "window",
+                "window": window_reference(desktop_id, desktop_generation)?
+            },
+            "strategy": "auto",
+            "clipboard_options": {
+                "preserve_clipboard": false,
+                "paste_observation_timeout_ms": 1000
+            }
+        });
+        let command: TextInsertCommand = serde_json::from_value(value)?;
+        assert!(command.validate().is_ok());
+        assert_eq!(
+            command.strategy_union(),
+            TextStrategyUnion {
+                semantic: false,
+                physical: true,
+                clipboard: true,
+                physical_extended: true,
+            }
+        );
+        assert!(command.requires_control_lease());
+        Ok(())
+    }
+
+    #[test]
+    fn auto_policy_is_nonempty_concrete_and_canonically_ordered() {
+        let policy = |allowed_strategies| TextAutoPolicy {
+            allowed_strategies,
+            fallback: TextAutoFallbackPolicy::BeforeEffectOnly,
+        };
+        assert!(
+            policy(vec![
+                TextStrategy::Semantic,
+                TextStrategy::Physical,
+                TextStrategy::Clipboard,
+                TextStrategy::PhysicalExtended,
+            ])
+            .validate()
+            .is_ok()
+        );
+        for invalid in [
+            Vec::new(),
+            vec![TextStrategy::Physical, TextStrategy::Semantic],
+            vec![TextStrategy::Semantic, TextStrategy::Semantic],
+            vec![TextStrategy::Auto],
+        ] {
+            assert_eq!(
+                policy(invalid).validate(),
+                Err(ClipboardValidationError::AutoPolicy)
+            );
+        }
+    }
+
+    #[test]
+    fn target_strategy_and_option_matrix_rejects_impossible_combinations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let desktop_id = DesktopId::new();
+        let desktop_generation = DesktopGeneration::new();
+        let element = element_reference(desktop_id, desktop_generation)?;
+        let window = window_reference(desktop_id, desktop_generation)?;
+        let source = || {
+            Ok::<_, ClipboardValidationError>(TextSource::Inline {
+                text: SecretInlineText::new("secret")?,
+            })
+        };
+        let semantic = TextInsertCommand {
+            text: source()?,
+            target: TextTarget::Element {
+                element: Box::new(element.clone()),
+                window_fallback: None,
+            },
+            strategy: TextStrategy::Semantic,
+            clipboard_options: None,
+            semantic_options: Some(semantic_options()),
+            auto_policy: None,
+        };
+        assert!(semantic.validate().is_ok());
+        let semantic_command = Command::TextInsert(semantic.clone());
+        assert!(!semantic_command.requires_control_lease());
+        assert!(
+            crate::CommandEnvelope::new(
+                crate::ProtocolVersion::V1_0,
+                crate::RequestId::new(),
+                crate::CommandId::new(),
+                desktop_id,
+                desktop_generation,
+                semantic_command,
+            )
+            .is_ok()
+        );
+        assert!(semantic.strategy_union().requires_accessibility_write());
+
+        let semantic_window = TextInsertCommand {
+            text: source()?,
+            target: TextTarget::Window {
+                window: window.clone(),
+            },
+            ..semantic.clone()
+        };
+        assert_eq!(
+            semantic_window.validate(),
+            Err(ClipboardValidationError::TextTarget)
+        );
+
+        let physical_without_window = TextInsertCommand {
+            text: source()?,
+            target: TextTarget::Element {
+                element: Box::new(element.clone()),
+                window_fallback: None,
+            },
+            strategy: TextStrategy::Physical,
+            clipboard_options: None,
+            semantic_options: None,
+            auto_policy: None,
+        };
+        assert_eq!(
+            physical_without_window.validate(),
+            Err(ClipboardValidationError::TextTarget)
+        );
+
+        let semantic_auto = TextInsertCommand {
+            text: source()?,
+            target: TextTarget::Element {
+                element: Box::new(element.clone()),
+                window_fallback: None,
+            },
+            strategy: TextStrategy::Auto,
+            clipboard_options: None,
+            semantic_options: Some(semantic_options()),
+            auto_policy: Some(TextAutoPolicy {
+                allowed_strategies: vec![TextStrategy::Semantic],
+                fallback: TextAutoFallbackPolicy::BeforeEffectOnly,
+            }),
+        };
+        assert!(semantic_auto.validate().is_ok());
+        assert!(!Command::TextInsert(semantic_auto).requires_control_lease());
+
+        let union_auto = TextInsertCommand {
+            text: source()?,
+            target: TextTarget::Element {
+                element: Box::new(element),
+                window_fallback: Some(window),
+            },
+            strategy: TextStrategy::Auto,
+            clipboard_options: None,
+            semantic_options: Some(semantic_options()),
+            auto_policy: Some(TextAutoPolicy {
+                allowed_strategies: vec![TextStrategy::Semantic, TextStrategy::Physical],
+                fallback: TextAutoFallbackPolicy::BeforeEffectOnly,
+            }),
+        };
+        assert!(union_auto.validate().is_ok());
+        let union_auto = Command::TextInsert(union_auto);
+        assert!(union_auto.requires_control_lease());
+        assert_eq!(
+            crate::CommandEnvelope::new(
+                crate::ProtocolVersion::V1_0,
+                crate::RequestId::new(),
+                crate::CommandId::new(),
+                desktop_id,
+                desktop_generation,
+                union_auto,
+            ),
+            Err(crate::EnvelopeValidationError::LeaseRequired)
+        );
+
+        let mut missing_policy = semantic.clone();
+        missing_policy.strategy = TextStrategy::Auto;
+        assert_eq!(
+            missing_policy.validate(),
+            Err(ClipboardValidationError::AutoPolicy)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_options_have_no_protected_write_bypass() {
+        let value = serde_json::json!({
+            "insertion_point": { "kind": "caret" },
+            "selection": "collapse_after",
+            "verify_length_only": true,
+            "postcondition": null,
+            "allow_protected": true
+        });
+        assert!(serde_json::from_value::<SemanticTextInsertOptions>(value).is_err());
+    }
+
+    #[test]
+    fn semantic_evidence_is_concrete_content_free_and_generation_fenced()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let semantic = SemanticTextInsertEvidence {
+            element: element_reference(DesktopId::new(), DesktopGeneration::new())?,
+            revision_before: AccessibilityRevision::new(4)?,
+            revision_after: AccessibilityRevision::new(5)?,
+            backend_accepted: true,
+            insertion_offset: 2,
+            character_count_before: 4,
+            character_count_after: 7,
+            caret_offset_after: Some(5),
+            selection_count_after: Some(0),
+            verified_length_only: true,
+            postcondition_satisfied: Some(true),
+        };
+        let evidence = TextInsertEvidence {
+            selected_strategy: TextStrategy::Semantic,
+            utf8_bytes: 3,
+            unicode_scalars: 3,
+            completed_scalars: 3,
+            clipboard: None,
+            semantic: Some(semantic.clone()),
+        };
+        assert!(evidence.validate().is_ok());
+        let encoded = serde_json::to_string(&evidence)?;
+        assert!(!encoded.contains("text"));
+
+        let mut rejected = evidence.clone();
+        rejected.selected_strategy = TextStrategy::Auto;
+        assert_eq!(
+            rejected.validate(),
+            Err(ClipboardValidationError::TextEvidence)
+        );
+        let mut rejected = evidence;
+        rejected.semantic = None;
+        assert_eq!(
+            rejected.validate(),
+            Err(ClipboardValidationError::TextEvidence)
+        );
+        let mut rejected = semantic;
+        rejected.revision_after = AccessibilityRevision::new(3)?;
+        assert_eq!(
+            rejected.validate(),
+            Err(ClipboardValidationError::TextEvidence)
         );
         Ok(())
     }

@@ -62,6 +62,18 @@ def main() -> int:
     checkbox.get_accessible().set_name("Stable Checkbox")
     button = Gtk.Button(label="Stable button")
     button.get_accessible().set_name("Stable Button")
+    activation_count = [0]
+    activation_status = Gtk.Label(label="Activation count: 0")
+    activation_status.get_accessible().set_name("Activation Count 0")
+
+    def record_activation(_button: Gtk.Button) -> None:
+        activation_count[0] += 1
+        activation_status.set_text(f"Activation count: {activation_count[0]}")
+        activation_status.get_accessible().set_name(
+            f"Activation Count {activation_count[0]}"
+        )
+
+    button.connect("clicked", record_activation)
     double_click = Gtk.Button(label="Double-click target")
     double_click.get_accessible().set_name("Double-click Target")
     disabled = Gtk.Button(label="Disabled button")
@@ -96,7 +108,8 @@ def main() -> int:
 
     controls = (
         heading, entry, protected, checkbox, radio_alpha, radio_beta, switch,
-        slider, spinner, combo, button, double_click, disabled, text_view, fonts,
+        slider, spinner, combo, button, activation_status, double_click, disabled,
+        text_view, fonts,
     )
     for row, widget in enumerate(controls):
         grid.attach(widget, 0, row, 1, 1)

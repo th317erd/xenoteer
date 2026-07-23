@@ -15,14 +15,42 @@ case "$service" in
     ;;
 esac
 
-# s6-supervise invokes finish from the live service directory and passes that
-# directory as argument 3. s6-rc tells the supervisor to leave a service down
-# before signalling it during every requested teardown, including a stop while
-# startup/readiness is still in progress. An unsolicited child death remains
-# wanted-up. Query `.` because the supplied directory name can be relative to
-# the parent scan directory and must not be resolved again from this cwd.
+# A direct s6-svc -d sets wantedup=false, but a following -u can restore it
+# before the finish hook reads supervision state. Require a root-created,
+# single-use marker for the one critical service that the recovery acceptance
+# gate deliberately cycles. Validate both path components before trusting the
+# exception; malformed or replaceable markers fail closed as critical exits.
+maintenance_invalid=0
+maintenance_parent=/run/xenoteer/critical-maintenance
+maintenance_marker=$maintenance_parent/$service
+if [ "$service" = atspi ] \
+  && { [ -e "$maintenance_marker" ] || [ -L "$maintenance_marker" ]; }; then
+  parent_attributes=$(stat -c '%u:%g:%a' -- "$maintenance_parent" 2>/dev/null) \
+    || parent_attributes=invalid
+  marker_attributes=$(stat -c '%u:%g:%a' -- "$maintenance_marker" 2>/dev/null) \
+    || marker_attributes=invalid
+  if [ -d "$maintenance_parent" ] \
+    && [ ! -L "$maintenance_parent" ] \
+    && [ "$parent_attributes" = 0:0:700 ] \
+    && [ -f "$maintenance_marker" ] \
+    && [ ! -L "$maintenance_marker" ] \
+    && [ "$marker_attributes" = 0:0:600 ]; then
+    rm -f -- "$maintenance_marker"
+    exit 0
+  fi
+  maintenance_invalid=1
+  echo 'invalid AT-SPI critical maintenance marker; failing closed' >&2
+fi
+
+# s6-rc clears wantedup before signalling a service during every requested
+# graph teardown, including a Docker stop while the upward transaction is still
+# in flight. An unsolicited child exit remains wanted-up. The AT-SPI
+# maintenance exception above is deliberately checked first because a direct
+# s6-svc cycle can still appear wanted-up on supported s6-overlay releases.
+# Query `.` because s6-supervise invokes finish from the live service directory;
+# the supplied directory name can be relative to its parent scan directory.
 wanted_up=invalid
-if [ -n "$service_dir_argument" ]; then
+if [ "$maintenance_invalid" -eq 0 ] && [ -n "$service_dir_argument" ]; then
   wanted_up=$(/command/s6-svstat -o wantedup . 2>/dev/null) || wanted_up=invalid
 fi
 case "$wanted_up" in

@@ -185,6 +185,14 @@ pub enum ExecutionOutcome<R> {
         /// Whether execution crossed an effect boundary before stopping.
         effect: CommandEffect,
     },
+    /// The backend cooperatively stopped but retained bounded, content-free
+    /// evidence that must accompany the coordinator-owned terminal cause.
+    StoppedWithEvidence {
+        /// Backend-defined evidence; callers must not treat it as a returned result.
+        output: R,
+        /// Whether execution crossed an effect boundary before stopping.
+        effect: CommandEffect,
+    },
 }
 
 /// Stable terminal cause retained by the command ledger.
@@ -213,7 +221,8 @@ pub struct CommandTerminal<R> {
     pub cause: TerminalCause,
     /// Whether an externally visible effect occurred.
     pub effect: CommandEffect,
-    /// Backend-defined output, present only after an ordinary return.
+    /// Backend-defined output, present after an ordinary return or when a
+    /// cooperative stop retained bounded terminal evidence.
     pub output: Option<R>,
 }
 
@@ -231,6 +240,14 @@ impl<R> CommandTerminal<R> {
             cause,
             effect,
             output: None,
+        }
+    }
+
+    const fn stopped_with_evidence(cause: TerminalCause, effect: CommandEffect, output: R) -> Self {
+        Self {
+            cause,
+            effect,
+            output: Some(output),
         }
     }
 }
@@ -1354,6 +1371,9 @@ where
                     }
                     Ok(ExecutionOutcome::Stopped { effect }) => {
                         CommandTerminal::stopped(terminal_cause(stop), effect)
+                    }
+                    Ok(ExecutionOutcome::StoppedWithEvidence { output, effect }) => {
+                        CommandTerminal::stopped_with_evidence(terminal_cause(stop), effect, output)
                     }
                     Err(()) => CommandTerminal::stopped(
                         TerminalCause::ExecutorPanicked,

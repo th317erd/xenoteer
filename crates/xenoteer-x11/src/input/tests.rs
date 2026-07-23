@@ -1284,6 +1284,7 @@ fn stuck_button_masks_retain_ownership_until_compensating_reset()
 
     let click_backend = MockBackend::new(point);
     click_backend.push_observation(point, [true, false, false, false, false]);
+    click_backend.push_observation(point, [true, false, false, false, false]);
     let mut click_engine = InputEngine::new(click_backend.clone())?;
     let click_failure =
         failed(click_engine.execute(context(), click(1)?, &CancellationToken::new()))?;
@@ -1319,6 +1320,7 @@ fn stuck_button_masks_retain_ownership_until_compensating_reset()
     let drag_end = RootPoint::new(20, 20)?;
     drag_backend.push_observation(point, [false; 5]);
     drag_backend.push_observation(point, [true, false, false, false, false]);
+    drag_backend.push_observation(drag_end, [true, false, false, false, false]);
     drag_backend.push_observation(drag_end, [true, false, false, false, false]);
     drag_backend.push_observation(drag_end, [true, false, false, false, false]);
     let mut drag_engine = InputEngine::new(drag_backend.clone())?;
@@ -1370,6 +1372,39 @@ fn stuck_button_masks_retain_ownership_until_compensating_reset()
         Some(1)
     );
     assert_eq!(raw_backend.counts().0, 3);
+    Ok(())
+}
+
+#[test]
+fn delayed_release_is_read_back_once_without_replaying_the_click()
+-> Result<(), Box<dyn std::error::Error>> {
+    let point = RootPoint::new(10, 10)?;
+    let backend = MockBackend::new(point);
+    backend.push_observation(point, [true, false, false, false, false]);
+    backend.push_observation(point, [false; 5]);
+    let mut engine = InputEngine::new(backend.clone())?;
+    let action = InputAction::Click(ClickAction::new(
+        None,
+        LogicalButton::Left,
+        1,
+        0,
+        0,
+        0,
+        250,
+    )?);
+
+    let outcome = engine.execute(context(), action, &CancellationToken::new())?;
+
+    assert_eq!(outcome.kind, InputOutcomeKind::Completed);
+    assert_eq!(outcome.events_emitted, 2);
+    assert_eq!(outcome.completed_units, 1);
+    assert_eq!(outcome.observed_logical_buttons_1_to_5, Some([false; 5]));
+    assert_eq!(backend.counts().0, 2);
+    assert!(
+        backend
+            .operations()
+            .contains(&MockOperation::Delay(Duration::from_millis(25)))
+    );
     Ok(())
 }
 

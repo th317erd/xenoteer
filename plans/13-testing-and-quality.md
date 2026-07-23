@@ -228,6 +228,13 @@ All cases in [05](05-keyboard-and-clipboard.md), especially direct/INCR boundary
 owner changes, requestor stalls, target conversions, PRIMARY separation, paste
 observation, and value-copy restoration warning.
 
+The exact application-paste matrix is GTK3, Qt6, Chromium, and Firefox.
+QtWebEngine remains mandatory in the same live gate for initial editable-text
+readback, window control, AT-SPI discovery, sandbox/process auditing, and
+capture, but its known X11 forced-accessibility duplicate-paste defect is an
+explicit isolated skip. The test must emit that reason and must not broaden the
+exception to another toolkit or treat doubled text as success.
+
 ### Capture
 
 Pixel masks/order/stride, crops/bounds, overlap/minimize, cursor, PNG/raw limits,

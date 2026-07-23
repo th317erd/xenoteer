@@ -54,7 +54,7 @@ def main() -> int:
             "processType": "undefined",
             "requireType": "undefined",
             "protocol": "file:",
-            "marker": "Electron fixture marker",
+            "marker": "Electron fixture marker content",
             "title": "Xenoteer Electron Browser Fixture",
         }
         if observed != expected:

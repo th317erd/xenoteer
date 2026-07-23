@@ -15,8 +15,6 @@ LABEL com.aeor.xenoteer.distribution-scope="test-only-non-distributable" \
 USER root
 COPY container/fixtures/desktop-apps/packages.lock /tmp/xenoteer-desktop-apps-packages.lock
 COPY container/fixtures/desktop-apps/artifacts.lock /usr/share/doc/xenoteer/desktop-app-artifacts.lock
-COPY --chown=root:root container/rootfs/usr/share/xenoteer/fixtures/desktop-apps/ \
-  /usr/share/xenoteer/fixtures/desktop-apps/
 RUN nice -n 15 apt-get update \
     && sed '/^#/d; /^$/d' /tmp/xenoteer-desktop-apps-packages.lock \
       | xargs -r env DEBIAN_FRONTEND=noninteractive \
@@ -40,3 +38,5 @@ RUN nice -n 15 apt-get update \
     && chmod 0755 /opt/xenoteer-electron/electron \
     && chmod 4755 /opt/xenoteer-electron/chrome-sandbox \
     && rm -f /tmp/electron-linux-x64.zip
+COPY --chown=root:root container/rootfs/usr/share/xenoteer/fixtures/desktop-apps/ \
+  /usr/share/xenoteer/fixtures/desktop-apps/

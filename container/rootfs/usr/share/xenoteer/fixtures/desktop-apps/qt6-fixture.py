@@ -75,6 +75,16 @@ def main() -> int:
     checkbox.setAccessibleName("Stable Checkbox")
     button = QPushButton("Stable button")
     button.setAccessibleName("Stable Button")
+    activation_count = [0]
+    activation_status = QLabel("Activation count: 0")
+    activation_status.setAccessibleName("Activation Count 0")
+
+    def record_activation() -> None:
+        activation_count[0] += 1
+        activation_status.setText(f"Activation count: {activation_count[0]}")
+        activation_status.setAccessibleName(f"Activation Count {activation_count[0]}")
+
+    button.clicked.connect(record_activation)
     double_click = QPushButton("Double-click target")
     double_click.setAccessibleName("Double-click Target")
     disabled = QPushButton("Disabled button")
@@ -113,7 +123,8 @@ def main() -> int:
     fonts.setAccessibleName("Font Coverage")
     controls = (
         heading, entry, protected, checkbox, radio_alpha, radio_beta, slider,
-        spinner, combo, button, double_click, disabled, text_area, fonts,
+        spinner, combo, button, activation_status, double_click, disabled, text_area,
+        fonts,
     )
     for row, widget in enumerate(controls, start=2):
         grid.addWidget(widget, row, 0)

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use tokio::sync::watch;
+use xenoteer_atspi::AtspiActorState;
 use xenoteer_core::input::InputHealth;
 use xenoteer_protocol::{
     Capability, CapabilityId, CapabilityIdError, CapabilityReport, CapabilityReportError,
@@ -16,6 +17,7 @@ use xenoteer_x11::{
     keyboard::KeyboardModelAvailability,
 };
 
+use crate::accessibility_runtime::{AccessibilityRuntimeReader, AccessibilityRuntimeSnapshot};
 use crate::capability_monitor::{
     BackendCapabilityEvidenceState, OperationBackendReader, WindowCapabilityEvidenceState,
     WindowCapabilityReader, WindowCapabilitySnapshot,
@@ -59,6 +61,7 @@ struct RuntimeCapabilitySnapshot {
     capture: ProjectedStatus,
     clipboard: ProjectedStatus,
     viewer: ProjectedStatus,
+    accessibility: ProjectedStatus,
     window_actor: ProjectedStatus,
     window_capabilities: WindowCapabilitySnapshot,
 }
@@ -74,6 +77,7 @@ pub(crate) struct RuntimeCapabilityProvider {
     window: WindowControlActorHandle,
     operation_backends: OperationBackendReader,
     window_capabilities: WindowCapabilityReader,
+    accessibility: AccessibilityRuntimeReader,
     invariant_fallback: CapabilityReport,
 }
 
@@ -85,6 +89,7 @@ pub(crate) struct RuntimeCapabilityBackends {
     window: WindowControlActorHandle,
     operation_backends: OperationBackendReader,
     window_capabilities: WindowCapabilityReader,
+    accessibility: AccessibilityRuntimeReader,
 }
 
 impl RuntimeCapabilityBackends {
@@ -95,6 +100,7 @@ impl RuntimeCapabilityBackends {
         window: WindowControlActorHandle,
         operation_backends: OperationBackendReader,
         window_capabilities: WindowCapabilityReader,
+        accessibility: AccessibilityRuntimeReader,
     ) -> Self {
         Self {
             observation,
@@ -103,6 +109,7 @@ impl RuntimeCapabilityBackends {
             window,
             operation_backends,
             window_capabilities,
+            accessibility,
         }
     }
 }
@@ -124,6 +131,7 @@ impl RuntimeCapabilityProvider {
             window: backends.window,
             operation_backends: backends.operation_backends,
             window_capabilities: backends.window_capabilities,
+            accessibility: backends.accessibility,
             invariant_fallback: CapabilityReport::checked(Vec::new())?,
         })
     }
@@ -189,6 +197,7 @@ impl RuntimeCapabilityProvider {
         } else {
             ProjectedStatus::AVAILABLE
         };
+        let accessibility = project_accessibility(self.accessibility.snapshot());
 
         RuntimeCapabilitySnapshot {
             desktop,
@@ -201,9 +210,34 @@ impl RuntimeCapabilityProvider {
             capture,
             clipboard,
             viewer,
+            accessibility,
             window_actor,
             window_capabilities: self.window_capabilities.snapshot(),
         }
+    }
+}
+
+fn project_accessibility(snapshot: AccessibilityRuntimeSnapshot) -> ProjectedStatus {
+    match snapshot.actor_state {
+        AtspiActorState::Disabled => {
+            ProjectedStatus::new(CapabilityStatus::Disabled, Some("accessibility_disabled"))
+        }
+        AtspiActorState::Healthy
+            if snapshot.mirror_ready
+                && snapshot.accessibility_generation != 0
+                && snapshot.cache_revision != 0 =>
+        {
+            ProjectedStatus::AVAILABLE
+        }
+        AtspiActorState::Healthy => ProjectedStatus::degraded("accessibility_mirror_rebuilding"),
+        AtspiActorState::Reconnecting => {
+            ProjectedStatus::degraded("accessibility_actor_reconnecting")
+        }
+        AtspiActorState::Connecting => {
+            ProjectedStatus::unavailable("accessibility_actor_connecting")
+        }
+        AtspiActorState::Stopped => ProjectedStatus::unavailable("accessibility_actor_stopped"),
+        AtspiActorState::Panicked => ProjectedStatus::unavailable("accessibility_actor_panicked"),
     }
 }
 
@@ -349,6 +383,7 @@ fn build_report(
             ),
         ),
         ("viewer.novnc.view_only", snapshot.viewer),
+        ("accessibility.atspi", snapshot.accessibility),
     ] {
         capabilities.push(capability(id, status)?);
     }

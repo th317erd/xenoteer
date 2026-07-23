@@ -41,7 +41,7 @@
     <label for="choice">Stable choice</label>
     <select id="choice" aria-label="Stable choice"><option>Alpha</option><option selected>Beta</option></select>
     <label for="range">Stable range</label><input id="range" aria-label="Stable range" type="range" value="40">
-    <button id="button" type="button">Stable button</button>
+    <button id="button" type="button" aria-label="Browser Stable Button">Stable button</button>
     <button id="disabled" type="button" disabled>Disabled button</button>
   </section>
   <section aria-label="Rich interactions">
@@ -73,9 +73,23 @@
   const [display, marker] = labels[kind] || labels.generic;
   document.title = `Xenoteer ${display} Browser Fixture`;
   document.getElementById("fixture-heading").textContent = `${display} browser fixture`;
-  document.getElementById("browser-marker").textContent = marker;
+  // Keep the landmark's accessible label distinct from Chromium/Firefox's
+  // nested static-text accessible so exact-name stale-reference checks have
+  // one intentional target rather than two semantically different nodes.
+  document.getElementById("browser-marker").textContent = `${marker} content`;
   document.getElementById("browser-marker").setAttribute("aria-label", marker);
   document.body.dataset.browser = kind;
+
+  let activationCount = 0;
+  const activationStatus = document.getElementById("status");
+  activationStatus.setAttribute("aria-label", "Browser Activation Count 0");
+  document.getElementById("button").addEventListener("click", () => {
+    activationCount += 1;
+    activationStatus.textContent = `activation count ${activationCount}`;
+    activationStatus.setAttribute(
+      "aria-label", `Browser Activation Count ${activationCount}`
+    );
+  });
 
   const shadow = document.getElementById("shadow-host").attachShadow({mode: "open"});
   shadow.innerHTML = '<button aria-label="Shadow button">Shadow button</button>';

@@ -1,0 +1,35 @@
+{
+  "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
+  "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+  "selector": {
+    "scope": {
+      "type": "desktop"
+    },
+    "predicates": [
+      {
+        "type": "role",
+        "roles": ["password_text"]
+      },
+      {
+        "type": "state",
+        "state": "protected",
+        "value": true
+      }
+    ],
+    "order": "role_then_name",
+    "result_index": null
+  },
+  "limit": 10,
+  "cursor": null,
+  "expansion": {
+    "value": false,
+    "text_metadata": true,
+    "component": true
+  },
+  "limits": {
+    "max_visited_nodes": 5000,
+    "max_depth": 32,
+    "max_matches": 10,
+    "timeout_ms": 5000
+  }
+}

@@ -19,7 +19,9 @@ use std::{
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 use xenoteer_core::{
-    MonotonicMillis, WindowContinuationDescriptor, WindowContinuationQuery, WindowModel,
+    AccessibilityCorrelationError, AccessibilityWindowCandidate, ElementClickOcclusionSnapshot,
+    MAX_ACCESSIBILITY_CORRELATION_CANDIDATES, MAX_ELEMENT_CLICK_OCCLUDERS, MonotonicMillis,
+    NormalizedCorrelationText, WindowContinuationDescriptor, WindowContinuationQuery, WindowModel,
     WindowModelChange, WindowModelError, WindowModelLimits, WindowPageProjection, WindowQueryError,
     WindowQueryView, WindowResolveProjection,
 };
@@ -64,6 +66,107 @@ const TOKEN_SECRET_BYTES: usize = 32;
 const MAX_TOKEN_MINT_ATTEMPTS: usize = 16;
 /// Maximum total time advisory process correlation may add to one response.
 const PROCESS_CORRELATION_TOTAL_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// One actor-owned, revision-fenced view used by accessibility correlation.
+#[derive(Clone, Debug)]
+#[allow(dead_code, reason = "consumed by the deferred correlation coordinator")]
+pub(crate) struct ObservationCorrelationSnapshot {
+    /// Window-model revision shared by every projected snapshot.
+    pub(crate) revision: WindowModelRevision,
+    /// Monotonic time at which the model owner produced the view.
+    pub(crate) observed_at: MonotonicMillis,
+    /// Complete live set, rejected rather than truncated above the hard cap.
+    pub(crate) windows: Vec<WindowSnapshot>,
+}
+
+#[allow(dead_code, reason = "consumed by the deferred correlation coordinator")]
+impl ObservationCorrelationSnapshot {
+    /// Converts the immutable model view into the core correlation boundary.
+    ///
+    /// X11 titles, class values, and client PIDs remain advisory. Independently
+    /// managed process identity, exact root geometry, and exact related window
+    /// references retain their stronger provenance for the pure policy.
+    pub(crate) fn candidates(
+        &self,
+    ) -> Result<Vec<AccessibilityWindowCandidate>, AccessibilityCorrelationError> {
+        self.windows
+            .iter()
+            .map(|snapshot| {
+                let title = snapshot
+                    .metadata
+                    .visible_title
+                    .as_ref()
+                    .or(snapshot.metadata.title.as_ref())
+                    .map(|value| NormalizedCorrelationText::new(&value.value))
+                    .transpose()?;
+                let application_identity = snapshot
+                    .metadata
+                    .class
+                    .as_ref()
+                    .and_then(|class| class.class.as_ref())
+                    .map(|value| NormalizedCorrelationText::new(&value.value))
+                    .transpose()?;
+                let toolkit_identity = snapshot
+                    .metadata
+                    .class
+                    .as_ref()
+                    .and_then(|class| class.instance.as_ref())
+                    .map(|value| NormalizedCorrelationText::new(&value.value))
+                    .transpose()?;
+                Ok(AccessibilityWindowCandidate {
+                    window: snapshot.window.clone(),
+                    live: true,
+                    process_id: snapshot.process.reported_pid,
+                    managed_process_id: snapshot.process.managed_process.map(|process| process.pid),
+                    top_level_extents: snapshot
+                        .geometry
+                        .as_ref()
+                        .map(|geometry| geometry.client_rect.rect),
+                    title,
+                    application_identity,
+                    toolkit_identity,
+                    focused: snapshot.state.focused,
+                    // The current window model does not yet retain transition or
+                    // birth instants. Absence is safer than manufacturing times.
+                    focus_changed_at: None,
+                    created_at: None,
+                    observed_at: self.observed_at,
+                    client_leader: snapshot.client_leader.clone(),
+                })
+            })
+            .collect()
+    }
+}
+
+/// Bounded queue-head stacking evidence for one exact live window birth.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WindowOcclusionSnapshot {
+    /// Exact target birth resolved by the model owner.
+    pub(crate) target_window: WindowRef,
+    /// Window-model revision used for target and higher-window geometry.
+    pub(crate) model_revision: WindowModelRevision,
+    /// Current target client bounds, allowing movement to fail closed.
+    pub(crate) target_client_bounds: Option<Rect>,
+    /// Nonzero actor-local epoch advanced for each successful stacking read.
+    pub(crate) stacking_epoch: u64,
+    /// Root-physical rectangles in bottom-to-top order above the target.
+    pub(crate) rectangles_above: Vec<Rect>,
+    /// False when authoritative stacking or bounded geometry was unavailable.
+    pub(crate) stacking_complete: bool,
+}
+
+#[allow(dead_code, reason = "consumed by the deferred input precondition")]
+impl WindowOcclusionSnapshot {
+    /// Borrows this owned actor result as the pure click-policy input.
+    pub(crate) fn as_click_snapshot(&self) -> ElementClickOcclusionSnapshot<'_> {
+        ElementClickOcclusionSnapshot {
+            target_window: &self.target_window,
+            stacking_epoch: self.stacking_epoch,
+            rectangles_above: &self.rectangles_above,
+            stacking_complete: self.stacking_complete,
+        }
+    }
+}
 
 /// Nonblocking normalized-window-event publication failure.
 #[allow(dead_code)] // Constructed by the deferred coordinator-ingress adapter and tests.
@@ -1282,6 +1385,7 @@ struct ModelState {
     model: WindowModel,
     tokens: OpaqueTokenRegistry,
     events: WindowEventEmitter,
+    stacking_epoch: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1332,6 +1436,7 @@ impl ModelState {
                 .map_err(|_| ObservationAdapterError::Model)?,
             tokens: OpaqueTokenRegistry::new(token_capacity, cursor_ttl_ms, reference_ttl_ms)?,
             events: WindowEventEmitter::new(event_sink, event_metrics),
+            stacking_epoch: 0,
         })
     }
 
@@ -1451,7 +1556,7 @@ impl ModelState {
                 .get(&input.window)
                 .cloned()
                 .ok_or(ObservationAdapterError::InvalidRawObservation)?;
-            normalized.push(normalize_snapshot(
+            let mut snapshot = normalize_snapshot(
                 input,
                 reference,
                 self.model.revision(),
@@ -1459,7 +1564,12 @@ impl ModelState {
                     .then(|| u32::try_from(index).map_err(|_| ObservationAdapterError::Model))
                     .transpose()?,
                 &desired_references,
-            )?);
+            )?;
+            snapshot.has_accessibility_application =
+                before.windows.get(&input.window).is_some_and(|current| {
+                    current.window == snapshot.window && current.has_accessibility_application
+                });
+            normalized.push(snapshot);
         }
         for (xid, reference) in current_references {
             if identity_policy == ReconcileIdentityPolicy::InvalidateAll
@@ -1491,6 +1601,162 @@ impl ModelState {
         self.events
             .emit_committed_transition(&before, &after, event_policy);
         Ok(())
+    }
+
+    fn replace_accessibility_correlations(
+        &mut self,
+        expected_revision: WindowModelRevision,
+        windows: &[WindowRef],
+        now: MonotonicMillis,
+    ) -> Result<WindowModelRevision, ControlPlaneError> {
+        if windows.len() > self.max_live_windows {
+            return Err(ControlPlaneError::ResourceExhausted);
+        }
+        let (before_revision, current) = self.model.snapshot_all(now).map_err(map_model_error)?;
+        if before_revision != expected_revision {
+            return Err(ControlPlaneError::StaleReference {
+                current_generation: Some(self.desktop_generation),
+            });
+        }
+        let before = CommittedWindowModelView::new(
+            self.desktop_id,
+            self.desktop_generation,
+            before_revision,
+            current.clone(),
+        );
+        let current_by_xid = current
+            .iter()
+            .map(|snapshot| (snapshot.window.xid, &snapshot.window))
+            .collect::<BTreeMap<_, _>>();
+        let mut desired = BTreeMap::new();
+        for window in windows {
+            if window.validate_shape().is_err()
+                || window.desktop_id != self.desktop_id
+                || window.desktop_generation != self.desktop_generation
+                || current_by_xid.get(&window.xid).copied() != Some(window)
+                || desired.insert(window.xid, window).is_some()
+            {
+                return Err(ControlPlaneError::NotFound);
+            }
+        }
+
+        let mut changed = false;
+        for mut snapshot in current {
+            let correlated = desired
+                .get(&snapshot.window.xid)
+                .is_some_and(|window| **window == snapshot.window);
+            if snapshot.has_accessibility_application == correlated {
+                continue;
+            }
+            snapshot.has_accessibility_application = correlated;
+            self.model.observe(snapshot, now).map_err(map_model_error)?;
+            changed = true;
+        }
+        if !changed {
+            return Ok(before_revision);
+        }
+
+        let (after_revision, after_windows) =
+            self.model.snapshot_all(now).map_err(map_model_error)?;
+        let after = CommittedWindowModelView::new(
+            self.desktop_id,
+            self.desktop_generation,
+            after_revision,
+            after_windows,
+        );
+        self.events
+            .emit_committed_transition(&before, &after, ReconcileEventPolicy::Incremental);
+        Ok(after_revision)
+    }
+
+    fn correlation_snapshot(
+        &mut self,
+        now: MonotonicMillis,
+    ) -> Result<ObservationCorrelationSnapshot, ControlPlaneError> {
+        let (revision, windows) = self.model.snapshot_all(now).map_err(map_model_error)?;
+        if windows.len() > MAX_ACCESSIBILITY_CORRELATION_CANDIDATES {
+            return Err(ControlPlaneError::ResourceExhausted);
+        }
+        Ok(ObservationCorrelationSnapshot {
+            revision,
+            observed_at: now,
+            windows,
+        })
+    }
+
+    fn occlusion_snapshot(
+        &mut self,
+        target_window: &WindowRef,
+        now: MonotonicMillis,
+    ) -> Result<WindowOcclusionSnapshot, ControlPlaneError> {
+        let target = self
+            .model
+            .resolve_exact(target_window, now)
+            .map_err(map_model_error)?
+            .snapshot;
+        let target_stacking_index = target.stacking_index;
+        let target_client_bounds = target
+            .geometry
+            .as_ref()
+            .map(|geometry| geometry.client_rect.rect);
+        let (model_revision, windows) = self.model.snapshot_all(now).map_err(map_model_error)?;
+
+        let mut stacking_complete = target_stacking_index.is_some()
+            && target_client_bounds.is_some()
+            && target.state.map_state == xenoteer_protocol::WindowMapState::Viewable
+            && !target.state.hidden
+            && !target.state.minimized;
+        let mut seen_indices = BTreeMap::new();
+        let mut rectangles = Vec::new();
+        for snapshot in windows {
+            if snapshot.state.map_state != xenoteer_protocol::WindowMapState::Viewable
+                || snapshot.state.hidden
+                || snapshot.state.minimized
+            {
+                continue;
+            }
+            let Some(stacking_index) = snapshot.stacking_index else {
+                stacking_complete = false;
+                continue;
+            };
+            if seen_indices
+                .insert(stacking_index, snapshot.window.xid)
+                .is_some()
+            {
+                stacking_complete = false;
+            }
+            if target_stacking_index.is_none_or(|target_index| stacking_index <= target_index) {
+                continue;
+            }
+            let Some(rect) = snapshot
+                .geometry
+                .as_ref()
+                .map(|geometry| geometry.frame_rect.unwrap_or(geometry.client_rect).rect)
+            else {
+                stacking_complete = false;
+                continue;
+            };
+            rectangles.push((stacking_index, snapshot.window.xid, rect));
+        }
+        rectangles.sort_unstable_by_key(|(stacking_index, xid, _)| (*stacking_index, *xid));
+        if rectangles.len() > MAX_ELEMENT_CLICK_OCCLUDERS {
+            rectangles.truncate(MAX_ELEMENT_CLICK_OCCLUDERS);
+            stacking_complete = false;
+        }
+        let rectangles_above = rectangles.into_iter().map(|(_, _, rect)| rect).collect();
+        self.stacking_epoch = self
+            .stacking_epoch
+            .checked_add(1)
+            .ok_or(ControlPlaneError::Internal)?;
+
+        Ok(WindowOcclusionSnapshot {
+            target_window: target.window,
+            model_revision,
+            target_client_bounds,
+            stacking_epoch: self.stacking_epoch,
+            rectangles_above,
+            stacking_complete,
+        })
     }
 
     fn observe_raw(
@@ -1544,13 +1810,16 @@ impl ModelState {
         let stacking_index = previous
             .as_ref()
             .and_then(|snapshot| snapshot.stacking_index);
-        let snapshot = normalize_snapshot(
+        let mut snapshot = normalize_snapshot(
             input,
             reference,
             self.model.revision(),
             stacking_index,
             &references,
         )?;
+        snapshot.has_accessibility_application = previous
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.has_accessibility_application);
         let change = self
             .model
             .observe(snapshot, now)
@@ -2169,6 +2438,7 @@ pub(crate) enum ObservationServiceState {
 pub struct DaemonObservationService {
     requests: SyncSender<ModelRequest>,
     control: Arc<ModelActorControl>,
+    desktop_generation: DesktopGeneration,
     pid_correlator: Arc<dyn PidCorrelator>,
     event_metrics: Arc<WindowEventDeliveryMetrics>,
 }
@@ -2392,6 +2662,91 @@ impl DaemonObservationService {
         self.event_metrics.snapshot()
     }
 
+    /// Atomically replaces the exact live windows correlated to accessible
+    /// applications and returns the committed window-model revision.
+    ///
+    /// An empty set clears correlation after an AT-SPI gap or reconnect. Every
+    /// non-empty entry must still resolve to the exact observed window birth;
+    /// an XID alone can never carry correlation across reuse.
+    #[allow(dead_code, reason = "consumed by the deferred correlation coordinator")]
+    pub(crate) async fn replace_accessibility_correlations(
+        &self,
+        expected_revision: WindowModelRevision,
+        windows: Vec<WindowRef>,
+    ) -> Result<WindowModelRevision, ControlPlaneError> {
+        if windows.len() > MAX_ROOT_WINDOWS
+            || windows
+                .iter()
+                .any(|window| window.validate_shape().is_err())
+        {
+            return Err(ControlPlaneError::InvalidRequest);
+        }
+        let (response, receiver) = oneshot::channel();
+        self.submit(ModelRequest::ReplaceAccessibilityCorrelations {
+            expected_revision,
+            windows,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| ControlPlaneError::CapabilityUnavailable)?
+    }
+
+    /// Returns one complete, bounded, revision-fenced view for accessibility
+    /// correlation. The model owner rejects an oversized live set rather than
+    /// returning a misleading partial candidate universe.
+    #[allow(dead_code, reason = "consumed by the deferred correlation coordinator")]
+    pub(crate) async fn accessibility_correlation_snapshot(
+        &self,
+    ) -> Result<ObservationCorrelationSnapshot, ControlPlaneError> {
+        let (response, receiver) = oneshot::channel();
+        self.submit(ModelRequest::AccessibilityCorrelationSnapshot { response })?;
+        let mut snapshot = receiver
+            .await
+            .map_err(|_| ControlPlaneError::CapabilityUnavailable)??;
+        if snapshot.windows.iter().any(|window| {
+            window.window.desktop_generation != self.desktop_generation
+                || window.model_revision != snapshot.revision
+                || window.validate().is_err()
+        }) {
+            return Err(ControlPlaneError::Internal);
+        }
+        enrich_window_snapshots(
+            self.pid_correlator.as_ref(),
+            self.desktop_generation,
+            &mut snapshot.windows,
+        )
+        .await;
+        if snapshot
+            .windows
+            .iter()
+            .any(|window| window.validate().is_err())
+        {
+            return Err(ControlPlaneError::Internal);
+        }
+        Ok(snapshot)
+    }
+
+    /// Reads one complete candidate universe after pending raw X11 events have
+    /// been drained, for an input actor's queue-head correlation recheck.
+    pub(crate) fn accessibility_correlation_snapshot_blocking(
+        &self,
+        timeout: Duration,
+    ) -> Result<ObservationCorrelationSnapshot, ControlPlaneError> {
+        if timeout.is_zero() {
+            return Err(ControlPlaneError::InvalidRequest);
+        }
+        let (response, receiver) = mpsc::sync_channel(1);
+        self.submit(ModelRequest::AccessibilityCorrelationSnapshotBlocking { response })?;
+        receiver
+            .recv_timeout(timeout)
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected => {
+                    ControlPlaneError::CapabilityUnavailable
+                }
+            })?
+    }
+
     fn submit(&self, request: ModelRequest) -> Result<(), ControlPlaneError> {
         self.requests
             .try_send(request)
@@ -2443,6 +2798,30 @@ impl DaemonObservationService {
         }
         let (response, receiver) = mpsc::sync_channel(1);
         self.submit(ModelRequest::InternalSnapshot { window, response })?;
+        receiver
+            .recv_timeout(timeout)
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected => {
+                    ControlPlaneError::CapabilityUnavailable
+                }
+            })?
+    }
+
+    /// Reads fresh bounded stacking evidence for one exact target birth.
+    ///
+    /// Raw events are drained before this model request. The synchronous seam is
+    /// therefore suitable for a control actor's queue-head input precondition.
+    #[allow(dead_code, reason = "consumed by the deferred input precondition")]
+    pub(crate) fn occlusion_snapshot_exact_blocking(
+        &self,
+        window: WindowRef,
+        timeout: Duration,
+    ) -> Result<WindowOcclusionSnapshot, ControlPlaneError> {
+        if timeout.is_zero() || window.validate_shape().is_err() {
+            return Err(ControlPlaneError::InvalidRequest);
+        }
+        let (response, receiver) = mpsc::sync_channel(1);
+        self.submit(ModelRequest::OcclusionSnapshot { window, response })?;
         receiver
             .recv_timeout(timeout)
             .map_err(|error| match error {
@@ -2508,16 +2887,44 @@ async fn enrich_entries(
     desktop_generation: DesktopGeneration,
     entries: &mut [WindowSnapshotEntry],
 ) {
-    let deadline = tokio::time::Instant::now() + PROCESS_CORRELATION_TOTAL_TIMEOUT;
+    let pids = unique_reported_pids(entries.iter().map(|entry| &entry.snapshot));
+    let upgrades = resolve_process_correlation_upgrades(correlator, desktop_generation, pids).await;
+    for entry in entries {
+        apply_process_correlation_upgrade(&mut entry.snapshot, &upgrades);
+    }
+}
+
+async fn enrich_window_snapshots(
+    correlator: &dyn PidCorrelator,
+    desktop_generation: DesktopGeneration,
+    snapshots: &mut [WindowSnapshot],
+) {
+    let pids = unique_reported_pids(snapshots.iter());
+    let upgrades = resolve_process_correlation_upgrades(correlator, desktop_generation, pids).await;
+    for snapshot in snapshots {
+        apply_process_correlation_upgrade(snapshot, &upgrades);
+    }
+}
+
+fn unique_reported_pids<'a>(snapshots: impl Iterator<Item = &'a WindowSnapshot>) -> Vec<u32> {
     let mut pids = Vec::new();
-    for entry in entries.iter() {
-        if let Some(pid) = entry.snapshot.process.reported_pid
+    for snapshot in snapshots {
+        if let Some(pid) = snapshot.process.reported_pid
             && pid != 0
             && !pids.contains(&pid)
         {
             pids.push(pid);
         }
     }
+    pids
+}
+
+async fn resolve_process_correlation_upgrades(
+    correlator: &dyn PidCorrelator,
+    desktop_generation: DesktopGeneration,
+    pids: Vec<u32>,
+) -> BTreeMap<u32, ProcessCorrelationUpgrade> {
+    let deadline = tokio::time::Instant::now() + PROCESS_CORRELATION_TOTAL_TIMEOUT;
     let mut upgrades = BTreeMap::new();
     for batch in pids.chunks(MAX_PROCESS_CORRELATION_PIDS) {
         let requested = batch.to_vec();
@@ -2538,18 +2945,23 @@ async fn enrich_entries(
         };
         upgrades.extend(batch_upgrades);
     }
-    for entry in entries {
-        let Some(reported_pid) = entry.snapshot.process.reported_pid else {
-            continue;
-        };
-        let Some(upgrade) = upgrades.get(&reported_pid).copied() else {
-            continue;
-        };
-        entry.snapshot.process.managed_process = Some(upgrade.process);
-        entry.snapshot.process.confidence = WindowProcessConfidence::High;
-        entry.snapshot.process.evidence = vec![WindowProcessEvidence::NetWmPid, upgrade.evidence];
-        entry.snapshot.process.conflict = false;
-    }
+    upgrades
+}
+
+fn apply_process_correlation_upgrade(
+    snapshot: &mut WindowSnapshot,
+    upgrades: &BTreeMap<u32, ProcessCorrelationUpgrade>,
+) {
+    let Some(reported_pid) = snapshot.process.reported_pid else {
+        return;
+    };
+    let Some(upgrade) = upgrades.get(&reported_pid).copied() else {
+        return;
+    };
+    snapshot.process.managed_process = Some(upgrade.process);
+    snapshot.process.confidence = WindowProcessConfidence::High;
+    snapshot.process.evidence = vec![WindowProcessEvidence::NetWmPid, upgrade.evidence];
+    snapshot.process.conflict = false;
 }
 
 fn validate_correlation_reply(
@@ -2842,6 +3254,7 @@ fn authorized_principal(context: &ControlRequestContext) -> Result<String, Contr
     Ok(context.principal().id().to_owned())
 }
 
+#[allow(dead_code, reason = "some internal requests await coordinator wiring")]
 enum ModelRequest {
     List {
         principal: String,
@@ -2876,6 +3289,21 @@ enum ModelRequest {
         window: WindowRef,
         response: SyncSender<Result<WindowSnapshot, ControlPlaneError>>,
     },
+    AccessibilityCorrelationSnapshot {
+        response: oneshot::Sender<Result<ObservationCorrelationSnapshot, ControlPlaneError>>,
+    },
+    AccessibilityCorrelationSnapshotBlocking {
+        response: SyncSender<Result<ObservationCorrelationSnapshot, ControlPlaneError>>,
+    },
+    OcclusionSnapshot {
+        window: WindowRef,
+        response: SyncSender<Result<WindowOcclusionSnapshot, ControlPlaneError>>,
+    },
+    ReplaceAccessibilityCorrelations {
+        expected_revision: WindowModelRevision,
+        windows: Vec<WindowRef>,
+        response: oneshot::Sender<Result<WindowModelRevision, ControlPlaneError>>,
+    },
 }
 
 impl ModelRequest {
@@ -2900,6 +3328,18 @@ impl ModelRequest {
                 let _ = response.send(Err(error));
             }
             Self::InternalSnapshot { response, .. } => {
+                let _ = response.send(Err(error));
+            }
+            Self::AccessibilityCorrelationSnapshot { response } => {
+                let _ = response.send(Err(error));
+            }
+            Self::AccessibilityCorrelationSnapshotBlocking { response } => {
+                let _ = response.send(Err(error));
+            }
+            Self::OcclusionSnapshot { response, .. } => {
+                let _ = response.send(Err(error));
+            }
+            Self::ReplaceAccessibilityCorrelations { response, .. } => {
                 let _ = response.send(Err(error));
             }
         }
@@ -3095,6 +3535,7 @@ fn spawn_model_actor_with_components(
     let service = Arc::new(DaemonObservationService {
         requests: request_tx,
         control,
+        desktop_generation,
         pid_correlator,
         event_metrics,
     });
@@ -3348,6 +3789,25 @@ fn process_model_request(
                 .map(|resolved| resolved.snapshot)
                 .map_err(map_model_error);
             let _ = response.send(result);
+        }
+        ModelRequest::AccessibilityCorrelationSnapshot { response } => {
+            let _ = response.send(state.correlation_snapshot(now));
+        }
+        ModelRequest::AccessibilityCorrelationSnapshotBlocking { response } => {
+            let _ = response.send(state.correlation_snapshot(now));
+        }
+        ModelRequest::OcclusionSnapshot { window, response } => {
+            let _ = response.send(state.occlusion_snapshot(&window, now));
+        }
+        ModelRequest::ReplaceAccessibilityCorrelations {
+            expected_revision,
+            windows,
+            response,
+        } => {
+            let changed = state
+                .replace_accessibility_correlations(expected_revision, &windows, now)
+                .inspect(|_| process_waiters(state, waiters, now));
+            let _ = response.send(changed);
         }
     }
 }

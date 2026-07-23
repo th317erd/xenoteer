@@ -25,6 +25,7 @@ hyper = { version = "=1.11.0", default-features = false, features = ["client", "
 hyper-util = { version = "=0.1.20", default-features = false, features = ["client", "client-legacy", "http1", "tokio"] }
 libc = "=0.2.187"
 nix = { version = "=0.29.0", default-features = false, features = ["process", "signal", "user"] }
+ordered-stream = "=0.2.0"
 proptest = "=1.11.0"
 regex-automata = { version = "=0.4.16", default-features = false, features = ["std", "syntax", "nfa-thompson", "unicode"] }
 schemars = { version = "=1.2.1", features = ["uuid1"] }

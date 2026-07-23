@@ -48,10 +48,13 @@ Plan: `plans/15-phased-implementation.md`
 
 ## Phase 5 — AT-SPI semantic automation
 
-- [ ] AT-SPI actor/cache/reconciliation
-- [ ] Elements/selectors/waits/correlation
-- [ ] Semantic and physical element actions
-- [ ] Toolkit/browser/malformed-tree conformance
+- [x] AT-SPI actor/cache/reconciliation
+- [x] Elements/selectors/waits/correlation
+- [x] Semantic and physical element actions
+- [x] Bounded custom/deep/oversized-name/reconnect/event-flood coverage, with
+      malformed parent/cycle behavior covered at the pure model/unit boundary
+- [x] Coherent exact-image GTK/Qt/Chromium/Firefox matrix, immutable image-ID
+      record, no-override 25-minute live gate, closure review, and local commit
 
 ## Phase 6 — SDKs and CLI
 
@@ -64,7 +67,8 @@ Plan: `plans/15-phased-implementation.md`
 ## Phase 7 — hardening and first release
 
 - [ ] Runtime/security hardening and fault/fuzz matrix
-- [ ] Reliability, performance, and soak verification
+- [ ] Reliability, performance, and soak verification, including 10,000-node
+      cold-snapshot timing, selector p95, event lag, cache RSS, and browser soak
 - [ ] Locks, SBOM, provenance, signatures, notices, source fulfillment
 - [ ] Operational documentation and release gates
 
@@ -75,7 +79,7 @@ Plan: `plans/15-phased-implementation.md`
 - Rust/Cargo 1.97.1, Xvfb, D-Bus, XKB, AT-SPI, GTK, cargo-deny, cargo-audit,
   shellcheck, noVNC, websockify, and the viewer/browser test dependencies are
   installed. cargo-nextest is not installed and is not a Phase 0 requirement.
-- Repository Cargo configuration caps builds at four jobs. Heavy build and test
+- Repository Cargo configuration caps builds at two jobs. Heavy build and test
   gates run sequentially at reduced CPU/I/O priority; desktop matrix and idle
   soak containers are capped at two CPUs.
 - Chromium's supported sandbox path requires the pinned, narrow seccomp profile,

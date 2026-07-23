@@ -236,7 +236,13 @@ Critical finish hooks query s6-supervise's live `wantedup` state from their
 guaranteed service-directory working directory. A requested operator/s6-rc stop
 sets `wantedup=false` before signalling the process, including while startup is
 still in progress, and therefore preserves graceful exit 0. An unsolicited
-critical death remains `wantedup=true`. The first cascading critical finish hook
+critical death remains `wantedup=true`. The controlled Phase 5 AT-SPI recovery
+gate is the sole direct-service exception: root creates a single-use marker in
+a non-symlink root-owned `0700` directory, with a non-symlink root-owned `0600`
+regular marker. The finish hook consumes it before reading `wantedup`; malformed
+markers fail closed. Recovery waits for the supervisor's definitive down state
+and verifies the marker was consumed before requesting the replacement bus.
+The first cascading critical finish hook
 atomically claims shutdown, records a nonzero child/signal result for s6-overlay,
 publishes a request over a root-only FIFO to the dedicated supervised
 coordinator, and exits 125 so the service cannot respawn. The coordinator waits
@@ -249,7 +255,8 @@ the recorded failure result. Critical services cannot start until the internal
 s6 shutdown daemon is ready. Failure to read supervision intent fails closed.
 The built-image gate covers immediate startup stop, ready normal/hardened stops,
 every critical desktop service in both profiles, and the required-viewer
-services.
+services. The Phase 5 live gate separately covers the authorized, bounded
+AT-SPI replacement path.
 
 This is a candidate, not a blanket compatibility claim:
 
@@ -293,6 +300,8 @@ sudo env XENOTEER_NOVNC_SPIKE_BASE_IMAGE=xenoteer:dev \
 sudo scripts/container/build-desktop-app-fixture.sh
 sudo scripts/container/test-desktop-app-image.sh xenoteer:desktop-apps-test
 sudo scripts/container/test-phase4-live-fixtures.py xenoteer:desktop-apps-test
+sudo nice -n 15 ionice -c 3 \
+  timeout 25m scripts/container/test-phase5-atspi-live.py xenoteer:desktop-apps-test
 sudo XENOTEER_IDLE_SOAK_SECONDS=1800 \
   scripts/container/test-idle-soak.sh xenoteer:dev
 ```
@@ -360,6 +369,22 @@ Firefox ESR, and QtWebEngine without making the Phase 2 lifecycle matrix heavier
 Its optional `XENOTEERD_BINARY_OVERRIDE` is only for diagnosing stale local
 fixture caches; CI and release qualification use a coherent freshly derived
 image with no binary override.
+The subsequent Phase 5 gate uses that same coherent image with explicit limits
+of 2 CPUs, 6 GiB memory, 512 PIDs, and 4 GiB shared memory. It covers bounded
+GTK/Qt accessibility discovery, stale-reference fencing across GTK/Qt restart
+and Chromium/Firefox reload, protected-text redaction, a 4,096-node materialized
+stress surface, a depth-24 topology queried with a depth-eight budget, isolation
+of a 70,000-byte accessible name, bus reconnect with controlled toolkit
+relaunch, a 5,000-mutation event flood, semantic controls, and a distinct smooth
+physical element click. Standard GTK/Qt virtualized widgets are exercised
+separately. Malformed parent/cycle traversal remains bounded model/unit
+coverage, not a live relation-hydration claim. It runs after the Phase 4 API
+gate in CI with a 25-minute timeout; neither live gate mounts a host daemon
+override during qualification.
+The completed Phase 5 no-override qualification used production image
+`sha256:68508e98bb1f7a0995e96b4b93499cced7247fa7a99f90652c19abec2a52dafb`
+and exact derived desktop-app fixture
+`sha256:1733ddadd8d2235c42ec518bbc06d2053e6eded9d6f4cebd6999708f9470e934`.
 Separate spike images retain a redundant end-to-end noVNC/RFB proof. Their exact assertions,
 measured results, and revisit triggers are recorded in
 [`spikes/browser/README.md`](spikes/browser/README.md) and

@@ -98,7 +98,7 @@ fi
 
 export DISPLAY="$display"
 export XAUTHORITY="$auth_file"
-cargo build -j 4 --manifest-path fixtures/x11/Cargo.toml --locked
+cargo build -j 2 --manifest-path fixtures/x11/Cargo.toml --locked
 recorder=fixtures/x11/target/debug/x11-event-recorder
 
 wait_for_json() {
@@ -224,7 +224,7 @@ wait_for_json "$actor_recorder_log" \
     "$recorder_pid" "actor recorder readiness"
 actor_window=$(jq -sr 'map(select(.type == "ready"))[0].window' "$actor_recorder_log")
 
-timeout 180s cargo run --quiet -j 4 -p xenoteer-x11 --example phase1-input \
+timeout 180s cargo run --quiet -j 2 -p xenoteer-x11 --example phase1-input \
     --features native-xkbcommon -- \
     --window "$actor_window" --scenario conformance >"$actor_result_log"
 jq -e . "$actor_result_log" >/dev/null

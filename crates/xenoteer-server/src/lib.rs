@@ -3,6 +3,9 @@
 #![forbid(unsafe_code)]
 
 mod abuse;
+mod accessibility;
+#[cfg(test)]
+mod accessibility_tests;
 mod artifacts;
 mod auth;
 #[cfg(test)]
@@ -44,6 +47,7 @@ use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use xenoteer_protocol::DesktopId;
 
+pub use accessibility::{AccessibilityFuture, AccessibilityPlane, AccessibilityPlaneError};
 pub use artifacts::{
     ARTIFACT_SHA256_HEADER, ArtifactAccessRequest, ArtifactDownload, ArtifactFuture,
     ArtifactPurposeSet, ArtifactRequestContext, ArtifactService, ArtifactUploadRequest,
@@ -87,6 +91,7 @@ pub use websocket::{AllowedOrigins, OriginPolicyError};
 pub struct ApiServices {
     control: Arc<dyn ControlPlane>,
     observation: Arc<dyn ObservationPlane>,
+    accessibility: Arc<dyn AccessibilityPlane>,
     artifacts: Arc<dyn ArtifactService>,
     clipboard_reads: Arc<dyn ClipboardReadService>,
     screenshots: Arc<dyn ScreenshotService>,
@@ -95,18 +100,26 @@ pub struct ApiServices {
 }
 
 impl ApiServices {
-    /// Creates a service bundle while retaining the unavailable artifact default.
+    /// Creates a service bundle with unavailable defaults for optional planes.
     #[must_use]
     pub fn new(control: Arc<dyn ControlPlane>, observation: Arc<dyn ObservationPlane>) -> Self {
         Self {
             control,
             observation,
+            accessibility: Arc::new(accessibility::UnavailableAccessibilityPlane),
             artifacts: Arc::new(artifacts::UnavailableArtifactService),
             clipboard_reads: Arc::new(clipboard_read::UnavailableClipboardReadService),
             screenshots: Arc::new(screenshot::UnavailableScreenshotService),
             viewer_tickets: Arc::new(viewer::UnavailableViewerTicketService),
             viewer_gateway: None,
         }
+    }
+
+    /// Replaces semantic accessibility reading without changing other service seams.
+    #[must_use]
+    pub fn with_accessibility_plane(mut self, accessibility: Arc<dyn AccessibilityPlane>) -> Self {
+        self.accessibility = accessibility;
+        self
     }
 
     /// Replaces the artifact service without changing control or observation.
@@ -237,7 +250,7 @@ pub fn api_router_with_planes(
     )
 }
 
-/// Builds the authenticated API with every Phase-4 service seam replaceable.
+/// Builds the authenticated API with every service seam replaceable.
 pub fn api_router_with_services(
     readiness: ReadinessHandle,
     desktop_id: DesktopId,
@@ -250,6 +263,7 @@ pub fn api_router_with_services(
     let ApiServices {
         control,
         observation,
+        accessibility,
         artifacts,
         clipboard_reads,
         screenshots,
@@ -277,6 +291,7 @@ pub fn api_router_with_services(
         .route("/v1/ws", get(websocket::upgrade))
         .merge(control::routes())
         .merge(observation::routes())
+        .merge(accessibility::routes(accessibility))
         .merge(artifacts::routes(artifacts))
         .merge(clipboard_read::routes(clipboard_reads))
         .merge(screenshot::routes(screenshots))

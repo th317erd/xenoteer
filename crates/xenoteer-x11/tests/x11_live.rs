@@ -3,6 +3,7 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "native-xkbcommon")]
 use tokio_util::sync::CancellationToken;
 use x11rb::connection::Connection;
 use x11rb::protocol::xkb::{
@@ -14,9 +15,9 @@ use x11rb::protocol::xproto::{
     KEY_PRESS_EVENT, KEY_RELEASE_EVENT, Rectangle, WindowClass,
 };
 use x11rb::protocol::xtest::ConnectionExt as _;
-use xenoteer_protocol::{
-    CommandId, WindowGeometryRequest, WindowGeometryTarget, WindowScreenBoundsPolicy,
-};
+#[cfg(feature = "native-xkbcommon")]
+use xenoteer_protocol::CommandId;
+use xenoteer_protocol::{WindowGeometryRequest, WindowGeometryTarget, WindowScreenBoundsPolicy};
 use xenoteer_x11::{
     DesktopProbeExpectation, ExtensionName, OBSERVATION_EVENT_CAPACITY, ObservationActorEvent,
     ObservationActorExit, ObservationActorState, ObservationPollThread, PollThreadEvent,

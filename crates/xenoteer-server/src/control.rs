@@ -10,6 +10,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use serde::Deserialize;
+use thiserror::Error;
 use xenoteer_protocol::{
     CommandEnvelope, CommandId, CommandResult, ControlLeaseId, DesktopGeneration, DesktopId,
     EnvelopeValidationError, EventResyncReason, LeaseAcquireRequest, LeaseReleaseRequest,
@@ -58,32 +59,43 @@ impl ControlRequestContext {
 }
 
 /// Stable control-plane failures that the transport maps to RFC problem details.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum ControlPlaneError {
     /// The typed request failed adapter-level validation.
+    #[error("invalid request")]
     InvalidRequest,
     /// The authenticated principal cannot act on this resource.
+    #[error("permission denied")]
     PermissionDenied,
     /// The requested resource does not exist or may not be disclosed.
+    #[error("resource not found")]
     NotFound,
     /// The request references a previous desktop lifetime.
+    #[error("stale reference")]
     StaleReference {
         /// Current generation, when one is available for resynchronization.
         current_generation: Option<DesktopGeneration>,
     },
     /// A command ID is already bound to different canonical content.
+    #[error("command identifier conflict")]
     CommandIdConflict,
     /// The requested lease transition conflicts with current lease state.
+    #[error("controller lease conflict")]
     LeaseConflict,
     /// A bounded queue or quota is currently full.
+    #[error("resource exhausted")]
     ResourceExhausted,
     /// The desktop or required subsystem is not ready.
+    #[error("capability unavailable")]
     CapabilityUnavailable,
     /// The target does not support the requested operation.
+    #[error("operation unsupported by target")]
     UnsupportedByTarget,
     /// An atomic command stage cannot be cancelled safely.
+    #[error("cancellation conflicts with an atomic effect")]
     CancellationConflict,
     /// A private invariant failed; details must remain server-side.
+    #[error("internal control-plane failure")]
     Internal,
 }
 
@@ -1452,6 +1464,7 @@ mod tests {
             Grant::ApplicationTerminate,
             Grant::WindowControl,
             Grant::ClipboardWrite,
+            Grant::AccessibilityWrite,
         ] {
             let desktop_id = DesktopId::new();
             let generation = DesktopGeneration::new();
@@ -1476,6 +1489,7 @@ mod tests {
             Grant::ArtifactRead,
             Grant::ArtifactDelete,
             Grant::ViewerRead,
+            Grant::AccessibilityRead,
         ] {
             let desktop_id = DesktopId::new();
             let generation = DesktopGeneration::new();

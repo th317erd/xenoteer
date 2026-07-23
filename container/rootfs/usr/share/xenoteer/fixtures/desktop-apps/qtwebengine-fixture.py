@@ -49,7 +49,7 @@ def main() -> int:
             "title": "Xenoteer QtWebEngine Browser Fixture",
             "browser": "qtwebengine",
             "marker": "phase2-rendered",
-            "browserMarker": "QtWebEngine fixture marker",
+            "browserMarker": "QtWebEngine fixture marker content",
             "status": "ready",
         }
         if value != expected:

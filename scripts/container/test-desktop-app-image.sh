@@ -631,7 +631,7 @@ run_application_matrix() {
   launch_detached "$name" /run/user/1000/chromium.log "$fixtures/launch-chromium-fixture"
   wait_window "$name" 'Xenoteer Chromium Browser Fixture'
   atspi_names "$name" 'Xenoteer Chromium Browser Fixture' 'Chromium fixture marker' \
-    'Stable button' 'Stable entry' 'Protected entry' 'Editable content' \
+    'Browser Stable Button' 'Stable entry' 'Protected entry' 'Editable content' \
     'Virtual tree' 'Stable iframe' 'Deterministic canvas'
   start_shm_pressure "$name"
   assert_chromium_sandbox "$name"
@@ -645,7 +645,7 @@ run_application_matrix() {
   launch_detached "$name" /run/user/1000/firefox.log "$fixtures/launch-firefox-fixture"
   wait_window "$name" 'Xenoteer Firefox Browser Fixture'
   atspi_names "$name" 'Xenoteer Firefox Browser Fixture' 'Firefox fixture marker' \
-    'Stable button' 'Stable entry' 'Protected entry' 'Editable content' \
+    'Browser Stable Button' 'Stable entry' 'Protected entry' 'Editable content' \
     'Virtual tree' 'Stable iframe' 'Deterministic canvas'
   start_shm_pressure "$name"
   audit_browser_processes "$name" firefox "$mode"
@@ -658,7 +658,7 @@ run_application_matrix() {
   launch_detached "$name" /run/user/1000/qtwebengine.log "$fixtures/launch-qtwebengine-fixture"
   wait_window "$name" 'Xenoteer QtWebEngine Browser Fixture'
   atspi_names "$name" 'Xenoteer QtWebEngine Main Window' 'QtWebEngine fixture marker' \
-    'Stable button' 'Stable entry' 'Protected entry' 'Editable content' \
+    'Browser Stable Button' 'Stable entry' 'Protected entry' 'Editable content' \
     'Virtual tree' 'Stable iframe' 'Deterministic canvas'
   start_shm_pressure "$name"
   audit_application_caps "$name" "$fixtures/qtwebengine-fixture.py" "$mode"
@@ -672,7 +672,7 @@ run_application_matrix() {
   launch_detached "$name" /run/user/1000/electron.log "$fixtures/launch-electron-fixture"
   wait_window "$name" 'Xenoteer Electron Browser Fixture'
   atspi_names "$name" 'Xenoteer Electron Browser Fixture' 'Electron fixture marker' \
-    'Stable button' 'Stable entry' 'Protected entry' 'Editable content' \
+    'Browser Stable Button' 'Stable entry' 'Protected entry' 'Editable content' \
     'Virtual tree' 'Stable iframe' 'Deterministic canvas'
   start_shm_pressure "$name"
   assert_electron_sandbox "$name"

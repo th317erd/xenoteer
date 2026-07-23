@@ -2,7 +2,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::RwLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 use xenoteer_core::input::{
@@ -32,6 +32,8 @@ use super::{
     PointerEndpoint, PointerMoveRelativeRequest, PointerMoveRequest, WindowPointerBoundsPolicy,
     WindowPointerClickRequest,
 };
+
+const XTEST_RELEASE_SETTLE_DELAY: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, Copy)]
 enum StateEffect {
@@ -778,7 +780,7 @@ impl<B: InputBackend> InputEngine<B> {
         &mut self,
         context: ActionContext,
         request: WindowPointerClickRequest,
-        precondition: Option<InputPrecondition>,
+        mut precondition: Option<InputPrecondition>,
         cancellation: &CancellationToken,
     ) -> Result<InputOutcome, InputFailure> {
         if cancellation.is_cancelled() {
@@ -827,6 +829,15 @@ impl<B: InputBackend> InputEngine<B> {
             xenoteer_core::input::DEFAULT_DOUBLE_CLICK_THRESHOLD_MS,
         )
         .map_err(|_| self.failure_before(context, InputFailureKind::StateRejected, Some(target)))?;
+        if let Some(precondition) = precondition.as_mut() {
+            precondition.evaluate().map_err(|failure| {
+                self.failure_before(
+                    context,
+                    input_precondition_failure_kind(failure),
+                    Some(target),
+                )
+            })?;
+        }
         self.execute_prepared_action(
             context,
             InputAction::Click(action),
@@ -898,8 +909,15 @@ impl<B: InputBackend> InputEngine<B> {
                 }
                 _ => InputFailureKind::StateRejected,
             })?;
-        xenoteer_core::domain::RootPoint::try_from_protocol(resolved.root)
-            .map_err(|_| InputFailureKind::StateRejected)
+        let resolved = xenoteer_core::domain::RootPoint::try_from_protocol(resolved.root)
+            .map_err(|_| InputFailureKind::StateRejected)?;
+        if request
+            .expected_root_target()
+            .is_some_and(|expected| expected != resolved)
+        {
+            return Err(InputFailureKind::PostconditionFailed);
+        }
+        Ok(resolved)
     }
 
     fn resolve_pointer_endpoint(
@@ -2813,6 +2831,10 @@ impl<B: InputBackend> InputEngine<B> {
                     }
                     if let Some(staged) = window_click.as_deref_mut() {
                         self.revalidate_window_click(staged, &mut progress)?;
+                        if let Some(stopped) = boundary_stop(cancellation, deadline) {
+                            progress.stopped = Some(stopped);
+                            return Ok(progress);
+                        }
                     }
                     let press_delay = if window_click.is_some() {
                         0
@@ -2829,12 +2851,11 @@ impl<B: InputBackend> InputEngine<B> {
                     progress.events_emitted += batch.sent;
                     progress.observed_pointer = Some(batch.observation.pointer);
                     progress.observed_buttons = Some(batch.observation.logical_buttons_1_to_5);
-                    if !logical_button_released(
+                    self.confirm_delayed_button_release(
                         action.logical_button(),
-                        batch.observation.logical_buttons_1_to_5,
-                    ) {
-                        return Err(self.fail_observed_batch(&progress));
-                    }
+                        action.press_duration_ms(),
+                        &mut progress,
+                    )?;
                     self.confirm_observed_batch(&progress)?;
                     if action
                         .movement()
@@ -2921,12 +2942,11 @@ impl<B: InputBackend> InputEngine<B> {
                     .run_batch(&release, true, false)
                     .map_err(|error| absorb_batch_failure(&mut progress, &error))?;
                 absorb_batch_success(&mut progress, &batch);
-                if !logical_button_released(
+                self.confirm_delayed_button_release(
                     action.logical_button(),
-                    batch.observation.logical_buttons_1_to_5,
-                ) {
-                    return Err(self.fail_observed_batch(&progress));
-                }
+                    action.release_dwell_ms(),
+                    &mut progress,
+                )?;
                 self.confirm_observed_batch(&progress)?;
                 if traversed_all_segments && batch.observation.pointer != action.movement().end() {
                     return Err(progress.error(InputFailureKind::PostconditionFailed));
@@ -3035,6 +3055,49 @@ impl<B: InputBackend> InputEngine<B> {
         if dwell_ms > 0 {
             self.backend
                 .wait_for_input_delay(std::time::Duration::from_millis(u64::from(dwell_ms)));
+        }
+    }
+
+    fn confirm_delayed_button_release(
+        &mut self,
+        logical_button: LogicalButton,
+        release_delay_ms: u16,
+        progress: &mut ActionProgress,
+    ) -> Result<(), ActionError> {
+        if progress
+            .observed_buttons
+            .is_some_and(|buttons| logical_button_released(logical_button, buttons))
+        {
+            return Ok(());
+        }
+        // XTEST may acknowledge a delayed FakeInput release before the event's
+        // timer fires. Never replay the effect: wait within the already
+        // validated delay bound (plus a small zero-delay scheduling floor),
+        // then perform one fresh state readback.
+        let settle_delay =
+            Duration::from_millis(u64::from(release_delay_ms)).max(XTEST_RELEASE_SETTLE_DELAY);
+        self.backend.wait_for_input_delay(settle_delay);
+        let observation = self.backend.observe_pointer().map_err(|fault| {
+            let kind = if fault.kind == BackendFaultKind::Connection {
+                self.apply_backend_fault(&fault);
+                InputFailureKind::BackendUnavailable
+            } else {
+                let _ignored = self
+                    .state
+                    .transition_health(HealthEvent::RequireReset(ResetReason::BarrierFailed));
+                InputFailureKind::BarrierFailed
+            };
+            progress.error(kind)
+        })?;
+        self.last_pointer = Some(observation.pointer);
+        self.sent_press_ledger
+            .reconcile_buttons(&self.button_mapping, observation.logical_buttons_1_to_5);
+        progress.observed_pointer = Some(observation.pointer);
+        progress.observed_buttons = Some(observation.logical_buttons_1_to_5);
+        if logical_button_released(logical_button, observation.logical_buttons_1_to_5) {
+            Ok(())
+        } else {
+            Err(self.fail_observed_batch(progress))
         }
     }
 

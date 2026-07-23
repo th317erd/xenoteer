@@ -11,7 +11,9 @@ use serde::Deserialize;
 use thiserror::Error;
 use toml::{Table, Value};
 use xenoteer_protocol::{
-    MAX_VIEWER_TICKET_TTL_SECONDS, MAX_WINDOW_PAGE_LIMIT, MAX_XTEST_DELAY_MS, ViewerOrigin,
+    ACCESSIBILITY_CURSOR_TTL_MS, MAX_ACCESSIBILITY_PAGE_LIMIT, MAX_ACCESSIBILITY_QUERY_TIMEOUT_MS,
+    MAX_ACCESSIBILITY_QUERY_VISITED_NODES, MAX_VIEWER_TICKET_TTL_SECONDS, MAX_WINDOW_PAGE_LIMIT,
+    MAX_XTEST_DELAY_MS, ViewerOrigin,
 };
 
 /// Environment-variable prefix. Nested fields use a double underscore.
@@ -38,6 +40,20 @@ pub const MAX_ARTIFACT_UPLOAD_IDLE_TIMEOUT_MS: u64 = 60_000;
 pub const MAX_OBSERVATION_QUEUE_CAPACITY: usize = 4_096;
 /// Hard ceiling for opaque cursor/reference claims retained in memory.
 pub const MAX_OBSERVATION_TOKEN_CAPACITY: usize = 1_048_576;
+/// Hard ceiling for accessibility actor request and waiter lanes.
+pub const MAX_ACCESSIBILITY_QUEUE_CAPACITY: usize = 4_096;
+/// Hard ceiling for normalized accessibility events waiting for the model owner.
+pub const MAX_ACCESSIBILITY_EVENT_CAPACITY: usize = 65_536;
+/// Hard ceiling for normalized accessible objects retained per desktop.
+pub const MAX_ACCESSIBILITY_CACHED_NODES: usize = 100_000;
+/// Hard ceiling for destroyed accessible identities retained against retargeting.
+pub const MAX_ACCESSIBILITY_TOMBSTONES: usize = 1_000_000;
+/// Hard ceiling for opaque semantic cursor claims retained in memory.
+pub const MAX_ACCESSIBILITY_TOKEN_CAPACITY: usize = 1_048_576;
+/// Hard ceiling for accessible objects visited by one selector evaluation.
+pub const MAX_ACCESSIBILITY_QUERY_NODES: usize = MAX_ACCESSIBILITY_QUERY_VISITED_NODES as usize;
+/// Hard ceiling for one public semantic snapshot's encoded size.
+pub const MAX_ACCESSIBILITY_SNAPSHOT_BYTES: usize = 16 * 1_024 * 1_024;
 /// Hard ceiling for simultaneous unexpired one-time viewer tickets.
 pub const MAX_VIEWER_TICKET_CAPACITY: usize = 16_384;
 /// Hard ceiling for viewer backend connection establishment.
@@ -52,8 +68,8 @@ pub const MAX_VIEWER_SESSION_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1_000;
 pub const MAX_VIEWER_FRAME_BYTES: usize = 8 * 1_024 * 1_024;
 /// Hard ceiling for simultaneous viewer sessions.
 pub const MAX_VIEWER_SESSIONS: usize = 64;
-/// Closed release-four authorization grant vocabulary.
-pub const AUTHORIZATION_GRANTS: [&str; 12] = [
+/// Closed release-five authorization grant vocabulary.
+pub const AUTHORIZATION_GRANTS: [&str; 14] = [
     "desktop:status",
     "desktop:observe",
     "input:control",
@@ -66,6 +82,8 @@ pub const AUTHORIZATION_GRANTS: [&str; 12] = [
     "artifact:read",
     "artifact:delete",
     "viewer:read",
+    "accessibility:read",
+    "accessibility:write",
 ];
 
 /// Complete immutable daemon configuration.
@@ -79,6 +97,7 @@ pub struct Config {
     limits: LimitsConfig,
     artifacts: ArtifactConfig,
     observation: ObservationConfig,
+    accessibility: AccessibilityConfig,
     viewer: ViewerConfig,
     logging: LoggingConfig,
 }
@@ -151,7 +170,7 @@ impl Config {
         {
             issues.push(ValidationIssue::new(
                 "auth.grants",
-                "authorization grants must be unique members of the closed release-four vocabulary",
+                "authorization grants must be unique members of the closed release-five vocabulary",
             ));
         }
         if self.server.request_body_limit_bytes == 0
@@ -456,6 +475,144 @@ impl Config {
                 "window tombstone capacity must be between 1 and 1048576",
             ));
         }
+        if self.accessibility.request_capacity == 0
+            || self.accessibility.request_capacity > MAX_ACCESSIBILITY_QUEUE_CAPACITY
+        {
+            issues.push(ValidationIssue::new(
+                "accessibility.request_capacity",
+                "accessibility request capacity must be between 1 and 4096",
+            ));
+        }
+        if self.accessibility.event_capacity == 0
+            || self.accessibility.event_capacity > MAX_ACCESSIBILITY_EVENT_CAPACITY
+        {
+            issues.push(ValidationIssue::new(
+                "accessibility.event_capacity",
+                "accessibility event capacity must be between 1 and 65536",
+            ));
+        }
+        if self.accessibility.max_waiters == 0
+            || self.accessibility.max_waiters > MAX_ACCESSIBILITY_QUEUE_CAPACITY
+        {
+            issues.push(ValidationIssue::new(
+                "accessibility.max_waiters",
+                "accessibility waiter capacity must be between 1 and 4096",
+            ));
+        }
+        if self.accessibility.token_capacity < usize::from(MAX_ACCESSIBILITY_PAGE_LIMIT)
+            || self.accessibility.token_capacity > MAX_ACCESSIBILITY_TOKEN_CAPACITY
+        {
+            issues.push(ValidationIssue::new(
+                "accessibility.token_capacity",
+                "accessibility token capacity must cover one maximum page and not exceed 1048576",
+            ));
+        }
+        if self.accessibility.max_cached_nodes == 0
+            || self.accessibility.max_cached_nodes > MAX_ACCESSIBILITY_CACHED_NODES
+        {
+            issues.push(ValidationIssue::new(
+                "accessibility.max_cached_nodes",
+                "accessibility cache capacity must be between 1 and 100000 nodes",
+            ));
+        }
+        if self.accessibility.max_tombstones == 0
+            || self.accessibility.max_tombstones > MAX_ACCESSIBILITY_TOMBSTONES
+        {
+            issues.push(ValidationIssue::new(
+                "accessibility.max_tombstones",
+                "accessibility tombstone capacity must be between 1 and 1000000",
+            ));
+        }
+        if self.accessibility.max_nodes_per_query == 0
+            || self.accessibility.max_nodes_per_query > MAX_ACCESSIBILITY_QUERY_NODES
+        {
+            issues.push(ValidationIssue::new(
+                "accessibility.max_nodes_per_query",
+                "accessibility query budget must be between 1 and 25000 nodes",
+            ));
+        }
+        if self.accessibility.max_selector_depth == 0 || self.accessibility.max_selector_depth > 64
+        {
+            issues.push(ValidationIssue::new(
+                "accessibility.max_selector_depth",
+                "accessibility selector depth must be between 1 and 64",
+            ));
+        }
+        if self.accessibility.max_query_matches == 0 || self.accessibility.max_query_matches > 1_000
+        {
+            issues.push(ValidationIssue::new(
+                "accessibility.max_query_matches",
+                "accessibility query result capacity must be between 1 and 1000",
+            ));
+        }
+        if self.accessibility.max_snapshot_nodes == 0
+            || self.accessibility.max_snapshot_nodes > 10_000
+            || self.accessibility.max_snapshot_nodes > self.accessibility.max_nodes_per_query
+        {
+            issues.push(ValidationIssue::new(
+                "accessibility.max_snapshot_nodes",
+                "accessibility snapshot nodes must be between 1 and 10000 and fit the query budget",
+            ));
+        }
+        if self.accessibility.max_snapshot_bytes == 0
+            || self.accessibility.max_snapshot_bytes > MAX_ACCESSIBILITY_SNAPSHOT_BYTES
+        {
+            issues.push(ValidationIssue::new(
+                "accessibility.max_snapshot_bytes",
+                "accessibility snapshot bytes must be between 1 and 16777216",
+            ));
+        }
+        for (path, value) in [
+            (
+                "accessibility.proxy_timeout_ms",
+                self.accessibility.proxy_timeout_ms,
+            ),
+            (
+                "accessibility.reconnect_initial_backoff_ms",
+                self.accessibility.reconnect_initial_backoff_ms,
+            ),
+            (
+                "accessibility.reconnect_max_backoff_ms",
+                self.accessibility.reconnect_max_backoff_ms,
+            ),
+        ] {
+            if value == 0 || value > 60_000 {
+                issues.push(ValidationIssue::new(
+                    path,
+                    "accessibility duration must be non-zero and not exceed 60000 ms",
+                ));
+            }
+        }
+        if self.accessibility.query_timeout_ms == 0
+            || self.accessibility.query_timeout_ms > u64::from(MAX_ACCESSIBILITY_QUERY_TIMEOUT_MS)
+        {
+            issues.push(ValidationIssue::new(
+                "accessibility.query_timeout_ms",
+                "accessibility query timeout must be between 1 and 10000 ms",
+            ));
+        }
+        if self.accessibility.cursor_ttl_ms == 0
+            || self.accessibility.cursor_ttl_ms > u64::from(ACCESSIBILITY_CURSOR_TTL_MS)
+        {
+            issues.push(ValidationIssue::new(
+                "accessibility.cursor_ttl_ms",
+                "accessibility cursor lifetime must be non-zero and not exceed the protocol maximum",
+            ));
+        }
+        if self.accessibility.query_timeout_ms < self.accessibility.proxy_timeout_ms {
+            issues.push(ValidationIssue::new(
+                "accessibility.query_timeout_ms",
+                "accessibility query timeout must cover one proxy timeout",
+            ));
+        }
+        if self.accessibility.reconnect_max_backoff_ms
+            < self.accessibility.reconnect_initial_backoff_ms
+        {
+            issues.push(ValidationIssue::new(
+                "accessibility.reconnect_max_backoff_ms",
+                "accessibility reconnect maximum must cover the initial backoff",
+            ));
+        }
         if !self.viewer.view_only {
             issues.push(ValidationIssue::new(
                 "viewer.view_only",
@@ -625,6 +782,12 @@ impl Config {
     #[must_use]
     pub const fn observation(&self) -> &ObservationConfig {
         &self.observation
+    }
+
+    /// Returns the independently degrading accessibility actor/cache settings.
+    #[must_use]
+    pub const fn accessibility(&self) -> &AccessibilityConfig {
+        &self.accessibility
     }
 
     /// Returns viewer configuration.
@@ -1093,6 +1256,157 @@ impl Default for ObservationConfig {
             max_live_windows: 4_096,
             max_tombstones: 8_192,
             tombstone_ttl_ms: 15 * 60 * 1_000,
+        }
+    }
+}
+
+/// Bounded AT-SPI actor, cache, query, and reconnect settings.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AccessibilityConfig {
+    enabled: bool,
+    request_capacity: usize,
+    event_capacity: usize,
+    max_waiters: usize,
+    token_capacity: usize,
+    cursor_ttl_ms: u64,
+    max_cached_nodes: usize,
+    max_tombstones: usize,
+    max_nodes_per_query: usize,
+    max_selector_depth: usize,
+    max_query_matches: usize,
+    max_snapshot_nodes: usize,
+    max_snapshot_bytes: usize,
+    proxy_timeout_ms: u64,
+    query_timeout_ms: u64,
+    reconnect_initial_backoff_ms: u64,
+    reconnect_max_backoff_ms: u64,
+}
+
+impl AccessibilityConfig {
+    /// Returns whether semantic automation should attempt to connect.
+    #[must_use]
+    pub const fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Returns the bounded actor request capacity.
+    #[must_use]
+    pub const fn request_capacity(&self) -> usize {
+        self.request_capacity
+    }
+
+    /// Returns the bounded normalized event capacity.
+    #[must_use]
+    pub const fn event_capacity(&self) -> usize {
+        self.event_capacity
+    }
+
+    /// Returns the maximum simultaneous semantic waits.
+    #[must_use]
+    pub const fn max_waiters(&self) -> usize {
+        self.max_waiters
+    }
+
+    /// Returns the aggregate opaque page-cursor capacity.
+    #[must_use]
+    pub const fn token_capacity(&self) -> usize {
+        self.token_capacity
+    }
+
+    /// Returns semantic page-cursor lifetime in milliseconds.
+    #[must_use]
+    pub const fn cursor_ttl_ms(&self) -> u64 {
+        self.cursor_ttl_ms
+    }
+
+    /// Returns the maximum normalized nodes retained per desktop.
+    #[must_use]
+    pub const fn max_cached_nodes(&self) -> usize {
+        self.max_cached_nodes
+    }
+
+    /// Returns the maximum destroyed identities retained against retargeting.
+    #[must_use]
+    pub const fn max_tombstones(&self) -> usize {
+        self.max_tombstones
+    }
+
+    /// Returns the per-query traversal budget.
+    #[must_use]
+    pub const fn max_nodes_per_query(&self) -> usize {
+        self.max_nodes_per_query
+    }
+
+    /// Returns the maximum selector nesting/traversal depth.
+    #[must_use]
+    pub const fn max_selector_depth(&self) -> usize {
+        self.max_selector_depth
+    }
+
+    /// Returns the maximum number of public query matches.
+    #[must_use]
+    pub const fn max_query_matches(&self) -> usize {
+        self.max_query_matches
+    }
+
+    /// Returns the maximum nodes admitted into one semantic snapshot.
+    #[must_use]
+    pub const fn max_snapshot_nodes(&self) -> usize {
+        self.max_snapshot_nodes
+    }
+
+    /// Returns the maximum encoded semantic snapshot bytes.
+    #[must_use]
+    pub const fn max_snapshot_bytes(&self) -> usize {
+        self.max_snapshot_bytes
+    }
+
+    /// Returns the deadline for one AT-SPI proxy operation.
+    #[must_use]
+    pub const fn proxy_timeout_ms(&self) -> u64 {
+        self.proxy_timeout_ms
+    }
+
+    /// Returns the default whole-query deadline.
+    #[must_use]
+    pub const fn query_timeout_ms(&self) -> u64 {
+        self.query_timeout_ms
+    }
+
+    /// Returns the first reconnect backoff.
+    #[must_use]
+    pub const fn reconnect_initial_backoff_ms(&self) -> u64 {
+        self.reconnect_initial_backoff_ms
+    }
+
+    /// Returns the capped reconnect backoff.
+    #[must_use]
+    pub const fn reconnect_max_backoff_ms(&self) -> u64 {
+        self.reconnect_max_backoff_ms
+    }
+}
+
+impl Default for AccessibilityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            request_capacity: 128,
+            event_capacity: 4_096,
+            max_waiters: 128,
+            token_capacity: 65_536,
+            cursor_ttl_ms: u64::from(ACCESSIBILITY_CURSOR_TTL_MS),
+            max_cached_nodes: 100_000,
+            max_tombstones: 100_000,
+            max_nodes_per_query: 25_000,
+            max_selector_depth: 64,
+            max_query_matches: 1_000,
+            max_snapshot_nodes: 10_000,
+            max_snapshot_bytes: 16 * 1_024 * 1_024,
+            proxy_timeout_ms: 2_000,
+            query_timeout_ms: 10_000,
+            reconnect_initial_backoff_ms: 100,
+            reconnect_max_backoff_ms: 5_000,
         }
     }
 }
@@ -1794,6 +2108,23 @@ mod tests {
         assert_eq!(config.artifacts().upload_idle_timeout_ms(), 10_000);
         assert_eq!(config.observation().max_live_windows(), 4_096);
         assert_eq!(config.observation().token_capacity(), 8_192);
+        assert!(config.accessibility().enabled());
+        assert_eq!(config.accessibility().request_capacity(), 128);
+        assert_eq!(config.accessibility().event_capacity(), 4_096);
+        assert_eq!(config.accessibility().max_waiters(), 128);
+        assert_eq!(config.accessibility().token_capacity(), 65_536);
+        assert_eq!(config.accessibility().cursor_ttl_ms(), 30_000);
+        assert_eq!(config.accessibility().max_cached_nodes(), 100_000);
+        assert_eq!(config.accessibility().max_tombstones(), 100_000);
+        assert_eq!(config.accessibility().max_nodes_per_query(), 25_000);
+        assert_eq!(config.accessibility().max_selector_depth(), 64);
+        assert_eq!(config.accessibility().max_query_matches(), 1_000);
+        assert_eq!(config.accessibility().max_snapshot_nodes(), 10_000);
+        assert_eq!(config.accessibility().max_snapshot_bytes(), 16_777_216);
+        assert_eq!(config.accessibility().proxy_timeout_ms(), 2_000);
+        assert_eq!(config.accessibility().query_timeout_ms(), 10_000);
+        assert_eq!(config.accessibility().reconnect_initial_backoff_ms(), 100);
+        assert_eq!(config.accessibility().reconnect_max_backoff_ms(), 5_000);
         assert!(!config.viewer().enabled());
         assert!(config.viewer().allowed_origins().is_empty());
         assert_eq!(
@@ -1850,7 +2181,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_and_observation_config_fail_closed_at_boundaries()
+    fn artifact_observation_and_accessibility_config_fail_closed_at_boundaries()
     -> Result<(), Box<dyn std::error::Error>> {
         for (document, expected_path) in [
             (
@@ -1889,12 +2220,74 @@ mod tests {
                 "[observation]\nmax_live_windows = 4097",
                 "observation.max_live_windows",
             ),
+            (
+                "[accessibility]\nrequest_capacity = 0",
+                "accessibility.request_capacity",
+            ),
+            (
+                "[accessibility]\nevent_capacity = 65537",
+                "accessibility.event_capacity",
+            ),
+            (
+                "[accessibility]\ntoken_capacity = 999",
+                "accessibility.token_capacity",
+            ),
+            (
+                "[accessibility]\ncursor_ttl_ms = 0",
+                "accessibility.cursor_ttl_ms",
+            ),
+            (
+                "[accessibility]\ncursor_ttl_ms = 30001",
+                "accessibility.cursor_ttl_ms",
+            ),
+            (
+                "[accessibility]\nmax_cached_nodes = 100001",
+                "accessibility.max_cached_nodes",
+            ),
+            (
+                "[accessibility]\nmax_nodes_per_query = 0",
+                "accessibility.max_nodes_per_query",
+            ),
+            (
+                "[accessibility]\nmax_nodes_per_query = 25001",
+                "accessibility.max_nodes_per_query",
+            ),
+            (
+                "[accessibility]\nmax_selector_depth = 65",
+                "accessibility.max_selector_depth",
+            ),
+            (
+                "[accessibility]\nmax_snapshot_nodes = 10001",
+                "accessibility.max_snapshot_nodes",
+            ),
+            (
+                "[accessibility]\nmax_snapshot_bytes = 16777217",
+                "accessibility.max_snapshot_bytes",
+            ),
+            (
+                "[accessibility]\nproxy_timeout_ms = 2001\nquery_timeout_ms = 2000",
+                "accessibility.query_timeout_ms",
+            ),
+            (
+                "[accessibility]\nquery_timeout_ms = 10001",
+                "accessibility.query_timeout_ms",
+            ),
+            (
+                "[accessibility]\nreconnect_initial_backoff_ms = 101\nreconnect_max_backoff_ms = 100",
+                "accessibility.reconnect_max_backoff_ms",
+            ),
         ] {
             assert_validation_path(document, expected_path)?;
         }
 
         let unknown = Config::load(
             Some("[artifacts]\nsecret_backdoor = true"),
+            std::iter::empty::<(&str, &str)>(),
+            &ConfigOverrides::default(),
+        );
+        assert!(matches!(unknown, Err(ConfigLoadError::Decode(_))));
+        let unknown = Config::load(
+            Some("[accessibility]\nsecret_backdoor = true"),
             std::iter::empty::<(&str, &str)>(),
             &ConfigOverrides::default(),
         );

@@ -2,11 +2,14 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::{
-    ArtifactRef, CapabilityReport, ClientHello, ClipboardReadRequest, ClipboardReadResult,
-    ClipboardWriteSource, CommandEnvelope, CommandResult, EventTopic, LeaseAcquireRequest,
+    AccessibilityEvent, ApplicationRef, ArtifactRef, CapabilityReport, ClientHello,
+    ClipboardReadRequest, ClipboardReadResult, ClipboardWriteSource, CommandEnvelope,
+    CommandResult, ElementListPage, ElementListRequest, ElementQueryPage, ElementQueryRequest,
+    ElementRef, ElementResolveRequest, ElementResolveResult, ElementSnapshotRequest,
+    ElementSnapshotResult, ElementWaitRequest, ElementWaitResult, EventTopic, LeaseAcquireRequest,
     LeaseReleaseRequest, LeaseRenewRequest, LeaseStateView, OneTimeViewerTicket, Problem,
     ProcessExitedEvent, ProcessRef, ProcessTerminateCommand, ProcessView, ScreenshotRequest,
-    ScreenshotResult, TextSource, ViewerSessionEvidence, ViewerTicketRequest,
+    ScreenshotResult, TextInsertCommand, TextSource, ViewerSessionEvidence, ViewerTicketRequest,
     WebSocketClientMessage, WebSocketServerMessage, WindowGeometryPredicate, WindowListPage,
     WindowListRequest, WindowManagerCapabilities, WindowMoveResizeCommand, WindowQueryPage,
     WindowQueryRequest, WindowResolveRequest, WindowResolveResult, WindowSnapshotRequest,
@@ -198,6 +201,116 @@ fn window_entry() -> Value {
     })
 }
 
+fn application_reference() -> Value {
+    json!({
+        "desktop_id": desktop(),
+        "desktop_generation": generation(),
+        "atspi_generation": 1,
+        "unique_bus_name": ":1.42",
+        "root_object_path": "/org/a11y/atspi/accessible/root",
+        "app_instance_generation": 1,
+        "identity_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    })
+}
+
+fn element_reference() -> Value {
+    json!({
+        "desktop_id": desktop(),
+        "desktop_generation": generation(),
+        "atspi_generation": 1,
+        "application": application_reference(),
+        "object_path": "/org/a11y/atspi/accessible/42",
+        "object_identity_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "cache_sequence": 7
+    })
+}
+
+fn element_snapshot() -> Value {
+    json!({
+        "ref": element_reference(),
+        "parent": null,
+        "index_in_parent": 0,
+        "child_count": 0,
+        "role": { "role": "button", "raw_name": "push button", "raw_numeric": 42 },
+        "name": "Save",
+        "description": null,
+        "accessible_id": "save-button",
+        "locale": "en-US",
+        "states": ["enabled", "sensitive", "visible", "showing"],
+        "interfaces": ["accessible", "action", "component"],
+        "actions": [{ "name": "click", "description": "Activate", "key_binding": null }],
+        "value": null,
+        "text": null,
+        "component": {
+            "coordinate_space": "root_physical",
+            "extents": { "x": 1, "y": 2, "width": 100, "height": 20 },
+            "layer": "widget",
+            "z_order": 0,
+            "alpha": 255
+        },
+        "attributes": [],
+        "relations": [],
+        "window_correlation": {
+            "window": null,
+            "confidence": "none",
+            "evidence": [],
+            "conflicting_evidence": false
+        },
+        "revision": 3,
+        "completeness": "complete",
+        "truncated": false,
+        "warnings": []
+    })
+}
+
+fn element_page() -> Value {
+    json!({
+        "desktop_id": desktop(),
+        "desktop_generation": generation(),
+        "atspi_generation": 1,
+        "snapshot_revision": 3,
+        "order": "preorder",
+        "elements": [{ "snapshot": element_snapshot() }],
+        "next_cursor": null,
+        "visited_nodes": 1,
+        "truncated": false,
+        "warnings": []
+    })
+}
+
+fn element_selector() -> Value {
+    json!({
+        "scope": { "type": "desktop" },
+        "predicates": [{
+            "type": "role",
+            "roles": ["button"]
+        }],
+        "order": "preorder",
+        "result_index": null
+    })
+}
+
+fn element_expansion() -> Value {
+    json!({
+        "actions": false,
+        "value": false,
+        "text_metadata": false,
+        "text_content": false,
+        "attributes": false,
+        "relations": false,
+        "component": true
+    })
+}
+
+fn accessibility_limits() -> Value {
+    json!({
+        "max_visited_nodes": 25000,
+        "max_depth": 64,
+        "max_matches": 1000,
+        "timeout_ms": 10000
+    })
+}
+
 fn selector() -> Value {
     json!({
         "type": "predicate",
@@ -244,6 +357,80 @@ fn succeeded_process_result() -> Value {
         "outcome": {
             "type": "application_launched",
             "process": process_reference()
+        },
+        "error": null,
+        "warnings": []
+    })
+}
+
+fn succeeded_element_action_result() -> Value {
+    json!({
+        "command_id": "018f1e74-7a6b-7cc0-8000-000000000006",
+        "lifecycle": "succeeded",
+        "effect_stage": "semantic_state_changed",
+        "accepted_at": "2026-07-21T00:00:00Z",
+        "started_at": "2026-07-21T00:00:01Z",
+        "finished_at": "2026-07-21T00:00:02Z",
+        "outcome": {
+            "type": "element_action",
+            "result": {
+                "operation": "invoke",
+                "element": element_reference(),
+                "revision_before": 3,
+                "revision_after": 4,
+                "snapshot_before": null,
+                "snapshot_after": null,
+                "evidence": {
+                    "resolved_action_name": "click",
+                    "resolved_action_index": 0,
+                    "backend_accepted": true,
+                    "observed_state": null,
+                    "observed_value": null,
+                    "observed_selection_count": null,
+                    "observed_text_length": null,
+                    "protected_text_verified_by_length_only": false,
+                    "extents_before": null,
+                    "extents_after": null,
+                    "postcondition_satisfied": null,
+                    "poll_fallback_used": false
+                }
+            }
+        },
+        "error": null,
+        "warnings": []
+    })
+}
+
+fn succeeded_semantic_text_result() -> Value {
+    json!({
+        "command_id": "018f1e74-7a6b-7cc0-8000-000000000006",
+        "lifecycle": "succeeded",
+        "effect_stage": "text_inserted",
+        "accepted_at": "2026-07-21T00:00:00Z",
+        "started_at": "2026-07-21T00:00:01Z",
+        "finished_at": "2026-07-21T00:00:02Z",
+        "outcome": {
+            "type": "text_inserted",
+            "evidence": {
+                "selected_strategy": "semantic",
+                "utf8_bytes": 3,
+                "unicode_scalars": 3,
+                "completed_scalars": 3,
+                "clipboard": null,
+                "semantic": {
+                    "element": element_reference(),
+                    "revision_before": 3,
+                    "revision_after": 4,
+                    "backend_accepted": true,
+                    "insertion_offset": 0,
+                    "character_count_before": 0,
+                    "character_count_after": 3,
+                    "caret_offset_after": 3,
+                    "selection_count_after": 0,
+                    "verified_length_only": true,
+                    "postcondition_satisfied": true
+                }
+            }
         },
         "error": null,
         "warnings": []
@@ -356,6 +543,58 @@ fn every_public_response_family_tolerates_top_level_additions() {
         "ended_at": null,
         "end_reason": null
     }));
+    assert_accepts_additive_field::<ApplicationRef>(application_reference());
+    assert_accepts_additive_field::<ElementRef>(element_reference());
+    assert_accepts_additive_field::<ElementListPage>(element_page());
+    assert_accepts_additive_field::<ElementQueryPage>(element_page());
+    assert_accepts_additive_field::<ElementSnapshotResult>(json!({
+        "snapshot_revision": 3,
+        "element": { "snapshot": element_snapshot() }
+    }));
+    assert_accepts_additive_field::<ElementResolveResult>(json!({
+        "desktop_id": desktop(),
+        "desktop_generation": generation(),
+        "atspi_generation": 1,
+        "snapshot_revision": 3,
+        "element": { "snapshot": element_snapshot() }
+    }));
+    assert_accepts_additive_field::<ElementWaitResult>(json!({
+        "desktop_id": desktop(),
+        "desktop_generation": generation(),
+        "atspi_generation": 1,
+        "status": "matched",
+        "evaluated_revision": 3,
+        "predicate_satisfied": true,
+        "matched_count": 1,
+        "elements": [{ "snapshot": element_snapshot() }],
+        "poll_fallback_used": false,
+        "truncated": false,
+        "warnings": []
+    }));
+    assert_accepts_additive_field::<AccessibilityEvent>(json!({
+        "desktop_id": desktop(),
+        "desktop_generation": generation(),
+        "atspi_generation": 1,
+        "source": element_reference(),
+        "raw_source": {
+            "bus_name": ":1.42",
+            "object_path": "/org/a11y/atspi/accessible/42"
+        },
+        "kind": "state_changed",
+        "resync_reason": null,
+        "detail": {
+            "property": null,
+            "state": "focused",
+            "enabled": true,
+            "child": null,
+            "text": null,
+            "value": null,
+            "bounds": null
+        },
+        "revision": 4,
+        "cache_sequence": 8,
+        "source_stale": false
+    }));
 }
 
 #[test]
@@ -391,6 +630,24 @@ fn response_families_tolerate_relevant_nested_additions() {
     );
     for pointer in ["/outcome", "/outcome/process"] {
         assert_accepts_nested_addition::<CommandResult>(succeeded_process_result(), pointer);
+    }
+    for pointer in [
+        "/outcome",
+        "/outcome/result",
+        "/outcome/result/element",
+        "/outcome/result/element/application",
+        "/outcome/result/evidence",
+    ] {
+        assert_accepts_nested_addition::<CommandResult>(succeeded_element_action_result(), pointer);
+    }
+    for pointer in [
+        "/outcome",
+        "/outcome/evidence",
+        "/outcome/evidence/semantic",
+        "/outcome/evidence/semantic/element",
+        "/outcome/evidence/semantic/element/application",
+    ] {
+        assert_accepts_nested_addition::<CommandResult>(succeeded_semantic_text_result(), pointer);
     }
     let exited = json!({
         "application": "recorder.x11",
@@ -483,6 +740,47 @@ fn response_families_tolerate_relevant_nested_additions() {
     for pointer in ["/protocol", "/principal", "/desktop", "/limits", "/resume"] {
         assert_accepts_nested_addition::<WebSocketServerMessage>(welcome.clone(), pointer);
     }
+
+    let page = element_page();
+    for pointer in [
+        "/elements/0",
+        "/elements/0/snapshot",
+        "/elements/0/snapshot/ref",
+        "/elements/0/snapshot/ref/application",
+        "/elements/0/snapshot/role",
+        "/elements/0/snapshot/actions/0",
+        "/elements/0/snapshot/component",
+        "/elements/0/snapshot/component/extents",
+        "/elements/0/snapshot/window_correlation",
+    ] {
+        assert_accepts_nested_addition::<ElementListPage>(page.clone(), pointer);
+    }
+
+    let event = json!({
+        "desktop_id": desktop(),
+        "desktop_generation": generation(),
+        "atspi_generation": 1,
+        "source": element_reference(),
+        "raw_source": {
+            "bus_name": ":1.42",
+            "object_path": "/org/a11y/atspi/accessible/42"
+        },
+        "kind": "state_changed",
+        "resync_reason": null,
+        "detail": {
+            "property": null,
+            "state": "focused",
+            "enabled": true,
+            "child": null,
+            "text": null,
+            "value": null,
+            "bounds": null
+        },
+        "revision": 4,
+        "cache_sequence": 8,
+        "source_stale": false
+    });
+    assert_accepts_nested_addition::<AccessibilityEvent>(event, "/raw_source");
 }
 
 #[test]
@@ -675,6 +973,60 @@ fn request_roots_and_malformed_response_values_remain_strict() {
         "desktop_id": desktop(),
         "desktop_generation": generation(),
         "mode": "view_only"
+    }));
+    assert_rejects_additive_field::<ElementListRequest>(json!({
+        "desktop_id": desktop(),
+        "desktop_generation": generation(),
+        "scope": { "type": "desktop" },
+        "order": "preorder",
+        "limit": 100,
+        "cursor": null,
+        "expansion": element_expansion(),
+        "limits": accessibility_limits()
+    }));
+    assert_rejects_additive_field::<ElementQueryRequest>(json!({
+        "desktop_id": desktop(),
+        "desktop_generation": generation(),
+        "selector": element_selector(),
+        "limit": 100,
+        "cursor": null,
+        "expansion": element_expansion(),
+        "limits": accessibility_limits()
+    }));
+    assert_rejects_additive_field::<ElementSnapshotRequest>(json!({
+        "desktop_id": desktop(),
+        "desktop_generation": generation(),
+        "element": element_reference(),
+        "expansion": element_expansion()
+    }));
+    assert_rejects_additive_field::<ElementResolveRequest>(json!({
+        "desktop_id": desktop(),
+        "desktop_generation": generation(),
+        "selector": element_selector(),
+        "expansion": element_expansion(),
+        "limits": accessibility_limits()
+    }));
+    assert_rejects_additive_field::<ElementWaitRequest>(json!({
+        "desktop_id": desktop(),
+        "desktop_generation": generation(),
+        "target": { "type": "reference", "element": element_reference() },
+        "predicate": { "type": "exists" },
+        "after_revision": null,
+        "timeout_ms": 1000,
+        "allow_poll_fallback": true,
+        "expansion": element_expansion(),
+        "limits": accessibility_limits()
+    }));
+    assert_rejects_additive_field::<TextInsertCommand>(json!({
+        "text": { "source": "inline", "text": "secret" },
+        "target": { "target": "window", "window": window_reference() },
+        "strategy": "auto",
+        "clipboard_options": {
+            "preserve_clipboard": false,
+            "paste_observation_timeout_ms": 1000
+        },
+        "semantic_options": null,
+        "auto_policy": null
     }));
 
     let malformed = json!({

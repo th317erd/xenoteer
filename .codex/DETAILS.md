@@ -164,17 +164,17 @@
   without user confirmation, per the implementation workflow.
 - Every phase adds tests and preserves all earlier gates.
 - Record environmental verification gaps as gaps, never as successful gates.
-- Keep Rust builds at a maximum of four jobs and tests at a maximum of four test
+- Keep Rust builds at a maximum of two jobs and tests at a maximum of two test
   threads. Run CPU/I/O-heavy commands under `nice -n 15 ionice -c 3` with an
   explicit timeout so Xenoteer work does not starve other host processes.
 - Parallel lanes must additionally serialize heavy Cargo build/test/Clippy/doc
   commands with `flock /tmp/codex/xenoteer-heavy-build.lock`; otherwise three
-  independent `--jobs 4` checks would still become an accidental 12-job build.
-- Phase 3 is committed locally as `90b0781`; Phase 4 is the active implementation
-  boundary and remains uncommitted until its cross-crate integrations and gates
-  are complete.
+  independent `--jobs 2` checks would still become an accidental six-job build.
+- Phase 3 is committed locally as `90b0781`; the verified Phase 4 boundary is
+  committed locally as `83b044c`. Phase 5 has completed coherent exact-image
+  qualification and closure review and is ready for its local boundary commit.
 
-## Phase 4 active boundaries
+## Phase 4 implemented boundaries
 
 - Window identity/query logic lives in `xenoteer-core`; raw X11 observation
   contains no desktop identity or authorization; authenticated projection is a
@@ -217,13 +217,12 @@
   recursively additive. Window discovery responses carry
   `WindowSnapshotEntry { snapshot, reference_token }` so token-only resource
   routes are actually reachable without client token construction.
-- Phase-4 public reachability is now integrated for window control (including
+- Phase-4 public reachability is integrated for window control (including
   move-to-workspace), clipboard read/write/paste, screenshot capture/artifact
   persistence, process correlation, normalized events, and the view-only
   gateway. Compound atomic input, complete geometry policies, live
-  capabilities, and the fixture matrix are implemented; the remaining Phase 4
-  closure is the final adversarial/gate pass and local boundary commit tracked
-  in TODO.
+  capabilities, and the fixture matrix were included in the verified
+  `83b044c` boundary.
 - Managed window/process correlation must be broker-authenticated and bounded,
   not a trust upgrade applied directly to client-controlled `_NET_WM_PID`.
   Processd can batch-read `/proc/<reported-pid>/stat`, match either the exact
@@ -283,11 +282,17 @@
   Clipboard restoration evidence is honestly `partial_value_copy`: exact
   bounded text is independently verified, but the prior owner identity and
   arbitrary non-text targets cannot be reconstructed.
-- Two consecutive capped live matrices passed GTK3, Qt6, Chromium, Firefox,
-  and QtWebEngine direct/INCR paste, byte-exact value-copy restoration, root
-  plus five window captures, move/resize, and minimize. The cached diagnostic
-  image predates processd; the final Phase 4 gate still requires a coherent
-  current-image rebuild and all static/security/workspace checks.
+- Capped live matrices pass exact GTK3, Qt6, Chromium, and Firefox direct/INCR
+  paste, byte-exact value-copy restoration, root plus five window captures,
+  move/resize, and minimize. QtWebEngine remains mandatory for window, AT-SPI,
+  browser, sandbox, initial-value, and capture coverage, but its exact clipboard
+  insertion is isolated: QtWebEngine 6.8.2 with PyQt 6.9 on X11 duplicates one
+  four-event paste
+  chord whenever forced accessibility or AT-SPI focus activates its
+  accessibility path. Direct libXtst and DevTools probes ruled out daemon
+  replay, X autorepeat, duplicate transfer, and AT-SPI readback. Its HTML input
+  also exposes Text but not EditableText, so a semantic fallback would be a
+  false capability claim. The upstream/toolkit-adapter follow-up remains open.
 - All external desktop-event ingress now treats a lost X11 or process-event
   batch as one shared epoch boundary, not merely a model rebuild request. Odd
   atomic epochs coalesce loss; producers admitted on an even epoch stamp bounded
@@ -337,3 +342,102 @@
   harnesses reproduced that gap at the same poll-flood test; keeping each
   authenticated, isolated Xvfb alive until explicit harness cleanup removes the
   lifecycle race without changing production observation behavior.
+
+## Phase 5 accessibility baseline
+
+- Semantic availability is independent of the required physical desktop.
+  `DesktopSupervisor` owns X11/input (and the optional viewer) only; AT-SPI
+  connection loss must degrade the accessibility capability, increment its own
+  generation, and reconnect without failing global desktop readiness or
+  withdrawing healthy physical input.
+- Accessibility configuration is fail-closed and bounded at every admission
+  surface: actor requests/events/waits, cache/tombstones, selector depth,
+  traversal/match/snapshot nodes, encoded snapshot bytes, per-proxy/whole-query
+  deadlines, and reconnect backoff. The initial cache/query/snapshot ceilings
+  match the reviewed plan: 100,000 / 25,000 / 10,000 nodes and 16 MiB.
+- `accessibility:read` and `accessibility:write` are separate grants. Only the
+  write grant authorizes semantic effects and command cancellation. Protected
+  text still requires operation-specific policy; possessing the read grant
+  does not make secret field contents observable.
+- Phase 5 request schemas expose only value metadata, content-free text
+  metadata, and Component bounds. Accessible text content, action lists,
+  accessible IDs, attributes, relations, and their selectors stay reserved
+  until a bounded on-demand hydration lane exists. Component predicates and
+  geometry waits use only explicitly labeled AT-SPI-screen coordinates and
+  reject incomplete live bounds instead of treating absent evidence as a
+  non-match; root-physical conversion requires an explicit desktop profile.
+- The pinned `atspi-connection` 0.14.0 `remove_match_rule` helper accidentally
+  adds a match rule, and `register_event` installs Registry forwarding before
+  the D-Bus match. The adapter therefore owns five narrow raw signal-only zbus
+  streams (Cache, D-Bus owner, Object, Focus, and Window), uses only
+  reference-counted Registry forwarding helpers, and lets stream teardown
+  perform the real D-Bus `RemoveMatch` operations. The streams are sequence-
+  merged by zbus receive position before classification; comparing independently
+  scheduled streams would create false non-monotonic gap reports.
+- zbus signal queues backpressure the shared socket reader when full. A
+  dedicated drain continuously consumes the ordered merge and uses only
+  nonblocking bounded admission; overflow advances a capacity-independent
+  resync epoch instead of awaiting the semantic cache actor. The configured raw
+  signal capacity is partitioned across the five streams, and the 256 KiB
+  maximum normalized item size keeps the default actor/backend/public queues at
+  a byte-derived capacity of 512 within the 128 MiB runtime cache ceiling.
+- Object metadata events are published only inside an equal generation/revision
+  mirror fence. Covered older events and all events arriving while a rebuild is
+  already pending are suppressed; the first forward coordinate fences and
+  requests one rebuild, so an ordinary GTK state burst cannot amplify into a
+  public resync/reconnect flood.
+- Semantic mutations dispatch exactly once. Focus, value, selection, editable
+  text, and scroll evidence use bounded deadline-aware read-only settling with
+  exponential backoff and last-valid-sample behavior. Text length must converge
+  before caret/selection policy can issue its follow-up mutation; no retry loop
+  is allowed to repeat the original effect.
+- Accessibility page cursors are actor-owned, principal/query/revision bound,
+  and expire within 30 seconds. Application/object references instead carry
+  explicit connection, owner-instance, and object-birth generations; a stale
+  reference is never repaired by rerunning its selector.
+- Window accessibility correlation is committed through the single-owner X11
+  observation model using exact `WindowRef` births. It survives ordinary X11
+  metadata refresh, clears on semantic gaps, emits ordinary window-change
+  revisions, and rejects XID reuse before mutating query-visible state.
+- The live large-tree fixture deliberately materializes 4,096 stable accessible
+  rows so Cache traversal and pagination reach every row. This is not described
+  as virtualization: the standard GTK3 and Qt6 fixtures exercise their native
+  virtualized controls separately because GTK Cache `GetItems` exposes only the
+  currently materialized subset of some virtual widgets.
+- The dedicated depth-budget case builds a valid depth-24 topology and queries
+  `Phase5 Deep Node 023` with `max_depth=8`, producing the public
+  `query_budget_exceeded` result instead of conflating a query budget with an
+  actor-level malformed-topology rejection.
+- The qualification runner covers GTK3 and Qt6 process-restart fencing plus
+  Chromium and Firefox document-reload fencing. An intentional accessibility-
+  bus replacement advances only the AT-SPI generation. Some toolkit bridges
+  retain a dead bus connection for their process lifetime, so the gate first
+  proves that the old reference is rejected, then relaunches a controlled
+  toolkit client and proves a fresh reference on the replacement bus without
+  changing the desktop generation.
+- Event pressure is a bounded 5,000-mutation producer with both a normal client
+  and a deliberately slow subscriber. The proof requires a content-free resync
+  barrier, rejects the pre-loss reference, relaunches the controlled producer
+  when its toolkit bridge retained the old connection, and verifies fresh
+  ingestion while the container remains inside its CPU, memory, PID, and shared
+  memory limits.
+- The live adversarial application supplies a 70,000-byte accessible name and
+  must remain isolated while a healthy GTK sibling stays queryable. Bad-parent
+  and cyclic-topology traversal are bounded pure-model/unit cases; the live
+  fixture's self-relation is not claimed as proof that relation hydration is
+  implemented in Phase 5.
+- The Phase 5 source passed the full workspace all-features/all-targets tests,
+  strict Clippy, Rustdoc, schema/API-documentation, container-static,
+  dependency, audit, license, and native-X11 gates. Final coherent
+  qualification used production image
+  `sha256:68508e98bb1f7a0995e96b4b93499cced7247fa7a99f90652c19abec2a52dafb`
+  and its exact derived desktop-app fixture
+  `sha256:1733ddadd8d2235c42ec518bbc06d2053e6eded9d6f4cebd6999708f9470e934`.
+  Production, desktop matrix, Phase 4 live API, and Phase 5 AT-SPI gates all
+  passed with no daemon override and the two-CPU resource policy. The Phase 5
+  runner covered GTK3/Qt6 restart fencing, Chromium/Firefox reload fencing,
+  private-P2P denial, missed-event polling recovery, semantic/physical effects,
+  stress, reconnect, and flood cases.
+- Performance qualification is intentionally Phase 7 work. No Phase 5 result
+  claims 10,000-node cold-snapshot timing, selector p95, event-lag, stable cache
+  RSS, or a large-browser soak measurement.

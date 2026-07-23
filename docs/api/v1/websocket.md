@@ -48,6 +48,12 @@ limits are:
 }
 ```
 
+Terminal `command.result` messages use the same additive trace contract as HTTP.
+Submitting `trace_policy: "detailed"` retains at most 16 enum-only, content-free
+steps, including honest stopped/failure progress; omitted, `none`, and `normal`
+policies omit `trace`. The trace cannot carry protected text, clipboard payloads,
+tokens, or arbitrary diagnostic strings.
+
 The hello resume cursor is
 `{desktop_id, desktop_generation, event_sequence}`. Omitting it yields
 `not_requested`. A complete retained suffix for the exact current generation
@@ -58,9 +64,11 @@ closes with 1008.
 
 ### Event stream and replay
 
-`events.subscribe` requires `desktop:observe`. `topics` are exact lowercase
-identifiers, not globs; an empty list means every topic authorized for the
-principal. Topics contain at most 128 UTF-8 bytes, use stable lowercase
+`events.subscribe` requires `desktop:observe`. Explicit `accessibility.*` topic
+requests additionally require `accessibility:read`; a catch-all subscription
+filters those topics when the principal lacks that grant. `topics` are exact
+lowercase identifiers, not globs; an empty list means every topic authorized for
+the principal. Topics contain at most 128 UTF-8 bytes, use stable lowercase
 alphanumeric segments separated by `.`, `_`, or `-`, and are unique within the
 request. `since_sequence` is an exclusive lower bound; `null` starts from the
 atomically captured current live edge. A new subscribe replaces the session's
@@ -78,7 +86,13 @@ The implemented topics are:
 
 - `command.lifecycle` for admission and terminal ledger transitions;
 - `action.lifecycle` when executor action starts;
-- `process.exited` after a managed application child has been reaped.
+- `process.exited` after a managed application child has been reaped;
+- `accessibility.element_created` for exact cache births/created objects;
+- `accessibility.element_changed` for normalized state, property, focus, text,
+  value, selection, children, bounds, and visible-data changes;
+- `accessibility.element_removed` for exact cache removals/destroyed objects;
+- `accessibility.resync_required` when the AT-SPI model itself requires an
+  authoritative refresh.
 
 The two command/action payloads have `command_id`, `command_lifecycle`
 (`accepted|running|terminal`), `action_state` (`null|started|completed`),
@@ -97,6 +111,21 @@ termination-requester identity, stdout, and stderr are never placed in the
 public event payload. Use `process.exit` as terminal evidence, while retaining
 the exact generation/PID/start-ticks/launch-ID reference for correlation.
 
+The accessibility topic payload is the generated
+[`AccessibilityEvent`](../../../schemas/v1/accessibility-event.json). It carries
+desktop and AT-SPI generations, actor revision/cache sequence, a resolved
+`ElementRef` when possible, and raw bus/path evidence. If resolution failed,
+`source` is `null`, `source_stale` is true, and clients must not infer a current
+identity from the raw path. A model-level `accessibility.resync_required` event
+is source-free and carries one of `actor_signal`, `generation_changed`,
+`event_gap`, or `event_queue_overflow` in `resync_reason`.
+
+Accessibility text events are content-minimized. They may carry bounded start
+and length evidence; protected text has `redacted: true` and `content: null`.
+Cache-transition events never contain text bodies. The checked-in
+`current-event-accessibility-element-changed.json` example demonstrates the
+protected shape without embedding a secret.
+
 Every delivered event nests `{desktop_id, desktop_generation, sequence, topic,
 payload}`. The topic-specific payload is capped at 256 KiB before envelope and
 transport bounds. Events are principal-scoped in the coordinator before replay.
@@ -106,6 +135,12 @@ When continuity cannot be proven, `events.resync_required` uses one of
 `outbound_backpressure`, plus `dropped_through` and `latest_sequence`. It uses
 reserved output capacity and ends that event subscription; refresh authoritative
 state before subscribing again. The WebSocket itself may remain usable.
+
+Do not confuse the transport message `events.resync_required` with the ordinary
+topic `accessibility.resync_required`. The former means global coordinator-stream
+continuity is lost and terminates the subscription. The latter is a sequenced
+domain event indicating that authoritative AT-SPI model state must be refreshed;
+queue overflow can conservatively escalate to the global transport barrier.
 
 The process broker has its own bounded sequence and retention window. If the
 daemon cannot bridge a broker disconnect or retention gap, it publishes a

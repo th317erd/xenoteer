@@ -1,0 +1,37 @@
+{
+  "protocol_version": {"major": 1, "minor": 0},
+  "request_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0060",
+  "command_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0061",
+  "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
+  "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+  "lease_id": null,
+  "deadline": "2026-07-21T20:00:10Z",
+  "trace_policy": "detailed",
+  "command": {
+    "type": "element_invoke",
+    "element": {
+      "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
+      "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+      "atspi_generation": 4,
+      "application": {
+        "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
+        "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
+        "atspi_generation": 4,
+        "unique_bus_name": ":1.42",
+        "root_object_path": "/org/a11y/atspi/accessible/root",
+        "app_instance_generation": 2,
+        "identity_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "object_path": "/org/a11y/atspi/accessible/save",
+      "object_identity_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "cache_sequence": 78
+    },
+    "action": {"type": "name", "name": "click"},
+    "allow_disabled": false,
+    "postcondition": {
+      "predicate": {"type": "state", "state": "focused", "value": true},
+      "timeout_ms": 2000,
+      "allow_poll_fallback": true
+    }
+  }
+}

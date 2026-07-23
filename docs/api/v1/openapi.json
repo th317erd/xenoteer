@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Xenoteer Control API",
-    "version": "1.0.0-phase4",
-    "description": "Implemented Phase 4 HTTP control, observation, clipboard, capture, artifact, and viewer contract. Typed request and result definitions are generated from xenoteer-protocol and referenced from schemas/v1. Control WebSocket application messages are documented separately in websocket.md.",
+    "version": "1.0.0-phase5",
+    "description": "Implemented Phase 5 HTTP control, window and accessibility observation, semantic automation, clipboard, capture, artifact, and viewer contract. Typed request and result definitions are generated from xenoteer-protocol and referenced from schemas/v1. Control WebSocket application messages are documented separately in websocket.md.",
     "license": {
       "name": "Apache License 2.0",
       "identifier": "Apache-2.0"
@@ -35,11 +35,15 @@
     },
     {
       "name": "Commands",
-      "description": "Deduplicated generation-bound command lifecycle. Window control, clipboard writes, and text insertion are command variants, not standalone HTTP routes."
+      "description": "Deduplicated generation-bound command lifecycle. Window control, clipboard writes, text insertion, semantic actions, and physical element clicks are command variants, not standalone HTTP routes."
     },
     {
       "name": "Windows",
       "description": "Generation-fenced window inventory, selectors, opaque references, and bounded waits."
+    },
+    {
+      "name": "Accessibility",
+      "description": "Bounded AT-SPI element inventory, selectors, exact references, protected snapshots, and race-free waits. Semantic mutations and physical element clicks use the command lifecycle."
     },
     {
       "name": "Clipboard",
@@ -350,7 +354,7 @@
         "operationId": "submitCommand",
         "tags": ["Commands"],
         "summary": "Submit or idempotently retrieve a command",
-        "description": "The optional Idempotency-Key must equal command_id. A disconnect or transport timeout never cancels accepted work.",
+        "description": "The optional Idempotency-Key must equal command_id. A disconnect or transport timeout never cancels accepted work. trace_policy=detailed adds at most 16 enum-only, content-free trace steps to every retained terminal result; omitted, none, and normal policies omit trace.",
         "parameters": [
           {"$ref": "#/components/parameters/IdempotencyKey"}
         ],
@@ -360,7 +364,10 @@
             "application/json": {
               "schema": {"$ref": "../../../schemas/v1/command-envelope.json"},
               "examples": {
-                "smoothPointerMove": {"externalValue": "./examples/command-submit-request.json"}
+                "smoothPointerMove": {"externalValue": "./examples/command-submit-request.json"},
+                "semanticElementInvoke": {"externalValue": "./examples/command-element-invoke-request.json"},
+                "semanticAutoTextInsert": {"externalValue": "./examples/command-text-insert-auto-semantic-request.json"},
+                "physicalElementClick": {"externalValue": "./examples/command-element-physical-click-request.json"}
               }
             }
           }
@@ -390,7 +397,10 @@
               "application/json": {
                 "schema": {"$ref": "../../../schemas/v1/command-result.json"},
                 "examples": {
-                  "succeeded": {"externalValue": "./examples/command-succeeded-response.json"}
+                  "succeeded": {"externalValue": "./examples/command-succeeded-response.json"},
+                  "semanticElementAction": {"externalValue": "./examples/command-element-action-succeeded-response.json"},
+                  "semanticAutoTextInsert": {"externalValue": "./examples/command-text-insert-auto-semantic-succeeded-response.json"},
+                  "physicalElementClick": {"externalValue": "./examples/command-element-physical-click-succeeded-response.json"}
                 }
               }
             }
@@ -429,7 +439,10 @@
                 "schema": {"$ref": "../../../schemas/v1/command-result.json"},
                 "examples": {
                   "running": {"externalValue": "./examples/command-running-response.json"},
-                  "succeeded": {"externalValue": "./examples/command-succeeded-response.json"}
+                  "succeeded": {"externalValue": "./examples/command-succeeded-response.json"},
+                  "semanticElementAction": {"externalValue": "./examples/command-element-action-succeeded-response.json"},
+                  "semanticAutoTextInsert": {"externalValue": "./examples/command-text-insert-auto-semantic-succeeded-response.json"},
+                  "physicalElementClick": {"externalValue": "./examples/command-element-physical-click-succeeded-response.json"}
                 }
               }
             }
@@ -706,6 +719,165 @@
         }
       }
     },
+    "/v1/desktops/{desktop_id}/accessibility/elements/list": {
+      "parameters": [{"$ref": "#/components/parameters/DesktopId"}],
+      "post": {
+        "operationId": "listAccessibilityElements",
+        "tags": ["Accessibility"],
+        "summary": "List one bounded page from an accessibility scope",
+        "description": "Requires accessibility:read. The opaque cursor is bound to the principal, desktop and AT-SPI generations, snapshot revision, scope, order, expansion, and query limits. Responses are private and never expose protected text content.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/element-list-request.json"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Atomic bounded element page. Cache-Control is private, no-store.",
+            "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/element-list-page.json"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "422": {"$ref": "#/components/responses/AccessibilityUnprocessable"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/desktops/{desktop_id}/accessibility/elements/query": {
+      "parameters": [{"$ref": "#/components/parameters/DesktopId"}],
+      "post": {
+        "operationId": "queryAccessibilityElements",
+        "tags": ["Accessibility"],
+        "summary": "Evaluate a bounded deterministic accessibility selector",
+        "description": "Requires accessibility:read. Traversal and matching are fenced to one actor-owned revision. Phase 5 expansions are limited to value metadata, content-free text metadata, and AT-SPI-screen component bounds; protected content remains redacted.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "../../../schemas/v1/element-query-request.json"},
+              "examples": {
+                "protectedTextMetadata": {"externalValue": "./examples/element-query-protected-request.json"}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Atomic bounded selector result. Cache-Control is private, no-store.",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "../../../schemas/v1/element-query-page.json"},
+                "examples": {
+                  "protectedTextRedacted": {"externalValue": "./examples/element-query-protected-response.json"}
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "422": {"$ref": "#/components/responses/AccessibilityUnprocessable"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/desktops/{desktop_id}/accessibility/elements/resolve": {
+      "parameters": [{"$ref": "#/components/parameters/DesktopId"}],
+      "post": {
+        "operationId": "resolveAccessibilityElement",
+        "tags": ["Accessibility"],
+        "summary": "Resolve a selector only when it has exactly one match",
+        "description": "Requires accessibility:read. Ambiguity fails instead of choosing by traversal order, and a stale AT-SPI/application/object identity never retargets.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/element-resolve-request.json"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Exact generation- and identity-fenced element snapshot. Cache-Control is private, no-store.",
+            "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/element-resolve-result.json"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "422": {"$ref": "#/components/responses/AccessibilityUnprocessable"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/desktops/{desktop_id}/accessibility/elements/snapshot": {
+      "parameters": [{"$ref": "#/components/parameters/DesktopId"}],
+      "post": {
+        "operationId": "snapshotAccessibilityElement",
+        "tags": ["Accessibility"],
+        "summary": "Refresh one exact accessibility element reference",
+        "description": "Requires accessibility:read. The full ElementRef is revalidated against desktop, AT-SPI, application-instance, object-identity, and cache-sequence fences. Protected text content, values, and attributes are not returned.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/element-snapshot-request.json"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Fresh exact element snapshot. Cache-Control is private, no-store.",
+            "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/element-snapshot-result.json"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "422": {"$ref": "#/components/responses/AccessibilityUnprocessable"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
+    "/v1/desktops/{desktop_id}/accessibility/elements/wait": {
+      "parameters": [{"$ref": "#/components/parameters/DesktopId"}],
+      "post": {
+        "operationId": "waitAccessibilityElement",
+        "tags": ["Accessibility"],
+        "summary": "Wait for one bounded element or selector predicate",
+        "description": "Requires accessibility:read. The actor snapshots, registers, and rechecks without a subscription race. Matched, timed_out, and resync_required are successful result statuses; bounded poll fallback is disclosed.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/element-wait-request.json"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Matched, timed-out, or resynchronization-required result. Cache-Control is private, no-store.",
+            "content": {"application/json": {"schema": {"$ref": "../../../schemas/v1/element-wait-result.json"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "422": {"$ref": "#/components/responses/AccessibilityUnprocessable"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/CapabilityUnavailable"},
+          "504": {"$ref": "#/components/responses/RequestOutcomeUnknown"}
+        }
+      }
+    },
     "/v1/desktops/{desktop_id}/clipboard/read": {
       "parameters": [{"$ref": "#/components/parameters/DesktopId"}],
       "post": {
@@ -972,7 +1144,7 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Exactly one long-lived API Bearer credential. The token is opaque and must not be placed in URLs. The closed grant vocabulary is desktop:status, desktop:observe, input:control, application:launch, application:terminate, window:control, clipboard:read, clipboard:write, capture:read, artifact:read, artifact:delete, and viewer:read. This scheme is not accepted by the viewer gateway WebSocket."
+        "description": "Exactly one long-lived API Bearer credential. The token is opaque and must not be placed in URLs. The closed grant vocabulary is desktop:status, desktop:observe, input:control, application:launch, application:terminate, window:control, clipboard:read, clipboard:write, capture:read, artifact:read, artifact:delete, viewer:read, accessibility:read, and accessibility:write. This scheme is not accepted by the viewer gateway WebSocket."
       },
       "viewerTicketSubprotocol": {
         "type": "apiKey",
@@ -1267,6 +1439,14 @@
       },
       "UnsupportedByTarget": {
         "description": "The target cannot perform the structurally valid operation.",
+        "content": {
+          "application/problem+json": {
+            "schema": {"$ref": "../../../schemas/v1/problem.json"}
+          }
+        }
+      },
+      "AccessibilityUnprocessable": {
+        "description": "The bounded accessibility query exceeded its declared limits, or the target lacks the requested AT-SPI interface.",
         "content": {
           "application/problem+json": {
             "schema": {"$ref": "../../../schemas/v1/problem.json"}

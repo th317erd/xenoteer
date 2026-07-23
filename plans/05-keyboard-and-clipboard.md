@@ -332,6 +332,19 @@ An application may request clipboard data later than two seconds. Reliable
 automation should supply a target-specific postcondition; the default timeout is
 a practical bound, not proof of application state.
 
+QtWebEngine 6.8.2 with PyQt 6.9 on X11 has a narrower accessibility-path
+defect: with forced renderer accessibility or after AT-SPI focus, one exact
+Control+V XTEST chord
+causes two DOM paste effects. A direct four-event libXtst reproducer, a 660 ms
+autorepeat delay, one requested UTF-8 target, and DevTools DOM inspection rule
+out Xenoteer replay, autorepeat, duplicate target conversion, and AT-SPI
+readback. The same HTML input exposes AT-SPI Text but not EditableText, so do
+not silently substitute semantic insertion, retry, undo, disable accessibility,
+or accept doubled text. Release tests isolate only QtWebEngine exact clipboard
+insertion while retaining its initial-value/window/AT-SPI/sandbox/capture
+coverage. Re-enable the assertion only after an upstream Qt fix or a truthful,
+explicitly capability-reported toolkit DOM adapter.
+
 ## 7. Security and privacy
 
 - Text/clipboard contents are secret by default: no ordinary logging, metrics,
