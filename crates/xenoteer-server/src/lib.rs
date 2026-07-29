@@ -16,6 +16,7 @@ mod health;
 mod limits;
 mod observation;
 mod problem;
+mod protocol_version;
 mod readiness;
 mod screenshot;
 mod status;
@@ -435,14 +436,21 @@ mod api_tests {
             )
             .await?;
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(http::header::CACHE_CONTROL),
+            Some(&http::HeaderValue::from_static("private, no-store"))
+        );
         let body = to_bytes(response.into_body(), 16 * 1_024).await?;
-        let body: serde_json::Value = serde_json::from_slice(&body)?;
+        let mut status: xenoteer_protocol::StatusResponse = serde_json::from_slice(&body)?;
+        status.validate()?;
+        let body = serde_json::to_value(status)?;
         assert_eq!(
             body["protocol_min"],
             serde_json::json!({"major": 1, "minor": 0})
         );
         assert_eq!(body["desktop"]["state"], "ready");
         assert!(body["desktop"]["id"].as_str().is_some());
+        assert!(body["server_time"].as_str().is_some());
         Ok(())
     }
 

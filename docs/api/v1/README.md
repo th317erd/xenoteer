@@ -26,6 +26,12 @@ gateway consumes a short-lived, origin-bound, single-use viewer ticket from the
 public. Ordinary JSON and reassembled control-WebSocket messages are capped at
 1 MiB by default.
 
+Potentially unbounded 64-bit counters and identity evidence use canonical
+unsigned decimal strings with no sign, whitespace, or leading zeroes. This
+includes model/accessibility revisions, birth/cache/process counters, and event
+sequences. Bounded byte counts, durations, dimensions, and collection limits
+remain JSON numbers.
+
 Each configured token maps to one authenticated principal and a closed set of
 grants. The accepted Phase 5 strings are `desktop:status`, `desktop:observe`,
 `input:control`, `application:launch`, `application:terminate`, `window:control`,
@@ -190,10 +196,25 @@ barriers are source-free. Text changes carry bounded offsets/length and redactio
 metadata; protected content is never emitted. Refresh authoritative state after
 any accessibility resync barrier before subscribing again.
 
-The initial Rust SDK accepts plaintext HTTP only for numeric loopback addresses
-such as `127.0.0.1` or `[::1]`; hostnames, even `localhost`, and non-loopback
-addresses are rejected. Deployments that terminate TLS or expose the service
-must use an external authenticated gateway until a TLS SDK transport is added.
+The Rust SDK accepts HTTPS/WSS origins using Rustls and platform trust roots.
+Plaintext HTTP/WS is restricted to numeric loopback addresses such as
+`127.0.0.1` or `[::1]`; hostnames, including `localhost`, and non-loopback
+plaintext addresses are rejected.
+
+The v1 Rust SDK's artifact helper streams and verifies complete objects only.
+It deliberately sends no `Range` header and rejects a `206 Partial Content`
+response before writing bytes. The HTTP API still supports the single-range
+contract above for callers using the low-level route directly. Clipboard input
+upload has a separate exact-length `AsyncRead` path that hashes while sending,
+so the 16 MiB object ceiling is not collected into one SDK allocation.
+
+Rust event subscriptions return only after the correlated
+`events.subscribed` acknowledgement, apply 1 MiB WebSocket frame/message
+ceilings, and expose bounded queue overflow and permanent closure explicitly.
+Transport loss may reconnect with the last processed sequence. A server
+`events.resync_required` ends the stream; callers refresh snapshots and create
+a new subscription instead of allowing the SDK to replay automatically from an
+unverified cursor.
 
 HTTP failures use `application/problem+json` in the RFC 9457 shape. The current
 transport emits the required `details` member as `{}`. The shared public Problem

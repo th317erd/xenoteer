@@ -158,7 +158,7 @@ Envelope:
   "protocol": "1.0",
   "desktop_id": "...",
   "desktop_generation": "0190f5a2-7b7d-7cc0-8f3e-6ddf4f1bd001",
-  "sequence": 1042,
+  "sequence": "1042",
   "occurred_at": "...",
   "topic": "window.changed",
   "payload": {...}

@@ -951,7 +951,7 @@ mod tests {
                     "desktop_id": desktop_id,
                     "desktop_generation": generation,
                     "xid": 41,
-                    "observed_generation": 1,
+                    "observed_generation": "1",
                     "identity_hash": "c".repeat(64)
                 },
                 "workspace": 2
@@ -971,7 +971,7 @@ mod tests {
                         "desktop_id": desktop_id,
                         "desktop_generation": generation,
                         "xid": 42,
-                        "observed_generation": 1,
+                        "observed_generation": "1",
                         "identity_hash": "a".repeat(64)
                     }
                 },
@@ -1005,19 +1005,19 @@ mod tests {
                 "element": {
                     "desktop_id": desktop_id,
                     "desktop_generation": generation,
-                    "atspi_generation": 1,
+                    "atspi_generation": "1",
                     "application": {
                         "desktop_id": desktop_id,
                         "desktop_generation": generation,
-                        "atspi_generation": 1,
+                        "atspi_generation": "1",
                         "unique_bus_name": ":1.42",
                         "root_object_path": "/org/a11y/atspi/accessible/root",
-                        "app_instance_generation": 1,
+                        "app_instance_generation": "1",
                         "identity_hash": "d".repeat(64)
                     },
                     "object_path": "/org/a11y/atspi/accessible/button",
                     "object_identity_hash": "e".repeat(64),
-                    "cache_sequence": 1
+                    "cache_sequence": "1"
                 },
                 "window": null,
                 "minimum_correlation": "strong",

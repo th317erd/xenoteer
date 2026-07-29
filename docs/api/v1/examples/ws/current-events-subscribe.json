@@ -8,5 +8,5 @@
     "action.lifecycle",
     "process.exited"
   ],
-  "since_sequence": 1042
+  "since_sequence": "1042"
 }

@@ -113,6 +113,19 @@ class ValidationError(Exception):
     """One deterministic documentation-contract failure."""
 
 
+def canonical_uint64(value: Any, *, minimum: int = 0) -> int | None:
+    """Parse one canonical unsigned decimal string without accepting JSON numbers."""
+    if (
+        not isinstance(value, str)
+        or not re.fullmatch(r"0|[1-9][0-9]{0,19}", value)
+    ):
+        return None
+    parsed = int(value)
+    if parsed < minimum or parsed > (1 << 64) - 1:
+        return None
+    return parsed
+
+
 def load_json(path: Path) -> Any:
     try:
         raw = path.read_bytes()
@@ -293,6 +306,7 @@ def validate_example(value: Any, source: Path) -> None:
         if resume is not None and (
             not isinstance(resume, dict)
             or not isinstance(resume.get("desktop_generation"), str)
+            or canonical_uint64(resume.get("event_sequence")) is None
         ):
             raise ValidationError(f"hello resume is not generation-fenced in {source}")
     if isinstance(value, dict) and value.get("type") == "events.subscribe":
@@ -306,12 +320,13 @@ def validate_example(value: Any, source: Path) -> None:
         if len(topics) != len(set(topics)):
             raise ValidationError(f"duplicate event topics in {source}")
         since = value.get("since_sequence")
-        if since is not None and (not isinstance(since, int) or since < 0):
+        if since is not None and canonical_uint64(since) is None:
             raise ValidationError(f"invalid event replay cursor in {source}")
     if isinstance(value, dict) and value.get("type") == "event":
         event = value.get("event")
-        if not isinstance(event, dict) or not isinstance(event.get("sequence"), int):
+        if not isinstance(event, dict):
             raise ValidationError(f"event example lacks a sequence in {source}")
+        sequence = canonical_uint64(event.get("sequence"), minimum=1)
         allowed_topics = {
             "command.lifecycle",
             "action.lifecycle",
@@ -321,7 +336,7 @@ def validate_example(value: Any, source: Path) -> None:
             "accessibility.element_removed",
             "accessibility.resync_required",
         }
-        if event["sequence"] <= 0 or event.get("topic") not in allowed_topics:
+        if sequence is None or event.get("topic") not in allowed_topics:
             raise ValidationError(f"event example uses an invalid sequence/topic in {source}")
         payload = event.get("payload")
         if event.get("topic") in {"command.lifecycle", "action.lifecycle"}:
@@ -340,6 +355,9 @@ def validate_example(value: Any, source: Path) -> None:
             validate_process_exited_payload(payload, source)
         else:
             validate_accessibility_event_payload(payload, source)
+    if isinstance(value, dict) and value.get("type") == "events.replay_complete":
+        if canonical_uint64(value.get("through_sequence")) is None:
+            raise ValidationError(f"invalid event replay boundary in {source}")
     if isinstance(value, dict) and value.get("type") == "events.resync_required":
         reasons = {
             "generation_changed",
@@ -348,7 +366,11 @@ def validate_example(value: Any, source: Path) -> None:
             "subscriber_lag",
             "outbound_backpressure",
         }
-        if value.get("reason") not in reasons:
+        if (
+            value.get("reason") not in reasons
+            or canonical_uint64(value.get("dropped_through")) is None
+            or canonical_uint64(value.get("latest_sequence")) is None
+        ):
             raise ValidationError(f"invalid event resync reason in {source}")
     if isinstance(value, dict) and value.get("type") == "server.draining":
         if "request_id" in value:
@@ -389,7 +411,7 @@ def validate_process_exited_payload(payload: Any, source: Path) -> None:
         raise ValidationError(f"process.exited reference is invalid in {source}")
     if not isinstance(reference["pid"], int) or reference["pid"] <= 0:
         raise ValidationError(f"process.exited PID is invalid in {source}")
-    if not isinstance(reference["proc_start_ticks"], int) or reference["proc_start_ticks"] <= 0:
+    if canonical_uint64(reference["proc_start_ticks"], minimum=1) is None:
         raise ValidationError(f"process.exited start ticks are invalid in {source}")
 
     exit_status = process["exit"]
@@ -431,11 +453,11 @@ def validate_accessibility_event_payload(payload: Any, source: Path) -> None:
     }
     if not isinstance(payload, dict) or not required.issubset(payload):
         raise ValidationError(f"accessibility event payload has an invalid shape in {source}")
-    if not isinstance(payload["atspi_generation"], int) or payload["atspi_generation"] <= 0:
+    if canonical_uint64(payload["atspi_generation"], minimum=1) is None:
         raise ValidationError(f"accessibility event generation is invalid in {source}")
-    if not isinstance(payload["revision"], int) or payload["revision"] <= 0:
+    if canonical_uint64(payload["revision"], minimum=1) is None:
         raise ValidationError(f"accessibility event revision is invalid in {source}")
-    if not isinstance(payload["cache_sequence"], int) or payload["cache_sequence"] <= 0:
+    if canonical_uint64(payload["cache_sequence"], minimum=1) is None:
         raise ValidationError(f"accessibility event cache sequence is invalid in {source}")
     detail = payload["detail"]
     if not isinstance(detail, dict):

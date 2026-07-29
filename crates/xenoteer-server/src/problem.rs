@@ -174,7 +174,7 @@ impl ApiProblem {
             StatusCode::BAD_REQUEST,
             ErrorCode::UnsupportedVersion,
             "Unsupported protocol version",
-            "The requested protocol major is not supported by this endpoint.",
+            "The requested protocol version is not supported by this endpoint.",
             RetryAdvice::Never,
             ControlMetadata::new(request_id),
         )

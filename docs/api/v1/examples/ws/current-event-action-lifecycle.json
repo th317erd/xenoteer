@@ -4,7 +4,7 @@
   "event": {
     "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
     "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
-    "sequence": 1044,
+    "sequence": "1044",
     "topic": "action.lifecycle",
     "payload": {
       "command_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0021",

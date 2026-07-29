@@ -162,6 +162,9 @@
 
 - Phase commits stay local until all achievable phases are complete; do not push
   without user confirmation, per the implementation workflow.
+- The user has authorized the eventual verified Phase-6 milestone commit and
+  push. Do not commit or push partial closure: the exact immutable-image gate
+  and overall Phase-6 closure remain open.
 - Every phase adds tests and preserves all earlier gates.
 - Record environmental verification gaps as gaps, never as successful gates.
 - Keep Rust builds at a maximum of two jobs and tests at a maximum of two test
@@ -170,6 +173,52 @@
 - Parallel lanes must additionally serialize heavy Cargo build/test/Clippy/doc
   commands with `flock /tmp/codex/xenoteer-heavy-build.lock`; otherwise three
   independent `--jobs 2` checks would still become an accidental six-job build.
+- Phase-6 conformance scenario/redaction cases must be concrete machine
+  fixtures. An adapter may dispatch by the fixed operation type, but it must
+  exercise public protocol/SDK behavior from the supplied values; it may not
+  derive results from case IDs, narrative action labels, or expected assertion
+  names. Mutation tests must prove a wrong fixture or wrong runtime outcome
+  fails.
+- The final concrete Phase-6 v1 corpus contains 8 suites/73 cases with SHA-256
+  `6cc98e72e1de6591cce2d0661f4fc3ea508535d310a40746aa3ad8bd1e61e7fc`.
+  The official Rust, TypeScript, and Python adapters each pass all 73 cases with
+  zero skips and pin this exact protocol/corpus identity. Mutation tests prove
+  incorrect fixtures and runtime outcomes fail.
+- Final Phase-6 non-container verification is green: the full Rust workspace;
+  Rustfmt, Clippy, Rustdoc, schema generation/check, API documentation, and the
+  Rust public-package verifier; TypeScript 53/53 tests, conformance, and package
+  inspection; Python 38/38 tests, Ruff, mypy, wheel/sdist inspection, and the
+  deterministic event-completion barrier; the 13/13 CI-contract tests; and the
+  static mirror, first-party license, and cargo-deny gates.
+- Phase-6 public quick-start qualification must install the staged crate/npm/
+  wheel artifacts rather than importing source trees, run every language
+  against the same immutable release-candidate image ID, cover bounded
+  invalid-auth/failure cleanup as well as success, and reject daemon binary
+  overrides.
+- The executable Phase-6 gate is
+  `scripts/sdk/test-public-quickstarts.py`. It reproduces the Docker build
+  wrapper's source-tree identity, requires it to equal the image label, resolves
+  and runs only one immutable image ID, safely extracts both Rust archives,
+  installs the npm tarball plus Python wheel and sdist into isolated roots, and
+  runs typed invalid-auth and successful v1 status probes for every variant.
+  Its unit, archive-install, and bounded mock-runtime proofs pass. No Docker
+  image was built during final closure, so the exact-image execution and
+  identity record intentionally remain pending until the coherent Phase-6 image
+  is built.
+- Phase-7 transport hardening must operate before Axum/Tower request middleware:
+  the accepted-connection permit, header count/bytes/read deadline, keep-alive
+  idle bound, incomplete-request bound, and reserved health/shutdown capacity
+  must be proven with raw sockets. Router-level body/rate tests are not evidence
+  for this boundary.
+- Phase-7 runtime authentication must add atomic complete token-set reload,
+  metadata/expiry/revocation and scoped principals, including defined closure or
+  reauthorization of already-active WebSockets. The existing multi-record auth
+  library alone is not runtime rotation evidence.
+- Phase-7 environmental release observations that cannot be honestly reproduced
+  locally include protected GitHub environments/tags, OIDC registry signing,
+  public-registry clean-host verification, a genuine 24-hour active soak, and
+  the supported-host LSM matrix. Implement their harnesses/workflows locally but
+  record those external observations as unverified until executed there.
 - Phase 3 is committed locally as `90b0781`; the verified Phase 4 boundary is
   committed locally as `83b044c`. Phase 5 has completed coherent exact-image
   qualification and closure review and is ready for its local boundary commit.
@@ -441,3 +490,33 @@
 - Performance qualification is intentionally Phase 7 work. No Phase 5 result
   claims 10,000-node cold-snapshot timing, selector p95, event-lag, stable cache
   RSS, or a large-browser soak measurement.
+
+## Phase 6 developer-experience invariants
+
+- Phase 5 is committed locally as `8a49c3f6983f9761ebcbc088703ae0575d5f3a19`.
+  The immutable qualification images above are the exact Phase 5 boundary.
+- The frozen release-one protocol range is exactly v1.0. Public unbounded
+  counters are canonical decimal strings, never JSON numbers; signed forms,
+  whitespace, leading zeroes, overflow, and numeric JSON are rejected.
+- The public Rust, TypeScript, and Python SDK packages plus the language-neutral
+  conformance corpus are Apache-2.0 boundaries. They must not depend on or
+  package any BSL server implementation. `xenoteerctl` remains BSL with the
+  server repository and consumes only the public Rust SDK.
+- SDK mutation helpers must expose a caller-retained command ID and exact,
+  redacted canonical envelope before any network I/O. An ambiguous send or
+  local cancellation must not consume that submission. SDKs never replay an
+  effect automatically; lookup and any explicit same-ID/same-body resend remain
+  caller-controlled.
+- SDK event streams must establish a correlated filtered subscription before
+  appearing live. They bound frames before allocation, preserve unknown
+  additive messages, use heartbeat/read-staleness checks, distinguish permanent
+  handshake/auth failures from reconnectable transport loss, and explicitly
+  surface resync, local overflow, generation change, and terminal close reasons.
+- Direct SDK transport accepts HTTPS/WSS with platform roots. Plain HTTP/WS is
+  restricted to numeric loopback origins. Long-lived API tokens remain in the
+  Authorization header and never enter URLs, subprotocols, Debug/repr, errors,
+  or telemetry.
+- JSON response limits are endpoint-specific: ordinary control JSON is small,
+  valid accessibility results can reach 16 MiB, clipboard artifacts 16 MiB,
+  and other private artifacts 32 MiB. Artifact transfer is bounded streaming
+  with exact scope, length, purpose, content type, and SHA-256 validation.

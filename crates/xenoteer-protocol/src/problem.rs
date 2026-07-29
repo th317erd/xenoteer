@@ -339,10 +339,46 @@ impl Problem {
         self.code
     }
 
+    /// Returns the short, bounded, client-safe title.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// Returns the bounded, client-safe explanation.
+    #[must_use]
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+
+    /// Returns the request-scoped RFC 9457 instance URI when present.
+    #[must_use]
+    pub fn instance(&self) -> Option<&str> {
+        self.instance.as_deref()
+    }
+
+    /// Returns server retry guidance.
+    #[must_use]
+    pub const fn retry(&self) -> RetryAdvice {
+        self.retry
+    }
+
     /// Returns the effect stage reached before failure.
     #[must_use]
     pub const fn effect_stage(&self) -> EffectStage {
         self.effect_stage
+    }
+
+    /// Returns the current desktop generation included for resynchronization.
+    #[must_use]
+    pub const fn desktop_generation(&self) -> Option<DesktopGeneration> {
+        self.desktop_generation
+    }
+
+    /// Returns bounded, pre-redacted structured details.
+    #[must_use]
+    pub const fn details(&self) -> &BTreeMap<String, serde_json::Value> {
+        &self.details
     }
 }
 

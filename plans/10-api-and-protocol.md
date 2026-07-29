@@ -203,7 +203,7 @@ Client's first application message within 5 seconds:
   "request_id": "...",
   "protocol": {"major": 1, "min_minor": 0, "max_minor": 0},
   "client": {"name": "xenoteer-rust", "version": "..."},
-  "resume": {"desktop_id": "...", "event_sequence": 1042}
+  "resume": {"desktop_id": "...", "event_sequence": "1042"}
 }
 ```
 

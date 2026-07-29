@@ -1,0 +1,10 @@
+include LICENSE
+include NOTICE
+include PACKAGE_ALLOWLIST.txt
+include README.md
+include requirements-test.lock
+include SDIST_ALLOWLIST.txt
+include WHEEL_ALLOWLIST.txt
+recursive-include scripts *.py
+recursive-include src/xenoteer *.py py.typed
+recursive-include tests *.py

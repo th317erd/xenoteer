@@ -1,0 +1,239 @@
+{
+  "format_version": 1,
+  "license": "Apache-2.0",
+  "suite": "scenarios.effect-stages",
+  "description": "Concrete terminal CommandResult fixtures preserve effect and cleanup evidence.",
+  "cases": [
+    {
+      "id": "effect.cancel.after-effect",
+      "description": "A validated cancelled-after-effect result remains visibly effectful.",
+      "operation": "classify_terminal_effect",
+      "input": {
+        "result": {
+          "command_id": "40000000-0000-4000-8000-000000000101",
+          "lifecycle": "cancelled_after_effect",
+          "effect_stage": "side_effect_observed",
+          "accepted_at": "2030-01-01T00:00:00Z",
+          "started_at": "2030-01-01T00:00:00.010Z",
+          "finished_at": "2030-01-01T00:00:00.020Z",
+          "outcome": null,
+          "error": {
+            "type": "https://xenoteer.dev/problems/cancelled-after-effect",
+            "title": "Command cancelled",
+            "status": 409,
+            "code": "cancelled_after_effect",
+            "detail": "Cancellation followed an externally visible effect.",
+            "instance": null,
+            "retry": "never",
+            "effect_stage": "side_effect_observed",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "details": {}
+          },
+          "warnings": []
+        }
+      },
+      "expect": {
+        "lifecycle": "cancelled_after_effect",
+        "effect_stage": "side_effect_observed",
+        "has_visible_effect": true,
+        "error_code": "cancelled_after_effect",
+        "retry": "never",
+        "details": {},
+        "warning_count": 0,
+        "outcome_type": null
+      },
+      "tags": ["cancellation", "effect", "terminal"]
+    },
+    {
+      "id": "effect.cancel.before-effect",
+      "description": "A validated cancelled-before-effect result makes no effect claim.",
+      "operation": "classify_terminal_effect",
+      "input": {
+        "result": {
+          "command_id": "40000000-0000-4000-8000-000000000102",
+          "lifecycle": "cancelled_before_effect",
+          "effect_stage": "none",
+          "accepted_at": "2030-01-01T00:00:00Z",
+          "started_at": null,
+          "finished_at": "2030-01-01T00:00:00.020Z",
+          "outcome": null,
+          "error": {
+            "type": "https://xenoteer.dev/problems/cancelled-before-effect",
+            "title": "Command cancelled",
+            "status": 409,
+            "code": "cancelled_before_effect",
+            "detail": "Cancellation occurred before an external effect.",
+            "instance": null,
+            "retry": "same_command_id",
+            "effect_stage": "none",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "details": {"cleanup_completed": true}
+          },
+          "warnings": []
+        }
+      },
+      "expect": {
+        "lifecycle": "cancelled_before_effect",
+        "effect_stage": "none",
+        "has_visible_effect": false,
+        "error_code": "cancelled_before_effect",
+        "retry": "same_command_id",
+        "details": {"cleanup_completed": true},
+        "warning_count": 0,
+        "outcome_type": null
+      },
+      "tags": ["cancellation", "effect", "terminal"]
+    },
+    {
+      "id": "effect.deadline.after-effect",
+      "description": "A deadline-after-effect result retains completed-count evidence.",
+      "operation": "classify_terminal_effect",
+      "input": {
+        "result": {
+          "command_id": "40000000-0000-4000-8000-000000000103",
+          "lifecycle": "deadline_after_effect",
+          "effect_stage": "pointer_clicked",
+          "accepted_at": "2030-01-01T00:00:00Z",
+          "started_at": "2030-01-01T00:00:00.010Z",
+          "finished_at": "2030-01-01T00:00:00.020Z",
+          "outcome": null,
+          "error": {
+            "type": "https://xenoteer.dev/problems/deadline-exceeded-after-effect",
+            "title": "Command deadline elapsed",
+            "status": 408,
+            "code": "deadline_exceeded_after_effect",
+            "detail": "The deadline elapsed after one click completed.",
+            "instance": null,
+            "retry": "never",
+            "effect_stage": "pointer_clicked",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "details": {"completed_count": 1}
+          },
+          "warnings": []
+        }
+      },
+      "expect": {
+        "lifecycle": "deadline_after_effect",
+        "effect_stage": "pointer_clicked",
+        "has_visible_effect": true,
+        "error_code": "deadline_exceeded_after_effect",
+        "retry": "never",
+        "details": {"completed_count": 1},
+        "warning_count": 0,
+        "outcome_type": null
+      },
+      "tags": ["deadline", "effect", "terminal"]
+    },
+    {
+      "id": "effect.deadline.before-effect",
+      "description": "A deadline-before-effect result remains retryable without an effect claim.",
+      "operation": "classify_terminal_effect",
+      "input": {
+        "result": {
+          "command_id": "40000000-0000-4000-8000-000000000104",
+          "lifecycle": "deadline_before_effect",
+          "effect_stage": "accepted",
+          "accepted_at": "2030-01-01T00:00:00Z",
+          "started_at": null,
+          "finished_at": "2030-01-01T00:00:00.020Z",
+          "outcome": null,
+          "error": {
+            "type": "https://xenoteer.dev/problems/deadline-exceeded-before-effect",
+            "title": "Command deadline elapsed",
+            "status": 408,
+            "code": "deadline_exceeded_before_effect",
+            "detail": "The deadline elapsed before execution.",
+            "instance": null,
+            "retry": "after_backoff",
+            "effect_stage": "accepted",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "details": {}
+          },
+          "warnings": []
+        }
+      },
+      "expect": {
+        "lifecycle": "deadline_before_effect",
+        "effect_stage": "accepted",
+        "has_visible_effect": false,
+        "error_code": "deadline_exceeded_before_effect",
+        "retry": "after_backoff",
+        "details": {},
+        "warning_count": 0,
+        "outcome_type": null
+      },
+      "tags": ["deadline", "effect", "terminal"]
+    },
+    {
+      "id": "effect.partial.cleanup-failed",
+      "description": "A failed result retains partial-effect and cleanup-failure details.",
+      "operation": "classify_terminal_effect",
+      "input": {
+        "result": {
+          "command_id": "40000000-0000-4000-8000-000000000105",
+          "lifecycle": "failed",
+          "effect_stage": "side_effect_observed",
+          "accepted_at": "2030-01-01T00:00:00Z",
+          "started_at": "2030-01-01T00:00:00.010Z",
+          "finished_at": "2030-01-01T00:00:00.020Z",
+          "outcome": null,
+          "error": {
+            "type": "https://xenoteer.dev/problems/backend-failure",
+            "title": "Backend failed",
+            "status": 500,
+            "code": "backend_failure",
+            "detail": "A partial effect occurred and owned-input cleanup failed.",
+            "instance": null,
+            "retry": "never",
+            "effect_stage": "side_effect_observed",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "details": {"cleanup_failed": true, "completed_count": 1}
+          },
+          "warnings": []
+        }
+      },
+      "expect": {
+        "lifecycle": "failed",
+        "effect_stage": "side_effect_observed",
+        "has_visible_effect": true,
+        "error_code": "backend_failure",
+        "retry": "never",
+        "details": {"cleanup_failed": true, "completed_count": 1},
+        "warning_count": 0,
+        "outcome_type": null
+      },
+      "tags": ["cleanup", "effect", "partial"]
+    },
+    {
+      "id": "effect.success.observed",
+      "description": "A successful result retains its observed outcome and warning.",
+      "operation": "classify_terminal_effect",
+      "input": {
+        "result": {
+          "command_id": "40000000-0000-4000-8000-000000000106",
+          "lifecycle": "succeeded",
+          "effect_stage": "postcondition_met",
+          "accepted_at": "2030-01-01T00:00:00Z",
+          "started_at": "2030-01-01T00:00:00.010Z",
+          "finished_at": "2030-01-01T00:00:00.020Z",
+          "outcome": {"type": "probe", "ready": true},
+          "error": null,
+          "warnings": [
+            {"code": "fixture.warning", "message": "A safe warning survived."}
+          ]
+        }
+      },
+      "expect": {
+        "lifecycle": "succeeded",
+        "effect_stage": "postcondition_met",
+        "has_visible_effect": true,
+        "error_code": null,
+        "retry": null,
+        "details": {},
+        "warning_count": 1,
+        "outcome_type": "probe"
+      },
+      "tags": ["effect", "success", "terminal"]
+    }
+  ]
+}

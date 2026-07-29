@@ -29,7 +29,7 @@ use xenoteer_protocol::{
     ClientHello, CommandEnvelope, CommandId, CommandResult, ConnectionId, DesktopGeneration,
     DesktopId, ErrorCode, EventResumeStatus, EventResyncReason, EventTopic, LeaseAcquireRequest,
     LeaseReleaseRequest, LeaseRenewRequest, LeaseStateView, MAX_EVENT_TOPICS, ProtocolVersion,
-    RequestId, SequencedEvent, VersionRange, ViewerOrigin, WebSocketClientMessage as ClientMessage,
+    RequestId, SequencedEvent, ViewerOrigin, WebSocketClientMessage as ClientMessage,
 };
 
 use crate::{
@@ -119,11 +119,11 @@ struct WelcomeDesktop {
 
 #[derive(Serialize)]
 struct WelcomeLimits {
-    max_message_bytes: usize,
-    heartbeat_ms: u64,
-    normal_outbound_capacity: usize,
-    reserved_outbound_capacity: usize,
-    max_command_watches: usize,
+    max_message_bytes: u32,
+    heartbeat_ms: u32,
+    normal_outbound_capacity: u32,
+    reserved_outbound_capacity: u32,
+    max_command_watches: u32,
 }
 
 #[derive(Serialize)]
@@ -212,6 +212,7 @@ struct ServerReplayComplete {
     request_id: RequestId,
     desktop_id: DesktopId,
     desktop_generation: DesktopGeneration,
+    #[serde(serialize_with = "serialize_u64_string")]
     through_sequence: u64,
 }
 
@@ -223,7 +224,9 @@ struct ServerResyncRequired {
     desktop_id: DesktopId,
     desktop_generation: DesktopGeneration,
     reason: EventResyncReason,
+    #[serde(serialize_with = "serialize_u64_string")]
     dropped_through: u64,
+    #[serde(serialize_with = "serialize_u64_string")]
     latest_sequence: u64,
 }
 
@@ -550,7 +553,7 @@ async fn read_session(
         }
         _ => Err(HandshakeError::InvalidMessage),
     };
-    let hello = match hello {
+    let (hello, protocol) = match hello {
         Ok(hello) => hello,
         Err(error) => {
             let code = if error == HandshakeError::UnsupportedVersion {
@@ -567,31 +570,6 @@ async fn read_session(
         }
     };
 
-    let server_range = match VersionRange::new(1, 0, 0) {
-        Ok(range) => range,
-        Err(_) => {
-            let _ignored = outbound.high_message(close(1011, "server error")).await;
-            return;
-        }
-    };
-    let protocol = match hello.protocol.negotiate(server_range) {
-        Ok(protocol) => protocol,
-        Err(_) => {
-            let _ignored = send_error(
-                &outbound,
-                Some(hello.request_id),
-                WireFailure::new(
-                    ErrorCode::UnsupportedVersion,
-                    "The client and server do not share a protocol version.",
-                ),
-            )
-            .await;
-            let _ignored = outbound
-                .high_message(close(1002, "unsupported version"))
-                .await;
-            return;
-        }
-    };
     let readiness = state.readiness.snapshot();
     let mut resumed = None;
     let resume_status = match &hello.resume {
@@ -637,6 +615,10 @@ async fn read_session(
     // Welcome must be the first application message. Resume processing can
     // immediately enqueue a reserved resync notice, so putting welcome on the
     // normal lane would let the biased high-priority writer overtake it.
+    let Some(limits) = welcome_limits(state.limits) else {
+        let _ignored = outbound.high_message(close(1011, "server error")).await;
+        return;
+    };
     if outbound
         .high_json(&ServerWelcome {
             message_type: "server.welcome",
@@ -651,13 +633,7 @@ async fn read_session(
                 generation: readiness.desktop_generation,
                 state: readiness.state,
             },
-            limits: WelcomeLimits {
-                max_message_bytes: state.limits.max_body_bytes(),
-                heartbeat_ms: duration_millis(state.limits.ws_heartbeat()),
-                normal_outbound_capacity: state.limits.ws_outbound_capacity(),
-                reserved_outbound_capacity: state.limits.ws_high_priority_capacity(),
-                max_command_watches: MAX_SESSION_COMMAND_WATCHES,
-            },
+            limits,
             resume: WelcomeResume {
                 status: resume_status,
             },
@@ -749,6 +725,7 @@ async fn read_session(
                             &principal,
                             &mut watches,
                             &mut event_watch,
+                            protocol,
                             &text,
                         )
                         .await
@@ -830,17 +807,15 @@ async fn write_session(
     let _ignored = writer_stopped.send(true);
 }
 
-fn parse_hello(text: &str) -> Result<ClientHello, HandshakeError> {
+fn parse_hello(text: &str) -> Result<(ClientHello, ProtocolVersion), HandshakeError> {
     let hello: ClientHello =
         serde_json::from_str(text).map_err(|_| HandshakeError::InvalidMessage)?;
     if hello.validate().is_err() {
         return Err(HandshakeError::InvalidMessage);
     }
-    hello
-        .protocol
-        .negotiate(VersionRange::new(1, 0, 0).map_err(|_| HandshakeError::UnsupportedVersion)?)
+    let selected = crate::protocol_version::negotiate(hello.protocol)
         .map_err(|_| HandshakeError::UnsupportedVersion)?;
-    Ok(hello)
+    Ok((hello, selected))
 }
 
 async fn handle_text(
@@ -849,6 +824,7 @@ async fn handle_text(
     principal: &Principal,
     watches: &mut WatchSet,
     event_watch: &mut EventWatch,
+    negotiated_protocol: ProtocolVersion,
     text: &str,
 ) -> Result<(), ()> {
     let header: MessageHeader = match serde_json::from_str(text) {
@@ -906,7 +882,14 @@ async fn handle_text(
         ClientMessage::CommandSubmit {
             request_id,
             command,
-        } => handle_command_submit(outbound, state, principal, watches, request_id, *command).await,
+        } => {
+            if command.protocol_version != negotiated_protocol {
+                send_unsupported_message_version(outbound, request_id).await
+            } else {
+                handle_command_submit(outbound, state, principal, watches, request_id, *command)
+                    .await
+            }
+        }
         ClientMessage::CommandWatch {
             request_id,
             desktop_id,
@@ -985,13 +968,25 @@ async fn handle_text(
             .await
         }
         ClientMessage::LeaseAcquire { request_id, lease } => {
-            handle_lease_acquire(outbound, state, principal, request_id, *lease).await
+            if lease.protocol_version != negotiated_protocol {
+                send_unsupported_message_version(outbound, request_id).await
+            } else {
+                handle_lease_acquire(outbound, state, principal, request_id, *lease).await
+            }
         }
         ClientMessage::LeaseRenew { request_id, lease } => {
-            handle_lease_renew(outbound, state, principal, request_id, *lease).await
+            if lease.protocol_version != negotiated_protocol {
+                send_unsupported_message_version(outbound, request_id).await
+            } else {
+                handle_lease_renew(outbound, state, principal, request_id, *lease).await
+            }
         }
         ClientMessage::LeaseRelease { request_id, lease } => {
-            handle_lease_release(outbound, state, principal, request_id, *lease).await
+            if lease.protocol_version != negotiated_protocol {
+                send_unsupported_message_version(outbound, request_id).await
+            } else {
+                handle_lease_release(outbound, state, principal, request_id, *lease).await
+            }
         }
         ClientMessage::EventsSubscribe {
             request_id,
@@ -1978,6 +1973,21 @@ async fn send_invalid_request(outbound: &OutboundQueues, request_id: RequestId) 
     .await
 }
 
+async fn send_unsupported_message_version(
+    outbound: &OutboundQueues,
+    request_id: RequestId,
+) -> Result<(), ()> {
+    send_error(
+        outbound,
+        Some(request_id),
+        WireFailure::new(
+            ErrorCode::UnsupportedVersion,
+            "The embedded request version does not match the negotiated protocol version.",
+        ),
+    )
+    .await
+}
+
 async fn send_permission_denied(
     outbound: &OutboundQueues,
     request_id: RequestId,
@@ -2022,6 +2032,13 @@ fn encode_message<T: Serialize>(value: &T) -> Result<Message, ()> {
         .map_err(|_| ())
 }
 
+fn serialize_u64_string<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.collect_str(value)
+}
+
 fn close(code: u16, reason: &'static str) -> Message {
     Message::Close(Some(CloseFrame {
         code,
@@ -2039,8 +2056,14 @@ fn websocket_read_error_close(error: &axum::Error) -> Option<Message> {
     }
 }
 
-fn duration_millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+fn welcome_limits(limits: crate::TransportLimits) -> Option<WelcomeLimits> {
+    Some(WelcomeLimits {
+        max_message_bytes: u32::try_from(limits.max_body_bytes()).ok()?,
+        heartbeat_ms: u32::try_from(limits.ws_heartbeat().as_millis()).ok()?,
+        normal_outbound_capacity: u32::try_from(limits.ws_outbound_capacity()).ok()?,
+        reserved_outbound_capacity: u32::try_from(limits.ws_high_priority_capacity()).ok()?,
+        max_command_watches: u32::try_from(MAX_SESSION_COMMAND_WATCHES).ok()?,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2292,6 +2315,7 @@ mod tests {
             principal,
             &mut watches,
             &mut event_watch,
+            ProtocolVersion::V1_0,
             &serde_json::to_string(message)?,
         )
         .await
@@ -2732,13 +2756,13 @@ mod tests {
             return Err(std::io::Error::other("missing filtered replay event").into());
         };
         let event: serde_json::Value = serde_json::from_str(&event)?;
-        assert_eq!(event["event"]["sequence"], 2);
+        assert_eq!(event["event"]["sequence"], "2");
         let Some(Message::Text(complete)) = receiver.recv().await else {
             return Err(std::io::Error::other("missing replay completion").into());
         };
         let complete: serde_json::Value = serde_json::from_str(&complete)?;
         assert_eq!(complete["type"], "events.replay_complete");
-        assert_eq!(complete["through_sequence"], 3);
+        assert_eq!(complete["through_sequence"], "3");
         Ok(())
     }
 
@@ -2871,6 +2895,7 @@ mod tests {
                 &principal,
                 &mut watches,
                 &mut event_watch,
+                ProtocolVersion::V1_0,
                 "not-json",
             )
             .await,
@@ -2925,6 +2950,7 @@ mod tests {
                 &principal,
                 &mut watches,
                 &mut event_watch,
+                ProtocolVersion::V1_0,
                 &text,
             )
             .await,
@@ -2941,6 +2967,74 @@ mod tests {
         assert_eq!(error["request_id"], outer_request_id.to_string());
         assert_eq!(error["code"], "invalid_request");
         assert!(watches.owned.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn embedded_minor_must_match_negotiation_without_closing_session()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let desktop_id = DesktopId::new();
+        let generation = DesktopGeneration::new();
+        let request_id = RequestId::new();
+        let command = CommandEnvelope::new(
+            ProtocolVersion::new(1, 1),
+            request_id,
+            CommandId::new(),
+            desktop_id,
+            generation,
+            Command::DesktopProbe(xenoteer_protocol::DesktopProbeCommand {}),
+        )?;
+        let message = ClientMessage::CommandSubmit {
+            request_id,
+            command: Box::new(command),
+        };
+        let control = Arc::new(CountingControl::default());
+        let state = test_state_with_control(desktop_id, generation, Arc::clone(&control))?;
+        let principal = Principal::new("observer", [Grant::DesktopObserve])?;
+        let (outbound, mut receiver) = OutboundQueues::bounded(4, 4);
+        let mut watches = WatchSet::new();
+        let mut event_watch = EventWatch::new();
+
+        handle_text(
+            &outbound,
+            &state,
+            &principal,
+            &mut watches,
+            &mut event_watch,
+            ProtocolVersion::V1_0,
+            &serde_json::to_string(&message)?,
+        )
+        .await
+        .map_err(|()| std::io::Error::other("version rejection closed the session"))?;
+        let Some(Message::Text(error)) = receiver.recv().await else {
+            return Err(std::io::Error::other("missing unsupported-version response").into());
+        };
+        let error: serde_json::Value = serde_json::from_str(error.as_str())?;
+        assert_eq!(error["code"], "unsupported_version");
+        assert_eq!(control.calls.load(Ordering::SeqCst), 0);
+
+        let ping_id = RequestId::new();
+        let ping = ClientMessage::Ping {
+            request_id: ping_id,
+            nonce: "still-open".to_owned(),
+        };
+        handle_text(
+            &outbound,
+            &state,
+            &principal,
+            &mut watches,
+            &mut event_watch,
+            ProtocolVersion::V1_0,
+            &serde_json::to_string(&ping)?,
+        )
+        .await
+        .map_err(|()| std::io::Error::other("usable session rejected a ping"))?;
+        let Some(Message::Text(pong)) = receiver.recv().await else {
+            return Err(std::io::Error::other("missing pong after version rejection").into());
+        };
+        let pong: serde_json::Value = serde_json::from_str(pong.as_str())?;
+        assert_eq!(pong["type"], "server.pong");
+        assert_eq!(pong["request_id"], ping_id.to_string());
         Ok(())
     }
 
@@ -3098,6 +3192,7 @@ mod tests {
                 &principal,
                 &mut watches,
                 &mut event_watch,
+                ProtocolVersion::V1_0,
                 &serde_json::to_string(&message)?,
             )
             .await
@@ -3196,7 +3291,7 @@ mod tests {
             let hello = ClientHello {
                 message_type: "client.hello".to_owned(),
                 request_id,
-                protocol: VersionRange::new(1, 0, 0)?,
+                protocol: xenoteer_protocol::VersionRange::new(1, 0, 0)?,
                 client: WebSocketClientDescriptor {
                     name: "authorization-test".to_owned(),
                     version: "1.0.0".to_owned(),

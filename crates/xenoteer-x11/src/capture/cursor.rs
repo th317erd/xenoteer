@@ -160,8 +160,8 @@ pub(super) fn compose_cursor(
     Ok(CursorCaptureEvidence {
         requested: true,
         composited,
-        serial_before: Some(u64::from(before.serial)),
-        serial_after: Some(u64::from(after.serial)),
+        serial_before: Some(before.serial),
+        serial_after: Some(after.serial),
         moved_during_capture: before.changed_from(after),
     })
 }

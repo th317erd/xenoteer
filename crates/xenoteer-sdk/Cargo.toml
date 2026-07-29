@@ -7,18 +7,29 @@ rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
 license = "Apache-2.0"
-publish = false
+readme = "README.md"
+publish = true
+
+[[bin]]
+name = "xenoteer-sdk-conformance"
+path = "src/bin/xenoteer-sdk-conformance.rs"
 
 [dependencies]
 bytes.workspace = true
+futures-util.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
+hyper-rustls.workspace = true
 hyper-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-tungstenite.workspace = true
+tokio-util.workspace = true
+tungstenite.workspace = true
 xenoteer-protocol = { version = "=0.1.0", path = "../xenoteer-protocol" }
 
 [lints]

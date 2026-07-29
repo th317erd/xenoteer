@@ -1,16 +1,14 @@
 //! Authenticated status and capability discovery handlers.
 
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, time::SystemTime};
 
 use axum::{
     Extension, Json,
     extract::State,
+    http::{HeaderValue, header},
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
-use xenoteer_protocol::{
-    CapabilityReport, DesktopGeneration, DesktopId, ProtocolVersion, RequestId,
-};
+use xenoteer_protocol::{CapabilityReport, DesktopStatus, RequestId, StatusResponse, Timestamp};
 
 use crate::{
     ApiState,
@@ -60,23 +58,6 @@ impl fmt::Debug for StaticCapabilityProvider {
 
 pub(crate) type SharedCapabilityProvider = Arc<dyn CapabilityProvider>;
 
-#[derive(Serialize)]
-struct StatusResponse {
-    server_version: &'static str,
-    protocol_min: ProtocolVersion,
-    protocol_max: ProtocolVersion,
-    desktop: DesktopStatus,
-    capabilities: CapabilityReport,
-}
-
-#[derive(Serialize)]
-struct DesktopStatus {
-    id: DesktopId,
-    generation: Option<DesktopGeneration>,
-    state: crate::DesktopReadiness,
-    reason_code: Option<String>,
-}
-
 pub(crate) async fn status(
     State(state): State<ApiState>,
     Extension(principal): Extension<Principal>,
@@ -86,19 +67,41 @@ pub(crate) async fn status(
         return ApiProblem::permission_denied(request_id).into_response();
     }
     let readiness = state.readiness.snapshot();
-    Json(StatusResponse {
-        server_version: env!("CARGO_PKG_VERSION"),
-        protocol_min: ProtocolVersion::V1_0,
-        protocol_max: ProtocolVersion::V1_0,
+    let server_time = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(elapsed) => match Timestamp::from_unix_timestamp_nanos(
+            i128::try_from(elapsed.as_nanos()).unwrap_or(i128::MAX),
+        ) {
+            Ok(timestamp) => timestamp,
+            Err(_) => return ApiProblem::internal(request_id).into_response(),
+        },
+        Err(_) => return ApiProblem::internal(request_id).into_response(),
+    };
+    let protocol_range = crate::protocol_version::SERVER_PROTOCOL_RANGE;
+    let response = StatusResponse {
+        server_version: env!("CARGO_PKG_VERSION").to_owned(),
+        protocol_min: xenoteer_protocol::ProtocolVersion::new(
+            protocol_range.major(),
+            protocol_range.min_minor(),
+        ),
+        protocol_max: xenoteer_protocol::ProtocolVersion::new(
+            protocol_range.major(),
+            protocol_range.max_minor(),
+        ),
+        server_time,
         desktop: DesktopStatus {
             id: state.desktop_id,
             generation: readiness.desktop_generation,
-            state: readiness.state,
+            state: readiness.state.into(),
             reason_code: readiness.reason_code,
         },
         capabilities: state.capabilities.capabilities(),
-    })
-    .into_response()
+    };
+    let mut response = Json(response).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    response
 }
 
 pub(crate) async fn capabilities(

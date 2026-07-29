@@ -7,7 +7,7 @@ rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
 license = "Apache-2.0"
-publish = false
+publish = true
 
 [dependencies]
 http.workspace = true

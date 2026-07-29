@@ -1,0 +1,61 @@
+{
+  "corpus": "xenoteer-conformance-v1",
+  "corpus_sha256": "6cc98e72e1de6591cce2d0661f4fc3ea508535d310a40746aa3ad8bd1e61e7fc",
+  "format_version": 1,
+  "license": "Apache-2.0",
+  "protocol": {
+    "major": 1,
+    "min_minor": 0,
+    "max_minor": 0
+  },
+  "suites": [
+    {
+      "case_count": 6,
+      "path": "cases/command-reconnect.json",
+      "sha256": "c6317ffcbc0bcb51792503d9a3c378844e07c31d591580df1d73d8770b7ed61d",
+      "suite": "scenarios.command-reconnect"
+    },
+    {
+      "case_count": 6,
+      "path": "cases/effect-stages.json",
+      "sha256": "762c76cc3a0389a9735c3367b12f7dd28f3c69c5c4444d3849b9928ded6a1551",
+      "suite": "scenarios.effect-stages"
+    },
+    {
+      "case_count": 16,
+      "path": "cases/event-continuity.json",
+      "sha256": "b7d37d3cde42b8c1a78b339bc59ccead4b3bc9b094cada4a1b012dca741c7fa4",
+      "suite": "events.continuity"
+    },
+    {
+      "case_count": 10,
+      "path": "cases/forward-compatibility.json",
+      "sha256": "a3f167a14a3890c9e587c4e0c5f821c83ab2bf1e19ff87ef954e6eb77759a6c4",
+      "suite": "compatibility.forward"
+    },
+    {
+      "case_count": 10,
+      "path": "cases/protocol-negotiation.json",
+      "sha256": "1282b9b8e4f6c8b53b7e767b11c62fef5fcbe8ba2fa6b38978de9f6c6102e689",
+      "suite": "protocol.negotiation"
+    },
+    {
+      "case_count": 5,
+      "path": "cases/redaction.json",
+      "sha256": "52911c558da97c8934ac6636c3d5069c729f2aba0925fe0821f922aaa405743f",
+      "suite": "redaction.surfaces"
+    },
+    {
+      "case_count": 3,
+      "path": "cases/stale-references.json",
+      "sha256": "6257d1e8f7da21ad23cbaae7eccce68671121651cde0f3b8a8abcd7ce8025912",
+      "suite": "scenarios.stale-references"
+    },
+    {
+      "case_count": 17,
+      "path": "cases/uint64-string.json",
+      "sha256": "3e578c618ecdcfb8d21af967457c686b1cac279e08641da9353706fdd47b4b93",
+      "suite": "wire.uint64-string"
+    }
+  ]
+}

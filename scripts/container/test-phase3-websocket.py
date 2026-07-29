@@ -41,6 +41,22 @@ def require(condition: bool, detail: str) -> None:
         raise AcceptanceFailure(detail)
 
 
+def parse_u64_string(value: object, *, minimum: int = 0) -> int | None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or (len(value) > 1 and value.startswith("0"))
+        or not value.isascii()
+        or not value.isdigit()
+        or len(value) > 20
+    ):
+        return None
+    parsed = int(value)
+    if parsed < minimum or parsed > (1 << 64) - 1:
+        return None
+    return parsed
+
+
 def run_named_check(name: str, check: Any) -> None:
     try:
         check()
@@ -265,11 +281,16 @@ def read_process_ref(path: str, generation: str) -> dict[str, Any]:
         "process reference file had an unexpected shape",
     )
     require(process["desktop_generation"] == generation, "process reference used the wrong generation")
-    for field in ("pid", "proc_start_ticks"):
-        require(
-            isinstance(process[field], int) and not isinstance(process[field], bool) and process[field] > 0,
-            f"process reference {field} was invalid",
-        )
+    require(
+        isinstance(process["pid"], int)
+        and not isinstance(process["pid"], bool)
+        and process["pid"] > 0,
+        "process reference pid was invalid",
+    )
+    require(
+        parse_u64_string(process["proc_start_ticks"], minimum=1) is not None,
+        "process reference proc_start_ticks was invalid",
+    )
     require(
         isinstance(process["launch_id"], str) and uuid.UUID(process["launch_id"]).int != 0,
         "process launch ID was invalid",
@@ -283,7 +304,7 @@ def hello(client: WebSocket, desktop_id: str, generation: str, resume_sequence: 
         resume = {
             "desktop_id": desktop_id,
             "desktop_generation": generation,
-            "event_sequence": resume_sequence,
+            "event_sequence": str(resume_sequence),
         }
     client.send_json(
         {
@@ -373,7 +394,10 @@ def run_exercise(api_base: str, token: bytes, desktop_id: str, generation: str) 
     require(subscribed.get("topics") == topics, "event subscription topics changed")
     replay = expect_message(client, "events.replay_complete", subscribe_id)
     require(replay.get("desktop_id") == desktop_id and replay.get("desktop_generation") == generation, "replay boundary identity changed")
-    require(isinstance(replay.get("through_sequence"), int), "replay boundary sequence was absent")
+    require(
+        parse_u64_string(replay.get("through_sequence")) is not None,
+        "replay boundary sequence was absent",
+    )
 
     acquire_id = new_id()
     client.send_json(lease_message("lease.acquire", acquire_id, desktop_id, generation, ttl_ms=30_000))
@@ -422,8 +446,8 @@ def run_exercise(api_base: str, token: bytes, desktop_id: str, generation: str) 
             event = message.get("event")
             require(isinstance(event, dict), "event envelope was not nested")
             require(event.get("desktop_id") == desktop_id and event.get("desktop_generation") == generation, "event desktop identity changed")
-            sequence = event.get("sequence")
-            require(isinstance(sequence, int) and sequence > 0, "event sequence was invalid")
+            sequence = parse_u64_string(event.get("sequence"), minimum=1)
+            require(sequence is not None, "event sequence was invalid")
             require(not sequences or sequence > sequences[-1], "delivered event sequence was not globally monotonic")
             sequences.append(sequence)
             payload = event.get("payload")
@@ -482,12 +506,19 @@ def run_exercise(api_base: str, token: bytes, desktop_id: str, generation: str) 
         message = resumed.recv()
         require(isinstance(message, dict), "resumed connection closed before replay boundary")
         if message.get("type") == "events.replay_complete":
-            require(message.get("through_sequence", -1) >= seen_sequence, "resume replay boundary moved backwards")
+            through_sequence = parse_u64_string(message.get("through_sequence"))
+            require(
+                through_sequence is not None and through_sequence >= seen_sequence,
+                "resume replay boundary moved backwards",
+            )
             break
         require(message.get("type") == "event", "resume emitted a message before replay completion")
         event = message.get("event", {})
-        sequence = event.get("sequence")
-        require(isinstance(sequence, int) and sequence > seen_sequence, "resumed event sequence was not monotonic")
+        sequence = parse_u64_string(event.get("sequence"), minimum=1)
+        require(
+            sequence is not None and sequence > seen_sequence,
+            "resumed event sequence was not monotonic",
+        )
         seen_sequence = sequence
 
     resumed_unsubscribe_id = new_id()
@@ -664,8 +695,8 @@ def run_process_terminate(
         subscribed = expect_message(client, "events.subscribed", subscribe_id)
         require(subscribed.get("topics") == ["process.exited"], "process-event topic subscription changed")
         replay = expect_message(client, "events.replay_complete", subscribe_id)
-        through_sequence = replay.get("through_sequence")
-        require(isinstance(through_sequence, int) and through_sequence >= 0, "process-event replay boundary was invalid")
+        through_sequence = parse_u64_string(replay.get("through_sequence"))
+        require(through_sequence is not None, "process-event replay boundary was invalid")
 
         command_id = new_id()
         request_id = new_id()
@@ -705,8 +736,11 @@ def run_process_terminate(
                     event.get("desktop_id") == desktop_id and event.get("desktop_generation") == generation,
                     "process event used the wrong desktop identity",
                 )
-                sequence = event.get("sequence")
-                require(isinstance(sequence, int) and sequence > last_sequence, "process event sequence was not monotonic")
+                sequence = parse_u64_string(event.get("sequence"), minimum=1)
+                require(
+                    sequence is not None and sequence > last_sequence,
+                    "process event sequence was not monotonic",
+                )
                 last_sequence = sequence
                 require(event.get("topic") == "process.exited", "process-event subscription delivered another topic")
                 payload = event.get("payload")

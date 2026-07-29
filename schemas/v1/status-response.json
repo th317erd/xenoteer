@@ -1,0 +1,241 @@
+{
+  "$defs": {
+    "Capability": {
+      "description": "One capability and its current safe status summary.\n\nJSON Schema string lengths count Unicode code points; admission additionally\napplies the documented UTF-8 byte ceilings before values are exposed.",
+      "properties": {
+        "backend_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/CapabilityId"
+        },
+        "reason_code": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9._-]+$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/CapabilityStatus"
+        }
+      },
+      "required": [
+        "id",
+        "status"
+      ],
+      "type": "object"
+    },
+    "CapabilityId": {
+      "description": "A stable dotted capability identifier such as `input.pointer.smooth`.",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[a-z0-9_-]+(?:\\.[a-z0-9_-]+)*$",
+      "type": "string"
+    },
+    "CapabilityReport": {
+      "description": "Capability discovery response.",
+      "properties": {
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/Capability"
+          },
+          "maxItems": 256,
+          "type": "array"
+        }
+      },
+      "required": [
+        "capabilities"
+      ],
+      "type": "object"
+    },
+    "CapabilityStatus": {
+      "description": "Runtime availability of one advertised capability.",
+      "oneOf": [
+        {
+          "const": "available",
+          "description": "The capability passed its probe and can accept work.",
+          "type": "string"
+        },
+        {
+          "const": "degraded",
+          "description": "The capability works only partially or under a known limitation.",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "The backend or prerequisite is currently unavailable.",
+          "type": "string"
+        },
+        {
+          "const": "disabled",
+          "description": "Configuration or policy disabled the capability.",
+          "type": "string"
+        }
+      ]
+    },
+    "DesktopGeneration": {
+      "description": "Identifies one X server/session lifetime.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopId": {
+      "description": "Identifies a desktop resource.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DesktopState": {
+      "description": "Coarse externally visible desktop lifecycle.",
+      "oneOf": [
+        {
+          "const": "booting",
+          "description": "Process composition is still starting.",
+          "type": "string"
+        },
+        {
+          "const": "probing",
+          "description": "Required capability probes are running.",
+          "type": "string"
+        },
+        {
+          "const": "ready",
+          "description": "Every required capability probe passed.",
+          "type": "string"
+        },
+        {
+          "const": "degraded",
+          "description": "Required capabilities passed but an optional capability is unavailable.",
+          "type": "string"
+        },
+        {
+          "const": "draining",
+          "description": "New work is refused while shutdown cleanup runs.",
+          "type": "string"
+        },
+        {
+          "const": "stopped",
+          "description": "Shutdown completed.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "A critical invariant or subsystem failed.",
+          "type": "string"
+        }
+      ]
+    },
+    "DesktopStatus": {
+      "description": "Current generation-bound desktop summary.",
+      "properties": {
+        "generation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DesktopGeneration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Current lifetime, once a desktop session exists."
+        },
+        "id": {
+          "$ref": "#/$defs/DesktopId",
+          "description": "Stable desktop identifier."
+        },
+        "reason_code": {
+          "description": "Stable safe reason code for non-nominal state.",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9._-]+$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/DesktopState",
+          "description": "Coarse lifecycle state."
+        }
+      },
+      "required": [
+        "id",
+        "state"
+      ],
+      "type": "object"
+    },
+    "ProtocolVersion": {
+      "description": "A negotiated protocol major/minor pair.",
+      "properties": {
+        "major": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor"
+      ],
+      "type": "object"
+    },
+    "Timestamp": {
+      "description": "A canonical RFC 3339 timestamp with an explicit UTC offset.",
+      "format": "date-time",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Authenticated status and protocol-discovery response.\n\nResponse objects intentionally accept additive fields so older SDKs can\ndecode newer compatible server responses.",
+  "properties": {
+    "capabilities": {
+      "$ref": "#/$defs/CapabilityReport",
+      "description": "Current live capability evidence."
+    },
+    "desktop": {
+      "$ref": "#/$defs/DesktopStatus",
+      "description": "Current desktop identity and readiness."
+    },
+    "protocol_max": {
+      "$ref": "#/$defs/ProtocolVersion",
+      "description": "Newest supported exact protocol version."
+    },
+    "protocol_min": {
+      "$ref": "#/$defs/ProtocolVersion",
+      "description": "Oldest supported exact protocol version."
+    },
+    "server_time": {
+      "$ref": "#/$defs/Timestamp",
+      "description": "Server wall-clock observation used to derive absolute request deadlines."
+    },
+    "server_version": {
+      "description": "Server package version.",
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "server_version",
+    "protocol_min",
+    "protocol_max",
+    "server_time",
+    "desktop",
+    "capabilities"
+  ],
+  "title": "StatusResponse",
+  "type": "object"
+}

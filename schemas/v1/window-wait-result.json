@@ -59,9 +59,11 @@
         },
         "proc_start_ticks": {
           "description": "Field 22 from `/proc/{pid}/stat`, measured in boot clock ticks.",
-          "format": "uint64",
-          "minimum": 1,
-          "type": "integer"
+          "format": "uint64-string",
+          "maxLength": 20,
+          "minLength": 1,
+          "pattern": "^[1-9][0-9]{0,19}$",
+          "type": "string"
         }
       },
       "required": [
@@ -331,9 +333,11 @@
     },
     "WindowModelRevision": {
       "description": "One non-zero actor-local model revision.",
-      "format": "uint64",
-      "minimum": 1,
-      "type": "integer"
+      "format": "uint64-string",
+      "maxLength": 20,
+      "minLength": 1,
+      "pattern": "^[1-9][0-9]{0,19}$",
+      "type": "string"
     },
     "WindowObservedState": {
       "description": "Observed window-manager and focus state.",
@@ -481,9 +485,11 @@
         },
         "observed_generation": {
           "description": "Per-XID birth marker incremented whenever an absent XID reappears.",
-          "format": "uint64",
-          "minimum": 1,
-          "type": "integer"
+          "format": "uint64-string",
+          "maxLength": 20,
+          "minLength": 1,
+          "pattern": "^[1-9][0-9]{0,19}$",
+          "type": "string"
         },
         "xid": {
           "description": "Non-zero core X11 window identifier.",

@@ -1,0 +1,126 @@
+{
+  "format_version": 1,
+  "license": "Apache-2.0",
+  "suite": "redaction.surfaces",
+  "description": "Raw secret-bearing values are exercised through SDK debug, error, and URL boundaries.",
+  "cases": [
+    {
+      "id": "redaction.artifact-bytes",
+      "description": "Raw artifact bytes never enter SDK debug, transport error, or URL text.",
+      "operation": "redaction",
+      "input": {
+        "kind": "artifact",
+        "secret": "XENOTEER_ARTIFACT_CANARY_9fd00de18a9f",
+        "base_url": "http://127.0.0.1:9",
+        "raw": {
+          "content_type": "application/octet-stream",
+          "bytes_utf8": "XENOTEER_ARTIFACT_CANARY_9fd00de18a9f"
+        }
+      },
+      "expect": {
+        "debug_leaked": false,
+        "error_leaked": false,
+        "url_leaked": false
+      },
+      "tags": ["artifact", "redaction", "secret"]
+    },
+    {
+      "id": "redaction.bearer-token",
+      "description": "A raw API bearer stays out of client debug, errors, and endpoint URLs.",
+      "operation": "redaction",
+      "input": {
+        "kind": "bearer",
+        "secret": "XENOTEER_BEARER_CANARY_76e3da9955c6",
+        "base_url": "http://127.0.0.1:9",
+        "raw": {
+          "authorization": "Bearer XENOTEER_BEARER_CANARY_76e3da9955c6"
+        }
+      },
+      "expect": {
+        "debug_leaked": false,
+        "error_leaked": false,
+        "url_leaked": false
+      },
+      "tags": ["authentication", "redaction", "secret"]
+    },
+    {
+      "id": "redaction.clipboard-content",
+      "description": "A raw inline clipboard command is redacted by CommandSubmission debug.",
+      "operation": "redaction",
+      "input": {
+        "kind": "clipboard",
+        "secret": "XENOTEER_CLIPBOARD_CANARY_a57ec8d91f64",
+        "base_url": "http://127.0.0.1:9",
+        "raw": {
+          "command": {
+            "type": "selection_set",
+            "selection": "clipboard",
+            "content": {
+              "source": "inline_text",
+              "text": "XENOTEER_CLIPBOARD_CANARY_a57ec8d91f64"
+            }
+          }
+        }
+      },
+      "expect": {
+        "debug_leaked": false,
+        "error_leaked": false,
+        "url_leaked": false
+      },
+      "tags": ["clipboard", "redaction", "secret"]
+    },
+    {
+      "id": "redaction.command-text",
+      "description": "A raw application argument stays out of submission debug and errors.",
+      "operation": "redaction",
+      "input": {
+        "kind": "command",
+        "secret": "XENOTEER_COMMAND_TEXT_CANARY_4db195992493",
+        "base_url": "http://127.0.0.1:9",
+        "raw": {
+          "command": {
+            "type": "application_launch",
+            "application": "conformance",
+            "arguments": ["XENOTEER_COMMAND_TEXT_CANARY_4db195992493"]
+          }
+        }
+      },
+      "expect": {
+        "debug_leaked": false,
+        "error_leaked": false,
+        "url_leaked": false
+      },
+      "tags": ["command", "redaction", "secret"]
+    },
+    {
+      "id": "redaction.viewer-ticket",
+      "description": "A raw one-time viewer ticket is hidden by its typed Debug representation.",
+      "operation": "redaction",
+      "input": {
+        "kind": "viewer",
+        "secret": "XENOTEER_VIEWER_TICKET_CANARY_93fa92ad2a7bA",
+        "base_url": "http://127.0.0.1:9",
+        "raw": {
+          "ticket": {
+            "ticket": "XENOTEER_VIEWER_TICKET_CANARY_93fa92ad2a7bA",
+            "principal_id": "conformance-user",
+            "audience": "viewer_websocket",
+            "desktop_id": "20000000-0000-4000-8000-000000000001",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "origin": "https://viewer.example",
+            "mode": "view_only",
+            "issued_at": "2030-01-01T00:00:00Z",
+            "expires_at": "2030-01-01T00:00:30Z",
+            "use_policy": "single_use"
+          }
+        }
+      },
+      "expect": {
+        "debug_leaked": false,
+        "error_leaked": false,
+        "url_leaked": false
+      },
+      "tags": ["redaction", "secret", "viewer"]
+    }
+  ]
+}

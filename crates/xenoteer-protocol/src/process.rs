@@ -147,7 +147,8 @@ pub struct ProcessRef {
     #[schemars(range(min = 1))]
     pub pid: u32,
     /// Field 22 from `/proc/{pid}/stat`, measured in boot clock ticks.
-    #[schemars(range(min = 1))]
+    #[serde(with = "crate::wire_integer::nonzero")]
+    #[schemars(schema_with = "crate::wire_integer::nonzero_schema")]
     pub proc_start_ticks: u64,
     /// Server-generated managed launch identity.
     pub launch_id: LaunchId,
@@ -165,7 +166,8 @@ pub(crate) struct StrictProcessRef {
     desktop_generation: DesktopGeneration,
     #[schemars(range(min = 1))]
     pid: u32,
-    #[schemars(range(min = 1))]
+    #[serde(with = "crate::wire_integer::nonzero")]
+    #[schemars(schema_with = "crate::wire_integer::nonzero_schema")]
     proc_start_ticks: u64,
     launch_id: LaunchId,
 }

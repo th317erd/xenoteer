@@ -16,6 +16,12 @@ their own license and notice files. They are not relicensed under the root BSL:
 - crates/xenoteer-protocol/LICENSE and crates/xenoteer-protocol/NOTICE
 - crates/xenoteer-sdk/LICENSE and crates/xenoteer-sdk/NOTICE
 - schemas/LICENSE and schemas/NOTICE
+- conformance/LICENSE and conformance/NOTICE, including the language-neutral
+  corpus and scripts/conformance validator/runner tooling
+- packages/typescript/LICENSE and packages/typescript/NOTICE
+- packages/python/LICENSE and packages/python/NOTICE
+- scripts/packages package-boundary verification tooling, with license and notice
+  evidence from the two public Rust packages above
 
 Container seccomp policy derivatives
 ------------------------------------

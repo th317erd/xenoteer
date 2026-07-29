@@ -17,22 +17,22 @@
         "element": {
           "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
           "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
-          "atspi_generation": 4,
+          "atspi_generation": "4",
           "application": {
             "desktop_id": "018f3e58-78c0-7d8e-a701-3a6ca29a0001",
             "desktop_generation": "018f3e58-78c0-7d8e-a701-3a6ca29a0002",
-            "atspi_generation": 4,
+            "atspi_generation": "4",
             "unique_bus_name": ":1.42",
             "root_object_path": "/org/a11y/atspi/accessible/root",
-            "app_instance_generation": 2,
+            "app_instance_generation": "2",
             "identity_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
           },
           "object_path": "/org/a11y/atspi/accessible/stable-entry",
           "object_identity_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-          "cache_sequence": 91
+          "cache_sequence": "91"
         },
-        "revision_before": 94,
-        "revision_after": 95,
+        "revision_before": "94",
+        "revision_after": "95",
         "backend_accepted": true,
         "insertion_offset": 7,
         "character_count_before": 7,

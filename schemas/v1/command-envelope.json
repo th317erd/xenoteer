@@ -22,9 +22,11 @@
       "additionalProperties": false,
       "properties": {
         "app_instance_generation": {
-          "format": "uint64",
-          "minimum": 1,
-          "type": "integer"
+          "format": "uint64-string",
+          "maxLength": 20,
+          "minLength": 1,
+          "pattern": "^[1-9][0-9]{0,19}$",
+          "type": "string"
         },
         "atspi_generation": {
           "$ref": "#/$defs/AtspiGeneration"
@@ -152,9 +154,11 @@
       "type": "string"
     },
     "AtspiGeneration": {
-      "format": "uint64",
-      "minimum": 1,
-      "type": "integer"
+      "format": "uint64-string",
+      "maxLength": 20,
+      "minLength": 1,
+      "pattern": "^[1-9][0-9]{0,19}$",
+      "type": "string"
     },
     "AtspiObjectPath": {
       "maxLength": 4096,
@@ -1614,9 +1618,11 @@
           "$ref": "#/$defs/AtspiGeneration"
         },
         "cache_sequence": {
-          "format": "uint64",
-          "minimum": 1,
-          "type": "integer"
+          "format": "uint64-string",
+          "maxLength": 20,
+          "minLength": 1,
+          "pattern": "^[1-9][0-9]{0,19}$",
+          "type": "string"
         },
         "desktop_generation": {
           "$ref": "#/$defs/DesktopGeneration"
@@ -2741,9 +2747,11 @@
           "type": "integer"
         },
         "proc_start_ticks": {
-          "format": "uint64",
-          "minimum": 1,
-          "type": "integer"
+          "format": "uint64-string",
+          "maxLength": 20,
+          "minLength": 1,
+          "pattern": "^[1-9][0-9]{0,19}$",
+          "type": "string"
         }
       },
       "required": [
@@ -3307,9 +3315,11 @@
           "$ref": "#/$defs/WindowIdentityHash"
         },
         "observed_generation": {
-          "format": "uint64",
-          "minimum": 1,
-          "type": "integer"
+          "format": "uint64-string",
+          "maxLength": 20,
+          "minLength": 1,
+          "pattern": "^[1-9][0-9]{0,19}$",
+          "type": "string"
         },
         "xid": {
           "format": "uint32",

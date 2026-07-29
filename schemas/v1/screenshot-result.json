@@ -140,7 +140,7 @@
         },
         "serial_after": {
           "description": "XFIXES cursor serial observed immediately after framebuffer capture.",
-          "format": "uint64",
+          "format": "uint32",
           "minimum": 0,
           "type": [
             "integer",
@@ -149,7 +149,7 @@
         },
         "serial_before": {
           "description": "XFIXES cursor serial observed immediately before framebuffer capture.",
-          "format": "uint64",
+          "format": "uint32",
           "minimum": 0,
           "type": [
             "integer",
@@ -481,9 +481,11 @@
         },
         "observed_generation": {
           "description": "Per-XID birth marker incremented whenever an absent XID reappears.",
-          "format": "uint64",
-          "minimum": 1,
-          "type": "integer"
+          "format": "uint64-string",
+          "maxLength": 20,
+          "minLength": 1,
+          "pattern": "^[1-9][0-9]{0,19}$",
+          "type": "string"
         },
         "xid": {
           "description": "Non-zero core X11 window identifier.",

@@ -789,7 +789,7 @@ async fn application_invalidation_cache_change_precedes_marker_without_duplicate
     for event in events_after_marker {
         assert_eq!(event.topic.as_str(), "accessibility.element_removed");
         assert_eq!(event.payload["kind"], "cache_removed");
-        assert_eq!(event.payload["atspi_generation"], 1);
+        assert_eq!(event.payload["atspi_generation"], "1");
     }
 
     let page = runtime

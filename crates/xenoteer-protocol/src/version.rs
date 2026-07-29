@@ -65,6 +65,23 @@ pub struct VersionRange {
 }
 
 impl VersionRange {
+    /// Server and SDK support range for the frozen version-one contract.
+    pub const V1: Self = Self {
+        major: 1,
+        min_minor: 0,
+        max_minor: 0,
+    };
+
+    /// Creates an exact one-version range without runtime validation.
+    #[must_use]
+    pub const fn exact(version: ProtocolVersion) -> Self {
+        Self {
+            major: version.major,
+            min_minor: version.minor,
+            max_minor: version.minor,
+        }
+    }
+
     /// Creates a valid inclusive range.
     pub fn new(major: u16, min_minor: u16, max_minor: u16) -> Result<Self, VersionError> {
         if min_minor > max_minor {
@@ -90,6 +107,32 @@ impl VersionRange {
             return Err(VersionError::NoSharedMinor);
         }
         Ok(ProtocolVersion::new(self.major, maximum))
+    }
+
+    /// Returns whether an exact version is inside this inclusive range.
+    #[must_use]
+    pub const fn contains(self, version: ProtocolVersion) -> bool {
+        self.major == version.major
+            && self.min_minor <= version.minor
+            && version.minor <= self.max_minor
+    }
+
+    /// Returns the supported major version.
+    #[must_use]
+    pub const fn major(self) -> u16 {
+        self.major
+    }
+
+    /// Returns the inclusive minimum supported minor.
+    #[must_use]
+    pub const fn min_minor(self) -> u16 {
+        self.min_minor
+    }
+
+    /// Returns the inclusive maximum supported minor.
+    #[must_use]
+    pub const fn max_minor(self) -> u16 {
+        self.max_minor
     }
 
     /// Validates a value obtained through deserialization.
@@ -125,5 +168,17 @@ mod tests {
         let server = VersionRange::new(1, 2, 3)?;
         assert_eq!(client.negotiate(server), Ok(ProtocolVersion::new(1, 3)));
         Ok(())
+    }
+
+    #[test]
+    fn exact_range_contains_only_its_version() {
+        let range = VersionRange::exact(ProtocolVersion::V1_0);
+        assert_eq!(range, VersionRange::V1);
+        assert!(range.contains(ProtocolVersion::V1_0));
+        assert!(!range.contains(ProtocolVersion::new(1, 1)));
+        assert!(!range.contains(ProtocolVersion::new(2, 0)));
+        assert_eq!(range.major(), 1);
+        assert_eq!(range.min_minor(), 0);
+        assert_eq!(range.max_minor(), 0);
     }
 }

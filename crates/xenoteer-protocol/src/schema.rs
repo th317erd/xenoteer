@@ -16,14 +16,15 @@ use crate::{
     ElementResolveResult, ElementSnapshotRequest, ElementSnapshotResult, ElementWaitRequest,
     ElementWaitResult, LeaseAcquireRequest, LeaseReleaseRequest, LeaseRenewRequest, LeaseStateView,
     OneTimeViewerTicket, Problem, ProcessExitedEvent, ProcessRef, ProcessView, ScreenshotRequest,
-    ScreenshotResult, ViewerSessionEvidence, ViewerTicketRequest, WebSocketClientMessage,
-    WebSocketServerMessage, WindowListPage, WindowListRequest, WindowManagerCapabilities,
-    WindowQueryPage, WindowQueryRequest, WindowResolveRequest, WindowResolveResult,
-    WindowSnapshotRequest, WindowSnapshotResult, WindowWaitRequest, WindowWaitResult,
+    ScreenshotResult, StatusResponse, ViewerSessionEvidence, ViewerTicketRequest,
+    WebSocketClientMessage, WebSocketServerMessage, WindowListPage, WindowListRequest,
+    WindowManagerCapabilities, WindowQueryPage, WindowQueryRequest, WindowResolveRequest,
+    WindowResolveResult, WindowSnapshotRequest, WindowSnapshotResult, WindowWaitRequest,
+    WindowWaitResult,
 };
 
 /// Checked-in schema filenames for protocol version one.
-pub const SCHEMA_FILENAMES: [&str; 46] = [
+pub const SCHEMA_FILENAMES: [&str; 47] = [
     "capabilities.json",
     "command-envelope.json",
     "command-result.json",
@@ -70,6 +71,7 @@ pub const SCHEMA_FILENAMES: [&str; 46] = [
     "element-resolve-request.json",
     "element-resolve-result.json",
     "accessibility-event.json",
+    "status-response.json",
 ];
 
 /// Returns the repository's checked-in version-one schema directory.
@@ -265,6 +267,10 @@ pub fn generated_schemas() -> Result<Vec<(&'static str, String)>, SchemaError> {
             SCHEMA_FILENAMES[45],
             serde_json::to_value(schemars::schema_for!(AccessibilityEvent))?,
         ),
+        (
+            SCHEMA_FILENAMES[46],
+            serde_json::to_value(schemars::schema_for!(StatusResponse))?,
+        ),
     ];
 
     schemas
@@ -437,6 +443,7 @@ mod tests {
             "element-snapshot-result.json",
             "element-wait-result.json",
             "accessibility-event.json",
+            "status-response.json",
         ] {
             let schema = generated_schema(name)?;
             assert_open_object(&schema, name);

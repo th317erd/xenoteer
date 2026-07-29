@@ -133,6 +133,12 @@
         "responses": {
           "200": {
             "description": "Current authenticated status snapshot.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Authenticated discovery state must not be stored.",
+                "schema": {"type": "string", "const": "private, no-store"}
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1306,40 +1312,8 @@
           "status": {"type": "string", "enum": ["ready", "degraded", "not_ready"]}
         }
       },
-      "ProtocolVersion": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["major", "minor"],
-        "properties": {
-          "major": {"type": "integer", "minimum": 0, "maximum": 65535},
-          "minor": {"type": "integer", "minimum": 0, "maximum": 65535}
-        }
-      },
-      "DesktopStatus": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["id", "generation", "state", "reason_code"],
-        "properties": {
-          "id": {"type": "string", "format": "uuid"},
-          "generation": {"type": ["string", "null"], "format": "uuid"},
-          "state": {
-            "type": "string",
-            "enum": ["booting", "probing", "ready", "degraded", "draining", "stopped", "failed"]
-          },
-          "reason_code": {"type": ["string", "null"]}
-        }
-      },
       "StatusResponse": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["server_version", "protocol_min", "protocol_max", "desktop", "capabilities"],
-        "properties": {
-          "server_version": {"type": "string"},
-          "protocol_min": {"$ref": "#/components/schemas/ProtocolVersion"},
-          "protocol_max": {"$ref": "#/components/schemas/ProtocolVersion"},
-          "desktop": {"$ref": "#/components/schemas/DesktopStatus"},
-          "capabilities": {"$ref": "../../../schemas/v1/capabilities.json"}
-        }
+        "$ref": "../../../schemas/v1/status-response.json"
       }
     },
     "responses": {

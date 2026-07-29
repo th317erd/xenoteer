@@ -1,0 +1,300 @@
+{
+  "format_version": 1,
+  "license": "Apache-2.0",
+  "suite": "compatibility.forward",
+  "description": "Strict client inputs and bounded additive server-output decoding.",
+  "cases": [
+    {
+      "id": "compat.event.unknown-topic",
+      "description": "An authorized unknown future event topic remains observable with its raw payload.",
+      "operation": "decode_event",
+      "input": {
+        "wire": {
+          "type": "event",
+          "request_id": "10000000-0000-4000-8000-000000000001",
+          "event": {
+            "desktop_id": "20000000-0000-4000-8000-000000000001",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "sequence": "9007199254740993",
+            "topic": "future.widget.changed",
+            "payload": {"future_flag": true, "revision": "18446744073709551615"}
+          }
+        }
+      },
+      "expect": {
+        "outcome": "unknown_event",
+        "preserve": [
+          "/event/payload",
+          "/event/sequence",
+          "/event/topic"
+        ]
+      },
+      "tags": ["additive", "event", "forward"]
+    },
+    {
+      "id": "compat.request.unknown-nested-authority",
+      "description": "Unknown fields inside an authority-bearing request reference are rejected.",
+      "operation": "decode_request",
+      "input": {
+        "wire": {
+          "protocol_version": {"major": 1, "minor": 0},
+          "request_id": "10000000-0000-4000-8000-000000000002",
+          "command_id": "40000000-0000-4000-8000-000000000001",
+          "desktop_id": "20000000-0000-4000-8000-000000000001",
+          "desktop_generation": "30000000-0000-4000-8000-000000000001",
+          "deadline": "2030-01-01T00:00:00Z",
+          "lease_id": null,
+          "command": {
+            "type": "process_status",
+            "process": {
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "pid": 1234,
+              "proc_start_ticks": "9007199254740993",
+              "launch_id": "50000000-0000-4000-8000-000000000001",
+              "future_authority": "must-not-be-ignored"
+            }
+          }
+        }
+      },
+      "expect": {
+        "outcome": "rejected",
+        "code": "invalid_request",
+        "connection": "usable",
+        "preserve": []
+      },
+      "tags": ["authority", "negative", "request"]
+    },
+    {
+      "id": "compat.request.unknown-top-level",
+      "description": "Unknown fields on a client-authored command envelope are rejected.",
+      "operation": "decode_request",
+      "input": {
+        "wire": {
+          "protocol_version": {"major": 1, "minor": 0},
+          "request_id": "10000000-0000-4000-8000-000000000003",
+          "command_id": "40000000-0000-4000-8000-000000000002",
+          "desktop_id": "20000000-0000-4000-8000-000000000001",
+          "desktop_generation": "30000000-0000-4000-8000-000000000001",
+          "deadline": "2030-01-01T00:00:00Z",
+          "lease_id": null,
+          "command": {"type": "desktop_probe"},
+          "future_option": true
+        }
+      },
+      "expect": {
+        "outcome": "rejected",
+        "code": "invalid_request",
+        "connection": "usable",
+        "preserve": []
+      },
+      "tags": ["negative", "request", "strict"]
+    },
+    {
+      "id": "compat.response.invalid-capability-reason",
+      "description": "A malformed reason code in a known capability record fails the operation without poisoning the connection.",
+      "operation": "decode_response",
+      "input": {
+        "wire": {
+          "server_version": "0.2.0",
+          "protocol_min": {"major": 1, "minor": 0},
+          "protocol_max": {"major": 1, "minor": 1},
+          "server_time": "2030-01-01T00:00:00Z",
+          "desktop": {
+            "id": "20000000-0000-4000-8000-000000000001",
+            "generation": "30000000-0000-4000-8000-000000000001",
+            "state": "ready",
+            "reason_code": null
+          },
+          "capabilities": {
+            "capabilities": [
+              {
+                "id": "input.pointer.smooth",
+                "status": "available",
+                "reason_code": "NOT SAFE",
+                "backend_version": null
+              }
+            ]
+          }
+        }
+      },
+      "expect": {
+        "outcome": "operation_error",
+        "code": "invalid_response",
+        "connection": "usable",
+        "preserve": []
+      },
+      "tags": ["capability", "negative", "response"]
+    },
+    {
+      "id": "compat.response.invalid-capability-record",
+      "description": "A malformed status discriminant in a known capability record is rejected as an invalid response.",
+      "operation": "decode_response",
+      "input": {
+        "wire": {
+          "server_version": "0.2.0",
+          "protocol_min": {"major": 1, "minor": 0},
+          "protocol_max": {"major": 1, "minor": 1},
+          "server_time": "2030-01-01T00:00:00Z",
+          "desktop": {
+            "id": "20000000-0000-4000-8000-000000000001",
+            "generation": "30000000-0000-4000-8000-000000000001",
+            "state": "ready",
+            "reason_code": null
+          },
+          "capabilities": {
+            "capabilities": [
+              {
+                "id": "input.pointer.smooth",
+                "status": "future",
+                "reason_code": null,
+                "backend_version": null
+              }
+            ]
+          }
+        }
+      },
+      "expect": {
+        "outcome": "operation_error",
+        "code": "invalid_response",
+        "connection": "usable",
+        "preserve": []
+      },
+      "tags": ["capability", "negative", "response"]
+    },
+    {
+      "id": "compat.response.invalid-desktop-reason",
+      "description": "A malformed desktop reason code in a known status response is rejected without poisoning the connection.",
+      "operation": "decode_response",
+      "input": {
+        "wire": {
+          "server_version": "0.2.0",
+          "protocol_min": {"major": 1, "minor": 0},
+          "protocol_max": {"major": 1, "minor": 1},
+          "server_time": "2030-01-01T00:00:00Z",
+          "desktop": {
+            "id": "20000000-0000-4000-8000-000000000001",
+            "generation": "30000000-0000-4000-8000-000000000001",
+            "state": "ready",
+            "reason_code": "NOT SAFE"
+          },
+          "capabilities": {"capabilities": []}
+        }
+      },
+      "expect": {
+        "outcome": "operation_error",
+        "code": "invalid_response",
+        "connection": "usable",
+        "preserve": []
+      },
+      "tags": ["desktop", "negative", "response"]
+    },
+    {
+      "id": "compat.response.known-additive-nested",
+      "description": "Unknown nested metadata in a known server response is retained as an extension.",
+      "operation": "decode_response",
+      "input": {
+        "wire": {
+          "server_version": "0.2.0",
+          "protocol_min": {"major": 1, "minor": 0, "future_floor": "stable"},
+          "protocol_max": {"major": 1, "minor": 1},
+          "server_time": "2030-01-01T00:00:00Z",
+          "desktop": {
+            "id": "20000000-0000-4000-8000-000000000001",
+            "generation": "30000000-0000-4000-8000-000000000001",
+            "state": "ready",
+            "future_health": {"score": 100}
+          },
+          "capabilities": {"capabilities": []}
+        }
+      },
+      "expect": {
+        "outcome": "accepted",
+        "known_type": "status",
+        "preserve": [
+          "/desktop/future_health",
+          "/protocol_min/future_floor"
+        ]
+      },
+      "tags": ["additive", "forward", "response"]
+    },
+    {
+      "id": "compat.response.known-additive-top-level",
+      "description": "Unknown top-level server status fields do not break an older decoder.",
+      "operation": "decode_response",
+      "input": {
+        "wire": {
+          "server_version": "0.2.0",
+          "protocol_min": {"major": 1, "minor": 0},
+          "protocol_max": {"major": 1, "minor": 1},
+          "server_time": "2030-01-01T00:00:00Z",
+          "desktop": {
+            "id": "20000000-0000-4000-8000-000000000001",
+            "generation": "30000000-0000-4000-8000-000000000001",
+            "state": "ready"
+          },
+          "capabilities": {"capabilities": []},
+          "future_server_metadata": {"build_channel": "community"}
+        }
+      },
+      "expect": {
+        "outcome": "accepted",
+        "known_type": "status",
+        "preserve": ["/future_server_metadata"]
+      },
+      "tags": ["additive", "forward", "response"]
+    },
+    {
+      "id": "compat.response.unknown-message-type",
+      "description": "An unknown future server message is preserved as a raw top-level message.",
+      "operation": "decode_response",
+      "input": {
+        "wire": {
+          "type": "future.snapshot.ready",
+          "request_id": "10000000-0000-4000-8000-000000000005",
+          "snapshot": {
+            "revision": "18446744073709551615",
+            "kind": "future"
+          }
+        }
+      },
+      "expect": {
+        "outcome": "unknown_message",
+        "connection": "usable",
+        "preserve": [""]
+      },
+      "tags": ["forward", "message", "response"]
+    },
+    {
+      "id": "compat.response.unknown-nested-discriminant",
+      "description": "An unknown nested result variant fails only the affected operation, not the socket.",
+      "operation": "decode_response",
+      "input": {
+        "wire": {
+          "type": "command.result",
+          "request_id": "10000000-0000-4000-8000-000000000004",
+          "result": {
+            "command_id": "40000000-0000-4000-8000-000000000003",
+            "lifecycle": "succeeded",
+            "effect_stage": "pointer_moved",
+            "accepted_at": "2030-01-01T00:00:00Z",
+            "started_at": "2030-01-01T00:00:00.010Z",
+            "finished_at": "2030-01-01T00:00:00.020Z",
+            "outcome": {
+              "type": "future_atomic_macro",
+              "completed_steps": 3
+            },
+            "error": null,
+            "warnings": []
+          }
+        }
+      },
+      "expect": {
+        "outcome": "operation_error",
+        "code": "unsupported_response_variant",
+        "connection": "usable",
+        "preserve": ["/result/outcome"]
+      },
+      "tags": ["forward", "operation", "response"]
+    }
+  ]
+}

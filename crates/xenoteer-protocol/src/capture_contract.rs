@@ -282,9 +282,9 @@ pub struct CursorCaptureEvidence {
     /// Whether a cursor image intersected and was composited into the result.
     pub composited: bool,
     /// XFIXES cursor serial observed immediately before framebuffer capture.
-    pub serial_before: Option<u64>,
+    pub serial_before: Option<u32>,
     /// XFIXES cursor serial observed immediately after framebuffer capture.
-    pub serial_after: Option<u64>,
+    pub serial_after: Option<u32>,
     /// Whether position or serial changed across the weak snapshot.
     pub moved_during_capture: bool,
 }

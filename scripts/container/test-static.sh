@@ -12,6 +12,36 @@ required=(
   crates/xenoteer-protocol/NOTICE
   crates/xenoteer-sdk/LICENSE
   crates/xenoteer-sdk/NOTICE
+  conformance/LICENSE
+  conformance/NOTICE
+  conformance/v1/manifest.json
+  packages/typescript/LICENSE
+  packages/typescript/NOTICE
+  packages/typescript/package.json
+  packages/typescript/package-lock.json
+  packages/typescript/scripts/clean-dist.mjs
+  packages/typescript/scripts/conformance-adapter.mjs
+  packages/typescript/scripts/package-allowlist.json
+  packages/typescript/scripts/verify-package.mjs
+  packages/typescript/src/index.ts
+  packages/typescript/test/conformance-package.test.ts
+  packages/typescript/test/hardening.test.ts
+  packages/typescript/test/sdk.test.ts
+  packages/typescript/tsconfig.json
+  packages/python/LICENSE
+  packages/python/NOTICE
+  packages/python/MANIFEST.in
+  packages/python/PACKAGE_ALLOWLIST.txt
+  packages/python/SDIST_ALLOWLIST.txt
+  packages/python/WHEEL_ALLOWLIST.txt
+  packages/python/pyproject.toml
+  packages/python/requirements-test.lock
+  packages/python/scripts/run_conformance.py
+  packages/python/scripts/verify_dist.py
+  packages/python/src/xenoteer/__init__.py
+  packages/python/src/xenoteer/py.typed
+  packages/python/tests/test_hardening.py
+  packages/python/tests/test_sdk.py
   schemas/LICENSE
   schemas/NOTICE
   compose.dev.yml
@@ -47,6 +77,19 @@ required=(
   scripts/container/test-phase4-event-flood.sh
   scripts/container/test-phase4-live-fixtures.py
   scripts/container/test-phase5-atspi-live.py
+  scripts/conformance/validate.py
+  scripts/conformance/run.py
+  scripts/conformance/tests/test_tools.py
+  scripts/packages/verify-boundaries.py
+  scripts/packages/tests/test_verify_boundaries.py
+  scripts/sdk/README.md
+  scripts/sdk/public_quickstarts.py
+  scripts/sdk/quickstarts/python/quickstart.py
+  scripts/sdk/quickstarts/rust/main.rs
+  scripts/sdk/quickstarts/typescript/quickstart.mjs
+  scripts/sdk/test-public-quickstarts.py
+  scripts/sdk/test-phase6-ci-contract.py
+  scripts/sdk/tests/test_public_quickstarts.py
   fixtures/x11/src/bin/x11-window-churn.rs
   container/rootfs/usr/share/xenoteer/fixtures/desktop-apps/phase4-atspi-text.py
   container/rootfs/usr/share/xenoteer/fixtures/desktop-apps/phase4-clipboard.py
@@ -88,6 +131,68 @@ for phase5_python in \
     "$phase5_python"
   grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' "$phase5_python"
 done
+for package_boundary_python in \
+  scripts/packages/verify-boundaries.py \
+  scripts/packages/tests/test_verify_boundaries.py; do
+  python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \
+    "$package_boundary_python"
+  grep -Fxq '# SPDX-License-Identifier: Apache-2.0' "$package_boundary_python"
+done
+timeout 10s env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+  -s scripts/packages/tests -p 'test_*.py'
+timeout 30s env PYTHONDONTWRITEBYTECODE=1 python3 \
+  scripts/packages/verify-boundaries.py
+for conformance_python in \
+  scripts/conformance/validate.py \
+  scripts/conformance/run.py \
+  scripts/conformance/tests/test_tools.py; do
+  python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \
+    "$conformance_python"
+  grep -Fxq '# SPDX-License-Identifier: Apache-2.0' "$conformance_python"
+done
+cmp -s conformance/LICENSE schemas/LICENSE
+timeout 10s env PYTHONDONTWRITEBYTECODE=1 python3 \
+  scripts/conformance/validate.py
+timeout 10s env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+  -s scripts/conformance/tests -p 'test_*.py'
+for typescript_package_script in \
+  packages/typescript/scripts/clean-dist.mjs \
+  packages/typescript/scripts/conformance-adapter.mjs \
+  packages/typescript/scripts/verify-package.mjs; do
+  grep -Fq '// SPDX-License-Identifier: Apache-2.0' \
+    "$typescript_package_script"
+done
+jq -e 'type == "array" and all(.[]; type == "string")' \
+  packages/typescript/scripts/package-allowlist.json >/dev/null
+for python_package_script in \
+  packages/python/scripts/run_conformance.py \
+  packages/python/scripts/verify_dist.py; do
+  python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \
+    "$python_package_script"
+  grep -Fxq '# SPDX-License-Identifier: Apache-2.0' "$python_package_script"
+done
+python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/sdk/test-phase6-ci-contract.py").read_text())'
+grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
+  scripts/sdk/test-phase6-ci-contract.py
+timeout 10s env PYTHONDONTWRITEBYTECODE=1 python3 \
+  scripts/sdk/test-phase6-ci-contract.py
+for public_quickstart_python in \
+  scripts/sdk/public_quickstarts.py \
+  scripts/sdk/test-public-quickstarts.py \
+  scripts/sdk/tests/test_public_quickstarts.py; do
+  python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \
+    "$public_quickstart_python"
+  grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' "$public_quickstart_python"
+done
+python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/sdk/quickstarts/python/quickstart.py").read_text())'
+grep -Fxq '# SPDX-License-Identifier: Apache-2.0' \
+  scripts/sdk/quickstarts/python/quickstart.py
+grep -Fq '// SPDX-License-Identifier: Apache-2.0' \
+  scripts/sdk/quickstarts/rust/main.rs
+grep -Fq '// SPDX-License-Identifier: Apache-2.0' \
+  scripts/sdk/quickstarts/typescript/quickstart.mjs
+timeout 10s env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+  -s scripts/sdk/tests -p 'test_*.py'
 bash -n scripts/container/test-phase4-event-flood.sh
 grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
   scripts/container/test-phase4-event-flood.sh
@@ -228,6 +333,97 @@ fi
 if ! awk -F '\t' '$1 == "crates/xenoteer-sdk/src/lib.rs" && $3 == "Apache-2.0" && $4 == "crates/xenoteer-sdk/LICENSE" { found = 1 } END { exit !found }' \
   /tmp/xenoteer-first-party.tsv; then
   printf 'Rust SDK source is not classified at the Apache-2.0 package boundary\n' >&2
+  exit 1
+fi
+if ! awk -F '\t' '$1 == "scripts/packages/verify-boundaries.py" && $3 == "Apache-2.0" && $4 == "crates/xenoteer-protocol/LICENSE|crates/xenoteer-protocol/NOTICE|crates/xenoteer-sdk/LICENSE|crates/xenoteer-sdk/NOTICE" { found = 1 } END { exit !found }' \
+  /tmp/xenoteer-first-party.tsv; then
+  printf 'Cargo package-boundary tooling is not classified as Apache-2.0\n' >&2
+  exit 1
+fi
+if ! awk -F '\t' '$1 == "conformance/v1/manifest.json" && $3 == "Apache-2.0" && $4 == "conformance/LICENSE|conformance/NOTICE" { found = 1 } END { exit !found }' \
+  /tmp/xenoteer-first-party.tsv; then
+  printf 'Conformance corpus is not classified at its Apache-2.0 boundary\n' >&2
+  exit 1
+fi
+if ! awk -F '\t' '$1 == "scripts/conformance/validate.py" && $3 == "Apache-2.0" && $4 == "conformance/LICENSE|conformance/NOTICE" { found = 1 } END { exit !found }' \
+  /tmp/xenoteer-first-party.tsv; then
+  printf 'Conformance tooling is not classified at its Apache-2.0 boundary\n' >&2
+  exit 1
+fi
+if ! awk -F '\t' '$1 == "packages/typescript/src/index.ts" && $3 == "Apache-2.0" && $4 == "packages/typescript/LICENSE|packages/typescript/NOTICE" { found = 1 } END { exit !found }' \
+  /tmp/xenoteer-first-party.tsv; then
+  printf 'TypeScript SDK is not classified at its Apache-2.0 package boundary\n' >&2
+  exit 1
+fi
+for typescript_package_path in \
+  packages/typescript/package.json \
+  packages/typescript/package-lock.json \
+  packages/typescript/scripts/clean-dist.mjs \
+  packages/typescript/scripts/conformance-adapter.mjs \
+  packages/typescript/scripts/package-allowlist.json \
+  packages/typescript/scripts/verify-package.mjs \
+  packages/typescript/tsconfig.json; do
+  if ! awk -F '\t' -v path="$typescript_package_path" \
+    '$1 == path && $3 == "Apache-2.0" && $4 == "packages/typescript/LICENSE|packages/typescript/NOTICE" { found = 1 } END { exit !found }' \
+    /tmp/xenoteer-first-party.tsv; then
+    printf 'TypeScript package boundary file is not classified as Apache-2.0: %s\n' \
+      "$typescript_package_path" >&2
+    exit 1
+  fi
+done
+if ! awk -F '\t' '$1 == "packages/python/src/xenoteer/__init__.py" && $3 == "Apache-2.0" && $4 == "packages/python/LICENSE|packages/python/NOTICE" { found = 1 } END { exit !found }' \
+  /tmp/xenoteer-first-party.tsv; then
+  printf 'Python SDK is not classified at its Apache-2.0 package boundary\n' >&2
+  exit 1
+fi
+for python_package_path in \
+  packages/python/MANIFEST.in \
+  packages/python/PACKAGE_ALLOWLIST.txt \
+  packages/python/SDIST_ALLOWLIST.txt \
+  packages/python/WHEEL_ALLOWLIST.txt \
+  packages/python/pyproject.toml \
+  packages/python/requirements-test.lock \
+  packages/python/scripts/run_conformance.py \
+  packages/python/scripts/verify_dist.py; do
+  if ! awk -F '\t' -v path="$python_package_path" \
+    '$1 == path && $3 == "Apache-2.0" && $4 == "packages/python/LICENSE|packages/python/NOTICE" { found = 1 } END { exit !found }' \
+    /tmp/xenoteer-first-party.tsv; then
+    printf 'Python package boundary file is not classified as Apache-2.0: %s\n' \
+      "$python_package_path" >&2
+    exit 1
+  fi
+done
+if ! awk -F '\t' '$1 == "scripts/sdk/test-phase6-ci-contract.py" && $3 == "BUSL-1.1" && $4 == "LICENSE" { found = 1 } END { exit !found }' \
+  /tmp/xenoteer-first-party.tsv; then
+  printf 'Root SDK CI contract test is absent from the BSL source inventory\n' >&2
+  exit 1
+fi
+for public_quickstart_path in \
+  scripts/sdk/README.md \
+  scripts/sdk/public_quickstarts.py \
+  scripts/sdk/test-public-quickstarts.py \
+  scripts/sdk/tests/test_public_quickstarts.py; do
+  if ! awk -F '\t' -v path="$public_quickstart_path" \
+    '$1 == path && $3 == "BUSL-1.1" && $4 == "LICENSE" { found = 1 } END { exit !found }' \
+    /tmp/xenoteer-first-party.tsv; then
+    printf 'Public quick-start gate file is absent from the BSL source inventory: %s\n' \
+      "$public_quickstart_path" >&2
+    exit 1
+  fi
+done
+if ! awk -F '\t' '$1 == "scripts/sdk/quickstarts/rust/main.rs" && $3 == "Apache-2.0" && $4 == "crates/xenoteer-sdk/LICENSE|crates/xenoteer-sdk/NOTICE" { found = 1 } END { exit !found }' \
+  /tmp/xenoteer-first-party.tsv; then
+  printf 'Rust public quick-start is not classified at the SDK Apache boundary\n' >&2
+  exit 1
+fi
+if ! awk -F '\t' '$1 == "scripts/sdk/quickstarts/typescript/quickstart.mjs" && $3 == "Apache-2.0" && $4 == "packages/typescript/LICENSE|packages/typescript/NOTICE" { found = 1 } END { exit !found }' \
+  /tmp/xenoteer-first-party.tsv; then
+  printf 'TypeScript public quick-start is not classified at the SDK Apache boundary\n' >&2
+  exit 1
+fi
+if ! awk -F '\t' '$1 == "scripts/sdk/quickstarts/python/quickstart.py" && $3 == "Apache-2.0" && $4 == "packages/python/LICENSE|packages/python/NOTICE" { found = 1 } END { exit !found }' \
+  /tmp/xenoteer-first-party.tsv; then
+  printf 'Python public quick-start is not classified at the SDK Apache boundary\n' >&2
   exit 1
 fi
 if ! awk -F '\t' '$1 == "schemas/v1/capabilities.json" && $3 == "Apache-2.0" && $4 == "schemas/LICENSE" { found = 1 } END { exit !found }' \

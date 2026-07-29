@@ -1,0 +1,666 @@
+{
+  "format_version": 1,
+  "license": "Apache-2.0",
+  "suite": "events.continuity",
+  "description": "Concrete WebSocket frames exercise replay, resynchronization, filtering, and bounded queues.",
+  "cases": [
+    {
+      "id": "event.cursor-zero",
+      "description": "The canonical zero cursor is retained as an explicit lower bound and advances only after admission.",
+      "operation": "event_continuity",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "cursor_generation": "30000000-0000-4000-8000-000000000001",
+        "subscription_request_id": "10000000-0000-4000-8000-000000000107",
+        "topics": ["window.changed"],
+        "initial_cursor": "0",
+        "queue_capacity": 2,
+        "frames": [
+          {
+            "type": "event",
+            "request_id": "10000000-0000-4000-8000-000000000107",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000001",
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "sequence": "1",
+              "topic": "window.changed",
+              "payload": {"cursor": "zero"}
+            }
+          }
+        ]
+      },
+      "expect": {
+        "delivered_sequences": ["1"],
+        "final_cursor": "1",
+        "terminal": null,
+        "resync_reason": null,
+        "refresh_required": false,
+        "generation_changed": false
+      },
+      "tags": ["boundary", "event", "sequence"]
+    },
+    {
+      "id": "event.duplicate-sequence",
+      "description": "An exact duplicate of the admitted sequence is ignored without treating it as regression.",
+      "operation": "event_continuity",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "cursor_generation": "30000000-0000-4000-8000-000000000001",
+        "subscription_request_id": "10000000-0000-4000-8000-000000000108",
+        "topics": ["window.changed"],
+        "initial_cursor": "9",
+        "queue_capacity": 2,
+        "frames": [
+          {
+            "type": "event",
+            "request_id": "10000000-0000-4000-8000-000000000108",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000001",
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "sequence": "10",
+              "topic": "window.changed",
+              "payload": {"ordinal": 1}
+            }
+          },
+          {
+            "type": "event",
+            "request_id": "10000000-0000-4000-8000-000000000108",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000001",
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "sequence": "10",
+              "topic": "window.changed",
+              "payload": {"ordinal": 1}
+            }
+          }
+        ]
+      },
+      "expect": {
+        "delivered_sequences": ["10"],
+        "final_cursor": "10",
+        "terminal": null,
+        "resync_reason": null,
+        "refresh_required": false,
+        "generation_changed": false
+      },
+      "tags": ["dedupe", "event", "sequence"]
+    },
+    {
+      "id": "event.filtered-sequence-jump",
+      "description": "Two visible events separated by hidden global sequences both deliver.",
+      "operation": "event_continuity",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "cursor_generation": "30000000-0000-4000-8000-000000000001",
+        "subscription_request_id": "10000000-0000-4000-8000-000000000101",
+        "topics": ["window.changed"],
+        "initial_cursor": "9",
+        "queue_capacity": 4,
+        "frames": [
+          {
+            "type": "event",
+            "request_id": "10000000-0000-4000-8000-000000000101",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000001",
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "sequence": "10",
+              "topic": "window.changed",
+              "payload": {"visible": true}
+            }
+          },
+          {
+            "type": "event",
+            "request_id": "10000000-0000-4000-8000-000000000101",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000001",
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "sequence": "15",
+              "topic": "window.changed",
+              "payload": {"visible": true}
+            }
+          }
+        ]
+      },
+      "expect": {
+        "delivered_sequences": ["10", "15"],
+        "final_cursor": "15",
+        "terminal": null,
+        "resync_reason": null,
+        "refresh_required": false,
+        "generation_changed": false
+      },
+      "tags": ["event", "filtering", "sequence"]
+    },
+    {
+      "id": "event.generation-changed",
+      "description": "A cursor from another desktop generation terminates with explicit resync.",
+      "operation": "event_continuity",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000002",
+        "cursor_generation": "30000000-0000-4000-8000-000000000001",
+        "subscription_request_id": "10000000-0000-4000-8000-000000000102",
+        "topics": ["window.changed"],
+        "initial_cursor": "42",
+        "queue_capacity": 2,
+        "frames": [
+          {
+            "type": "events.resync_required",
+            "request_id": "10000000-0000-4000-8000-000000000102",
+            "desktop_id": "20000000-0000-4000-8000-000000000001",
+            "desktop_generation": "30000000-0000-4000-8000-000000000002",
+            "reason": "generation_changed",
+            "dropped_through": "42",
+            "latest_sequence": "0"
+          }
+        ]
+      },
+      "expect": {
+        "delivered_sequences": [],
+        "final_cursor": "42",
+        "terminal": "resync_required",
+        "resync_reason": "generation_changed",
+        "refresh_required": true,
+        "generation_changed": true
+      },
+      "tags": ["event", "generation", "resync"]
+    },
+    {
+      "id": "event.history-lost",
+      "description": "A concrete history-lost frame terminates without advancing the cursor.",
+      "operation": "event_continuity",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "cursor_generation": "30000000-0000-4000-8000-000000000001",
+        "subscription_request_id": "10000000-0000-4000-8000-000000000103",
+        "topics": ["window.changed"],
+        "initial_cursor": "7",
+        "queue_capacity": 2,
+        "frames": [
+          {
+            "type": "events.resync_required",
+            "request_id": "10000000-0000-4000-8000-000000000103",
+            "desktop_id": "20000000-0000-4000-8000-000000000001",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "reason": "history_lost",
+            "dropped_through": "19",
+            "latest_sequence": "25"
+          }
+        ]
+      },
+      "expect": {
+        "delivered_sequences": [],
+        "final_cursor": "7",
+        "terminal": "resync_required",
+        "resync_reason": "history_lost",
+        "refresh_required": true,
+        "generation_changed": false
+      },
+      "tags": ["event", "history", "resync"]
+    },
+    {
+      "id": "event.missing-subscription-request-id",
+      "description": "An event without the active subscription request identifier terminates the unusable stream.",
+      "operation": "event_continuity",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "cursor_generation": "30000000-0000-4000-8000-000000000001",
+        "subscription_request_id": "10000000-0000-4000-8000-000000000109",
+        "topics": ["window.changed"],
+        "initial_cursor": "4",
+        "queue_capacity": 2,
+        "frames": [
+          {
+            "type": "event",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000001",
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "sequence": "5",
+              "topic": "window.changed",
+              "payload": {"missing": "request_id"}
+            }
+          }
+        ]
+      },
+      "expect": {
+        "delivered_sequences": [],
+        "final_cursor": "4",
+        "terminal": "invalid_message",
+        "resync_reason": null,
+        "refresh_required": true,
+        "generation_changed": false
+      },
+      "tags": ["correlation", "event", "negative"]
+    },
+    {
+      "id": "event.queue-full-server-resync",
+      "description": "An authoritative resync control survives a full normal event queue.",
+      "operation": "event_continuity",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "cursor_generation": "30000000-0000-4000-8000-000000000001",
+        "subscription_request_id": "10000000-0000-4000-8000-000000000110",
+        "topics": ["window.changed"],
+        "initial_cursor": null,
+        "queue_capacity": 2,
+        "frames": [
+          {
+            "type": "event",
+            "request_id": "10000000-0000-4000-8000-000000000110",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000001",
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "sequence": "1",
+              "topic": "window.changed",
+              "payload": {"ordinal": 1}
+            }
+          },
+          {
+            "type": "event",
+            "request_id": "10000000-0000-4000-8000-000000000110",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000001",
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "sequence": "2",
+              "topic": "window.changed",
+              "payload": {"ordinal": 2}
+            }
+          },
+          {
+            "type": "events.resync_required",
+            "request_id": "10000000-0000-4000-8000-000000000110",
+            "desktop_id": "20000000-0000-4000-8000-000000000001",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "reason": "history_lost",
+            "dropped_through": "3",
+            "latest_sequence": "9"
+          }
+        ]
+      },
+      "expect": {
+        "delivered_sequences": ["1", "2"],
+        "final_cursor": "2",
+        "terminal": "resync_required",
+        "resync_reason": "history_lost",
+        "refresh_required": true,
+        "generation_changed": false
+      },
+      "tags": ["backpressure", "event", "resync"]
+    },
+    {
+      "id": "event.replay-exact-generation",
+      "description": "Retained events, replay completion, and one live event deliver exactly once.",
+      "operation": "event_continuity",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "cursor_generation": "30000000-0000-4000-8000-000000000001",
+        "subscription_request_id": "10000000-0000-4000-8000-000000000104",
+        "topics": ["window.changed"],
+        "initial_cursor": "40",
+        "queue_capacity": 4,
+        "frames": [
+          {
+            "type": "event",
+            "request_id": "10000000-0000-4000-8000-000000000104",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000001",
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "sequence": "41",
+              "topic": "window.changed",
+              "payload": {"replay": true}
+            }
+          },
+          {
+            "type": "event",
+            "request_id": "10000000-0000-4000-8000-000000000104",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000001",
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "sequence": "42",
+              "topic": "window.changed",
+              "payload": {"replay": true}
+            }
+          },
+          {
+            "type": "events.replay_complete",
+            "request_id": "10000000-0000-4000-8000-000000000104",
+            "desktop_id": "20000000-0000-4000-8000-000000000001",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "through_sequence": "42"
+          },
+          {
+            "type": "event",
+            "request_id": "10000000-0000-4000-8000-000000000104",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000001",
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "sequence": "43",
+              "topic": "window.changed",
+              "payload": {"replay": false}
+            }
+          }
+        ]
+      },
+      "expect": {
+        "delivered_sequences": ["41", "42", "43"],
+        "final_cursor": "43",
+        "terminal": null,
+        "resync_reason": null,
+        "refresh_required": false,
+        "generation_changed": false
+      },
+      "tags": ["event", "reconnect", "replay"]
+    },
+    {
+      "id": "event.sequence-ahead",
+      "description": "A sequence-ahead frame ends continuity without clamping the cursor.",
+      "operation": "event_continuity",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "cursor_generation": "30000000-0000-4000-8000-000000000001",
+        "subscription_request_id": "10000000-0000-4000-8000-000000000105",
+        "topics": ["window.changed"],
+        "initial_cursor": "51",
+        "queue_capacity": 2,
+        "frames": [
+          {
+            "type": "events.resync_required",
+            "request_id": "10000000-0000-4000-8000-000000000105",
+            "desktop_id": "20000000-0000-4000-8000-000000000001",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "reason": "sequence_ahead",
+            "dropped_through": "50",
+            "latest_sequence": "50"
+          }
+        ]
+      },
+      "expect": {
+        "delivered_sequences": [],
+        "final_cursor": "51",
+        "terminal": "resync_required",
+        "resync_reason": "sequence_ahead",
+        "refresh_required": true,
+        "generation_changed": false
+      },
+      "tags": ["event", "negative", "sequence"]
+    },
+    {
+      "id": "event.sequence-regression",
+      "description": "A sequence below the admitted cursor is continuity loss rather than an ignorable duplicate.",
+      "operation": "event_continuity",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "cursor_generation": "30000000-0000-4000-8000-000000000001",
+        "subscription_request_id": "10000000-0000-4000-8000-000000000111",
+        "topics": ["window.changed"],
+        "initial_cursor": "10",
+        "queue_capacity": 2,
+        "frames": [
+          {
+            "type": "event",
+            "request_id": "10000000-0000-4000-8000-000000000111",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000001",
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "sequence": "9",
+              "topic": "window.changed",
+              "payload": {"regressed": true}
+            }
+          }
+        ]
+      },
+      "expect": {
+        "delivered_sequences": [],
+        "final_cursor": "10",
+        "terminal": "resync_required",
+        "resync_reason": "sequence_regression",
+        "refresh_required": true,
+        "generation_changed": false
+      },
+      "tags": ["event", "negative", "sequence"]
+    },
+    {
+      "id": "event.slow-consumer",
+      "description": "Three concrete events against capacity two preserve a terminal overflow slot.",
+      "operation": "event_continuity",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "cursor_generation": "30000000-0000-4000-8000-000000000001",
+        "subscription_request_id": "10000000-0000-4000-8000-000000000106",
+        "topics": ["window.changed"],
+        "initial_cursor": null,
+        "queue_capacity": 2,
+        "frames": [
+          {
+            "type": "event",
+            "request_id": "10000000-0000-4000-8000-000000000106",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000001",
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "sequence": "1",
+              "topic": "window.changed",
+              "payload": {"ordinal": 1}
+            }
+          },
+          {
+            "type": "event",
+            "request_id": "10000000-0000-4000-8000-000000000106",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000001",
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "sequence": "2",
+              "topic": "window.changed",
+              "payload": {"ordinal": 2}
+            }
+          },
+          {
+            "type": "event",
+            "request_id": "10000000-0000-4000-8000-000000000106",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000001",
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "sequence": "3",
+              "topic": "window.changed",
+              "payload": {"ordinal": 3}
+            }
+          }
+        ]
+      },
+      "expect": {
+        "delivered_sequences": ["1", "2"],
+        "final_cursor": "2",
+        "terminal": "queue_overflow",
+        "resync_reason": null,
+        "refresh_required": true,
+        "generation_changed": false
+      },
+      "tags": ["backpressure", "event", "resync"]
+    },
+    {
+      "id": "event.stale-subscription-request-id",
+      "description": "An event correlated to an earlier subscription cannot enter the active stream.",
+      "operation": "event_continuity",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "cursor_generation": "30000000-0000-4000-8000-000000000001",
+        "subscription_request_id": "10000000-0000-4000-8000-000000000112",
+        "topics": ["window.changed"],
+        "initial_cursor": "4",
+        "queue_capacity": 2,
+        "frames": [
+          {
+            "type": "event",
+            "request_id": "10000000-0000-4000-8000-000000000099",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000001",
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "sequence": "5",
+              "topic": "window.changed",
+              "payload": {"stale": "subscription"}
+            }
+          }
+        ]
+      },
+      "expect": {
+        "delivered_sequences": [],
+        "final_cursor": "4",
+        "terminal": "invalid_message",
+        "resync_reason": null,
+        "refresh_required": true,
+        "generation_changed": false
+      },
+      "tags": ["correlation", "event", "negative"]
+    },
+    {
+      "id": "event.unsubscribed-topic",
+      "description": "A server event outside the active topic set terminates without advancing the cursor.",
+      "operation": "event_continuity",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "cursor_generation": "30000000-0000-4000-8000-000000000001",
+        "subscription_request_id": "10000000-0000-4000-8000-000000000113",
+        "topics": ["window.changed"],
+        "initial_cursor": "4",
+        "queue_capacity": 2,
+        "frames": [
+          {
+            "type": "event",
+            "request_id": "10000000-0000-4000-8000-000000000113",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000001",
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "sequence": "5",
+              "topic": "process.exited",
+              "payload": {"pid": 1234}
+            }
+          }
+        ]
+      },
+      "expect": {
+        "delivered_sequences": [],
+        "final_cursor": "4",
+        "terminal": "invalid_message",
+        "resync_reason": null,
+        "refresh_required": true,
+        "generation_changed": false
+      },
+      "tags": ["event", "negative", "topic"]
+    },
+    {
+      "id": "event.wrong-desktop",
+      "description": "A correctly correlated event for another desktop terminates without contaminating the cursor.",
+      "operation": "event_continuity",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "cursor_generation": "30000000-0000-4000-8000-000000000001",
+        "subscription_request_id": "10000000-0000-4000-8000-000000000114",
+        "topics": ["window.changed"],
+        "initial_cursor": "4",
+        "queue_capacity": 2,
+        "frames": [
+          {
+            "type": "event",
+            "request_id": "10000000-0000-4000-8000-000000000114",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000002",
+              "desktop_generation": "30000000-0000-4000-8000-000000000001",
+              "sequence": "5",
+              "topic": "window.changed",
+              "payload": {"wrong": "desktop"}
+            }
+          }
+        ]
+      },
+      "expect": {
+        "delivered_sequences": [],
+        "final_cursor": "4",
+        "terminal": "invalid_message",
+        "resync_reason": null,
+        "refresh_required": true,
+        "generation_changed": false
+      },
+      "tags": ["event", "negative", "scope"]
+    },
+    {
+      "id": "event.wrong-generation",
+      "description": "A correctly correlated event for another desktop generation invalidates generation-bound state.",
+      "operation": "event_continuity",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "cursor_generation": "30000000-0000-4000-8000-000000000001",
+        "subscription_request_id": "10000000-0000-4000-8000-000000000115",
+        "topics": ["window.changed"],
+        "initial_cursor": "4",
+        "queue_capacity": 2,
+        "frames": [
+          {
+            "type": "event",
+            "request_id": "10000000-0000-4000-8000-000000000115",
+            "event": {
+              "desktop_id": "20000000-0000-4000-8000-000000000001",
+              "desktop_generation": "30000000-0000-4000-8000-000000000002",
+              "sequence": "5",
+              "topic": "window.changed",
+              "payload": {"wrong": "generation"}
+            }
+          }
+        ]
+      },
+      "expect": {
+        "delivered_sequences": [],
+        "final_cursor": "4",
+        "terminal": "invalid_message",
+        "resync_reason": null,
+        "refresh_required": true,
+        "generation_changed": true
+      },
+      "tags": ["event", "generation", "negative"]
+    },
+    {
+      "id": "event.zero-visible-replay",
+      "description": "A replay with no visible events advances to the server's authoritative through sequence.",
+      "operation": "event_continuity",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "cursor_generation": "30000000-0000-4000-8000-000000000001",
+        "subscription_request_id": "10000000-0000-4000-8000-000000000116",
+        "topics": ["window.changed"],
+        "initial_cursor": "40",
+        "queue_capacity": 2,
+        "frames": [
+          {
+            "type": "events.replay_complete",
+            "request_id": "10000000-0000-4000-8000-000000000116",
+            "desktop_id": "20000000-0000-4000-8000-000000000001",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "through_sequence": "42"
+          }
+        ]
+      },
+      "expect": {
+        "delivered_sequences": [],
+        "final_cursor": "42",
+        "terminal": null,
+        "resync_reason": null,
+        "refresh_required": false,
+        "generation_changed": false
+      },
+      "tags": ["event", "filtering", "replay"]
+    }
+  ]
+}

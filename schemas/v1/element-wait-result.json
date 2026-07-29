@@ -7,9 +7,11 @@
       "type": "string"
     },
     "AccessibilityRevision": {
-      "format": "uint64",
-      "minimum": 1,
-      "type": "integer"
+      "format": "uint64-string",
+      "maxLength": 20,
+      "minLength": 1,
+      "pattern": "^[1-9][0-9]{0,19}$",
+      "type": "string"
     },
     "AccessibilityWarning": {
       "properties": {
@@ -29,9 +31,11 @@
     "ApplicationRef": {
       "properties": {
         "app_instance_generation": {
-          "format": "uint64",
-          "minimum": 1,
-          "type": "integer"
+          "format": "uint64-string",
+          "maxLength": 20,
+          "minLength": 1,
+          "pattern": "^[1-9][0-9]{0,19}$",
+          "type": "string"
         },
         "atspi_generation": {
           "$ref": "#/$defs/AtspiGeneration"
@@ -69,9 +73,11 @@
       "type": "string"
     },
     "AtspiGeneration": {
-      "format": "uint64",
-      "minimum": 1,
-      "type": "integer"
+      "format": "uint64-string",
+      "maxLength": 20,
+      "minLength": 1,
+      "pattern": "^[1-9][0-9]{0,19}$",
+      "type": "string"
     },
     "AtspiObjectPath": {
       "maxLength": 4096,
@@ -211,9 +217,11 @@
           "$ref": "#/$defs/AtspiGeneration"
         },
         "cache_sequence": {
-          "format": "uint64",
-          "minimum": 1,
-          "type": "integer"
+          "format": "uint64-string",
+          "maxLength": 20,
+          "minLength": 1,
+          "pattern": "^[1-9][0-9]{0,19}$",
+          "type": "string"
         },
         "desktop_generation": {
           "$ref": "#/$defs/DesktopGeneration"
@@ -788,9 +796,11 @@
         },
         "observed_generation": {
           "description": "Per-XID birth marker incremented whenever an absent XID reappears.",
-          "format": "uint64",
-          "minimum": 1,
-          "type": "integer"
+          "format": "uint64-string",
+          "maxLength": 20,
+          "minLength": 1,
+          "pattern": "^[1-9][0-9]{0,19}$",
+          "type": "string"
         },
         "xid": {
           "description": "Non-zero core X11 window identifier.",

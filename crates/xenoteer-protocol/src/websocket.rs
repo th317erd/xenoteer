@@ -101,6 +101,8 @@ pub struct EventResumeRequest {
     /// Exact desktop lifetime that assigned `event_sequence`.
     pub desktop_generation: DesktopGeneration,
     /// Last globally assigned event sequence completely processed by the client.
+    #[serde(with = "crate::wire_integer::canonical")]
+    #[schemars(schema_with = "crate::wire_integer::schema")]
     pub event_sequence: u64,
 }
 
@@ -215,6 +217,8 @@ pub enum WebSocketClientMessage {
         /// Exact topics; empty means every topic authorized for the principal.
         topics: Vec<EventTopic>,
         /// Exclusive replay lower bound; `None` starts at the current live edge.
+        #[serde(with = "crate::wire_integer::optional")]
+        #[schemars(schema_with = "crate::wire_integer::optional_schema")]
         since_sequence: Option<u64>,
     },
     /// Stop the session's event subscription.
@@ -283,11 +287,11 @@ pub struct WelcomeDesktop {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[allow(missing_docs)]
 pub struct WelcomeLimits {
-    pub max_message_bytes: usize,
-    pub heartbeat_ms: u64,
-    pub normal_outbound_capacity: usize,
-    pub reserved_outbound_capacity: usize,
-    pub max_command_watches: usize,
+    pub max_message_bytes: u32,
+    pub heartbeat_ms: u32,
+    pub normal_outbound_capacity: u32,
+    pub reserved_outbound_capacity: u32,
+    pub max_command_watches: u32,
 }
 
 /// Retained-resume status in `server.welcome`.
@@ -343,6 +347,8 @@ pub struct SequencedEvent {
     pub desktop_id: DesktopId,
     pub desktop_generation: DesktopGeneration,
     /// Global sequence assigned before subscriber filtering.
+    #[serde(with = "crate::wire_integer::nonzero")]
+    #[schemars(schema_with = "crate::wire_integer::nonzero_schema")]
     pub sequence: u64,
     pub topic: EventTopic,
     /// Bounded, topic-specific, safe JSON data.
@@ -432,6 +438,8 @@ pub enum WebSocketServerMessage {
         request_id: RequestId,
         desktop_id: DesktopId,
         desktop_generation: DesktopGeneration,
+        #[serde(with = "crate::wire_integer::canonical")]
+        #[schemars(schema_with = "crate::wire_integer::schema")]
         through_sequence: u64,
     },
     #[serde(rename = "events.resync_required")]
@@ -440,7 +448,11 @@ pub enum WebSocketServerMessage {
         desktop_id: DesktopId,
         desktop_generation: DesktopGeneration,
         reason: EventResyncReason,
+        #[serde(with = "crate::wire_integer::canonical")]
+        #[schemars(schema_with = "crate::wire_integer::schema")]
         dropped_through: u64,
+        #[serde(with = "crate::wire_integer::canonical")]
+        #[schemars(schema_with = "crate::wire_integer::schema")]
         latest_sequence: u64,
     },
     #[serde(rename = "server.draining")]
@@ -611,7 +623,7 @@ mod tests {
         let desktop_id = DesktopId::new();
         let desktop_generation = DesktopGeneration::new();
         let encoded = format!(
-            r#"{{"type":"events.subscribe","request_id":"{request_id}","desktop_id":"{desktop_id}","desktop_generation":"{desktop_generation}","topics":["command.lifecycle"],"since_sequence":0}}"#
+            r#"{{"type":"events.subscribe","request_id":"{request_id}","desktop_id":"{desktop_id}","desktop_generation":"{desktop_generation}","topics":["command.lifecycle"],"since_sequence":"0"}}"#
         );
         let message: WebSocketClientMessage = serde_json::from_str(&encoded)?;
         message.validate()?;

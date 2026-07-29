@@ -1,0 +1,352 @@
+{
+  "format_version": 1,
+  "license": "Apache-2.0",
+  "suite": "scenarios.command-reconnect",
+  "description": "Concrete HTTP fault and ledger fixtures exercise exact command recovery.",
+  "cases": [
+    {
+      "id": "command.reconnect.after-acceptance",
+      "description": "A disconnected submit reattaches to the accepted ledger entry.",
+      "operation": "command_reconnect",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "reconnect_generation": "30000000-0000-4000-8000-000000000001",
+        "command_id": "40000000-0000-4000-8000-000000000010",
+        "command": {"type": "desktop_probe"},
+        "initial_response": {"kind": "disconnect"},
+        "lookup_response": {
+          "kind": "json",
+          "status": 200,
+          "body": {
+            "command_id": "40000000-0000-4000-8000-000000000010",
+            "lifecycle": "accepted",
+            "effect_stage": "accepted",
+            "accepted_at": "2030-01-01T00:00:00Z",
+            "started_at": null,
+            "finished_at": null,
+            "outcome": null,
+            "error": null,
+            "warnings": []
+          }
+        },
+        "resubmit_command": null,
+        "resubmit_response": null,
+        "cancel_after_ms": null
+      },
+      "expect": {
+        "outcome": "reattached",
+        "command_id": "40000000-0000-4000-8000-000000000010",
+        "submission_attempts": 1,
+        "lookup_attempts": 1,
+        "cancel_requests": 0,
+        "submission_envelopes": [{
+          "protocol_version": {"major": 1, "minor": 0},
+          "request_id_non_nil": true,
+          "command_id": "40000000-0000-4000-8000-000000000010",
+          "desktop_id": "20000000-0000-4000-8000-000000000001",
+          "desktop_generation": "30000000-0000-4000-8000-000000000001",
+          "lease_id": null,
+          "deadline": null,
+          "trace_policy": null,
+          "command": {"type": "desktop_probe"}
+        }],
+        "lifecycle": "accepted",
+        "error_code": null
+      },
+      "tags": ["command", "dedupe", "reconnect"]
+    },
+    {
+      "id": "command.reconnect.after-effect-before-response",
+      "description": "A disconnected submit recovers the existing effectful terminal result.",
+      "operation": "command_reconnect",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "reconnect_generation": "30000000-0000-4000-8000-000000000001",
+        "command_id": "40000000-0000-4000-8000-000000000011",
+        "command": {"type": "desktop_probe"},
+        "initial_response": {"kind": "disconnect"},
+        "lookup_response": {
+          "kind": "json",
+          "status": 200,
+          "body": {
+            "command_id": "40000000-0000-4000-8000-000000000011",
+            "lifecycle": "succeeded",
+            "effect_stage": "pointer_moved",
+            "accepted_at": "2030-01-01T00:00:00Z",
+            "started_at": "2030-01-01T00:00:00.010Z",
+            "finished_at": "2030-01-01T00:00:00.020Z",
+            "outcome": {"type": "acknowledged"},
+            "error": null,
+            "warnings": []
+          }
+        },
+        "resubmit_command": null,
+        "resubmit_response": null,
+        "cancel_after_ms": null
+      },
+      "expect": {
+        "outcome": "reattached",
+        "command_id": "40000000-0000-4000-8000-000000000011",
+        "submission_attempts": 1,
+        "lookup_attempts": 1,
+        "cancel_requests": 0,
+        "submission_envelopes": [{
+          "protocol_version": {"major": 1, "minor": 0},
+          "request_id_non_nil": true,
+          "command_id": "40000000-0000-4000-8000-000000000011",
+          "desktop_id": "20000000-0000-4000-8000-000000000001",
+          "desktop_generation": "30000000-0000-4000-8000-000000000001",
+          "lease_id": null,
+          "deadline": null,
+          "trace_policy": null,
+          "command": {"type": "desktop_probe"}
+        }],
+        "lifecycle": "succeeded",
+        "error_code": null
+      },
+      "tags": ["command", "effect", "reconnect"]
+    },
+    {
+      "id": "command.reconnect.before-acceptance-not-found",
+      "description": "A not-found lookup permits one explicit byte-equivalent resubmit.",
+      "operation": "command_reconnect",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "reconnect_generation": "30000000-0000-4000-8000-000000000001",
+        "command_id": "40000000-0000-4000-8000-000000000012",
+        "command": {"type": "desktop_probe"},
+        "initial_response": {"kind": "disconnect"},
+        "lookup_response": {
+          "kind": "problem",
+          "status": 404,
+          "body": {
+            "type": "https://xenoteer.dev/problems/not-found",
+            "title": "Command not found",
+            "status": 404,
+            "code": "not_found",
+            "detail": "No command with this identifier exists.",
+            "instance": null,
+            "retry": "never",
+            "effect_stage": "none",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "details": {}
+          }
+        },
+        "resubmit_command": {"type": "desktop_probe"},
+        "resubmit_response": {
+          "kind": "json",
+          "status": 202,
+          "body": {
+            "command_id": "40000000-0000-4000-8000-000000000012",
+            "lifecycle": "accepted",
+            "effect_stage": "accepted",
+            "accepted_at": "2030-01-01T00:00:00Z",
+            "started_at": null,
+            "finished_at": null,
+            "outcome": null,
+            "error": null,
+            "warnings": []
+          }
+        },
+        "cancel_after_ms": null
+      },
+      "expect": {
+        "outcome": "resubmitted",
+        "command_id": "40000000-0000-4000-8000-000000000012",
+        "submission_attempts": 2,
+        "lookup_attempts": 1,
+        "cancel_requests": 0,
+        "submission_envelopes": [
+          {
+            "protocol_version": {"major": 1, "minor": 0},
+            "request_id_non_nil": true,
+            "command_id": "40000000-0000-4000-8000-000000000012",
+            "desktop_id": "20000000-0000-4000-8000-000000000001",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "lease_id": null,
+            "deadline": null,
+            "trace_policy": null,
+            "command": {"type": "desktop_probe"}
+          },
+          {
+            "protocol_version": {"major": 1, "minor": 0},
+            "request_id_non_nil": true,
+            "command_id": "40000000-0000-4000-8000-000000000012",
+            "desktop_id": "20000000-0000-4000-8000-000000000001",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "lease_id": null,
+            "deadline": null,
+            "trace_policy": null,
+            "command": {"type": "desktop_probe"}
+          }
+        ],
+        "lifecycle": "accepted",
+        "error_code": null
+      },
+      "tags": ["command", "dedupe", "retry"]
+    },
+    {
+      "id": "command.reconnect.body-conflict",
+      "description": "A changed body under the same ID surfaces the server conflict.",
+      "operation": "command_reconnect",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "reconnect_generation": "30000000-0000-4000-8000-000000000001",
+        "command_id": "40000000-0000-4000-8000-000000000013",
+        "command": {"type": "desktop_probe"},
+        "initial_response": {"kind": "disconnect"},
+        "lookup_response": null,
+        "resubmit_command": {
+          "type": "application_launch",
+          "application": "conformance",
+          "arguments": []
+        },
+        "resubmit_response": {
+          "kind": "problem",
+          "status": 409,
+          "body": {
+            "type": "https://xenoteer.dev/problems/command-id-conflict",
+            "title": "Command identifier conflict",
+            "status": 409,
+            "code": "command_id_conflict",
+            "detail": "The identifier is already bound to another body.",
+            "instance": null,
+            "retry": "never",
+            "effect_stage": "none",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "details": {}
+          }
+        },
+        "cancel_after_ms": null
+      },
+      "expect": {
+        "outcome": "command_id_conflict",
+        "command_id": "40000000-0000-4000-8000-000000000013",
+        "submission_attempts": 2,
+        "lookup_attempts": 0,
+        "cancel_requests": 0,
+        "submission_envelopes": [
+          {
+            "protocol_version": {"major": 1, "minor": 0},
+            "request_id_non_nil": true,
+            "command_id": "40000000-0000-4000-8000-000000000013",
+            "desktop_id": "20000000-0000-4000-8000-000000000001",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "lease_id": null,
+            "deadline": null,
+            "trace_policy": null,
+            "command": {"type": "desktop_probe"}
+          },
+          {
+            "protocol_version": {"major": 1, "minor": 0},
+            "request_id_non_nil": true,
+            "command_id": "40000000-0000-4000-8000-000000000013",
+            "desktop_id": "20000000-0000-4000-8000-000000000001",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "lease_id": null,
+            "deadline": null,
+            "trace_policy": null,
+            "command": {"type": "application_launch", "application": "conformance", "arguments": []}
+          }
+        ],
+        "lifecycle": null,
+        "error_code": "command_id_conflict"
+      },
+      "tags": ["command", "conflict", "dedupe"]
+    },
+    {
+      "id": "command.reconnect.generation-changed",
+      "description": "A generation change fences the old command before lookup or resubmit.",
+      "operation": "command_reconnect",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "reconnect_generation": "30000000-0000-4000-8000-000000000002",
+        "command_id": "40000000-0000-4000-8000-000000000014",
+        "command": {"type": "desktop_probe"},
+        "initial_response": {"kind": "disconnect"},
+        "lookup_response": null,
+        "resubmit_command": null,
+        "resubmit_response": null,
+        "cancel_after_ms": null
+      },
+      "expect": {
+        "outcome": "stale_generation",
+        "command_id": "40000000-0000-4000-8000-000000000014",
+        "submission_attempts": 1,
+        "lookup_attempts": 0,
+        "cancel_requests": 0,
+        "submission_envelopes": [{
+          "protocol_version": {"major": 1, "minor": 0},
+          "request_id_non_nil": true,
+          "command_id": "40000000-0000-4000-8000-000000000014",
+          "desktop_id": "20000000-0000-4000-8000-000000000001",
+          "desktop_generation": "30000000-0000-4000-8000-000000000001",
+          "lease_id": null,
+          "deadline": null,
+          "trace_policy": null,
+          "command": {"type": "desktop_probe"}
+        }],
+        "lifecycle": null,
+        "error_code": "generation_changed"
+      },
+      "tags": ["command", "generation", "reconnect"]
+    },
+    {
+      "id": "command.reconnect.local-cancellation",
+      "description": "Cancelling a stalled local submit future leaves the command recoverable.",
+      "operation": "command_reconnect",
+      "input": {
+        "desktop_id": "20000000-0000-4000-8000-000000000001",
+        "desktop_generation": "30000000-0000-4000-8000-000000000001",
+        "reconnect_generation": "30000000-0000-4000-8000-000000000001",
+        "command_id": "40000000-0000-4000-8000-000000000015",
+        "command": {"type": "desktop_probe"},
+        "initial_response": {"kind": "stall", "delay_ms": 50},
+        "lookup_response": {
+          "kind": "json",
+          "status": 200,
+          "body": {
+            "command_id": "40000000-0000-4000-8000-000000000015",
+            "lifecycle": "succeeded",
+            "effect_stage": "postcondition_met",
+            "accepted_at": "2030-01-01T00:00:00Z",
+            "started_at": "2030-01-01T00:00:00.010Z",
+            "finished_at": "2030-01-01T00:00:00.020Z",
+            "outcome": {"type": "probe", "ready": true},
+            "error": null,
+            "warnings": []
+          }
+        },
+        "resubmit_command": null,
+        "resubmit_response": null,
+        "cancel_after_ms": 5
+      },
+      "expect": {
+        "outcome": "reattached",
+        "command_id": "40000000-0000-4000-8000-000000000015",
+        "submission_attempts": 1,
+        "lookup_attempts": 1,
+        "cancel_requests": 0,
+        "submission_envelopes": [{
+          "protocol_version": {"major": 1, "minor": 0},
+          "request_id_non_nil": true,
+          "command_id": "40000000-0000-4000-8000-000000000015",
+          "desktop_id": "20000000-0000-4000-8000-000000000001",
+          "desktop_generation": "30000000-0000-4000-8000-000000000001",
+          "lease_id": null,
+          "deadline": null,
+          "trace_policy": null,
+          "command": {"type": "desktop_probe"}
+        }],
+        "lifecycle": "succeeded",
+        "error_code": null
+      },
+      "tags": ["cancellation", "command", "local"]
+    }
+  ]
+}

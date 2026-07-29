@@ -80,7 +80,7 @@ fn process_reference() -> Value {
     json!({
         "desktop_generation": generation(),
         "pid": 42,
-        "proc_start_ticks": 99,
+        "proc_start_ticks": "99",
         "launch_id": "018f1e74-7a6b-7cc0-8000-000000000004"
     })
 }
@@ -126,7 +126,7 @@ fn screenshot_result() -> Value {
 fn clipboard_read_result() -> Value {
     json!({
         "selection": "clipboard",
-        "revision": 1,
+        "revision": "1",
         "evidence": {
             "target": "UTF8_STRING",
             "transfer": { "mode": "direct" },
@@ -145,7 +145,7 @@ fn window_reference() -> Value {
         "desktop_id": desktop(),
         "desktop_generation": generation(),
         "xid": 42,
-        "observed_generation": 1,
+        "observed_generation": "1",
         "identity_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     })
 }
@@ -154,7 +154,7 @@ fn window_snapshot() -> Value {
     json!({
         "ref": window_reference(),
         "xid_hex": "0x0000002a",
-        "model_revision": 7,
+        "model_revision": "7",
         "metadata": {
             "title": null,
             "visible_title": null,
@@ -205,10 +205,10 @@ fn application_reference() -> Value {
     json!({
         "desktop_id": desktop(),
         "desktop_generation": generation(),
-        "atspi_generation": 1,
+        "atspi_generation": "1",
         "unique_bus_name": ":1.42",
         "root_object_path": "/org/a11y/atspi/accessible/root",
-        "app_instance_generation": 1,
+        "app_instance_generation": "1",
         "identity_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     })
 }
@@ -217,11 +217,11 @@ fn element_reference() -> Value {
     json!({
         "desktop_id": desktop(),
         "desktop_generation": generation(),
-        "atspi_generation": 1,
+        "atspi_generation": "1",
         "application": application_reference(),
         "object_path": "/org/a11y/atspi/accessible/42",
         "object_identity_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "cache_sequence": 7
+        "cache_sequence": "7"
     })
 }
 
@@ -256,7 +256,7 @@ fn element_snapshot() -> Value {
             "evidence": [],
             "conflicting_evidence": false
         },
-        "revision": 3,
+        "revision": "3",
         "completeness": "complete",
         "truncated": false,
         "warnings": []
@@ -267,8 +267,8 @@ fn element_page() -> Value {
     json!({
         "desktop_id": desktop(),
         "desktop_generation": generation(),
-        "atspi_generation": 1,
-        "snapshot_revision": 3,
+        "atspi_generation": "1",
+        "snapshot_revision": "3",
         "order": "preorder",
         "elements": [{ "snapshot": element_snapshot() }],
         "next_cursor": null,
@@ -376,8 +376,8 @@ fn succeeded_element_action_result() -> Value {
             "result": {
                 "operation": "invoke",
                 "element": element_reference(),
-                "revision_before": 3,
-                "revision_after": 4,
+                "revision_before": "3",
+                "revision_after": "4",
                 "snapshot_before": null,
                 "snapshot_after": null,
                 "evidence": {
@@ -419,8 +419,8 @@ fn succeeded_semantic_text_result() -> Value {
                 "clipboard": null,
                 "semantic": {
                     "element": element_reference(),
-                    "revision_before": 3,
-                    "revision_after": 4,
+                    "revision_before": "3",
+                    "revision_after": "4",
                     "backend_accepted": true,
                     "insertion_offset": 0,
                     "character_count_before": 0,
@@ -435,6 +435,49 @@ fn succeeded_semantic_text_result() -> Value {
         "error": null,
         "warnings": []
     })
+}
+
+#[test]
+fn precision_sensitive_counters_are_strings_while_bounded_lengths_remain_numbers() {
+    let process = process_reference();
+    assert!(
+        serde_json::from_value::<ProcessRef>(process.clone()).is_ok(),
+        "canonical process counter string must decode"
+    );
+    let mut numeric_process = process;
+    numeric_process["proc_start_ticks"] = json!(99);
+    assert!(
+        serde_json::from_value::<ProcessRef>(numeric_process).is_err(),
+        "JSON numbers must not enter precision-sensitive counters"
+    );
+
+    let artifact = artifact_reference();
+    assert!(
+        serde_json::from_value::<ArtifactRef>(artifact.clone()).is_ok(),
+        "bounded artifact lengths remain JSON numbers"
+    );
+    let mut string_length = artifact;
+    string_length["content_length"] = json!("4");
+    assert!(
+        serde_json::from_value::<ArtifactRef>(string_length).is_err(),
+        "bounded artifact lengths must not silently change wire type"
+    );
+
+    let subscription = json!({
+        "type": "events.subscribe",
+        "request_id": request(),
+        "desktop_id": desktop(),
+        "desktop_generation": generation(),
+        "topics": [],
+        "since_sequence": "9007199254740993"
+    });
+    assert!(
+        serde_json::from_value::<WebSocketClientMessage>(subscription.clone()).is_ok(),
+        "event cursors beyond JavaScript's safe integer range must round trip exactly"
+    );
+    let mut numeric_subscription = subscription;
+    numeric_subscription["since_sequence"] = json!(1);
+    assert!(serde_json::from_value::<WebSocketClientMessage>(numeric_subscription).is_err());
 }
 
 #[test]
@@ -487,27 +530,27 @@ fn every_public_response_family_tolerates_top_level_additions() {
     let page = json!({
         "desktop_id": desktop(),
         "desktop_generation": generation(),
-        "snapshot_revision": 7,
+        "snapshot_revision": "7",
         "windows": [window_entry()],
         "next_cursor": null
     });
     assert_accepts_additive_field::<WindowListPage>(page.clone());
     assert_accepts_additive_field::<WindowQueryPage>(page);
     assert_accepts_additive_field::<WindowSnapshotResult>(json!({
-        "snapshot_revision": 7,
+        "snapshot_revision": "7",
         "window": window_entry()
     }));
     assert_accepts_additive_field::<WindowResolveResult>(json!({
         "desktop_id": desktop(),
         "desktop_generation": generation(),
-        "snapshot_revision": 7,
+        "snapshot_revision": "7",
         "window": window_entry()
     }));
     assert_accepts_additive_field::<WindowWaitResult>(json!({
         "desktop_id": desktop(),
         "desktop_generation": generation(),
         "status": "matched",
-        "evaluated_revision": 7,
+        "evaluated_revision": "7",
         "predicate_satisfied": true,
         "matched_count": 1,
         "windows": [window_entry()]
@@ -515,7 +558,7 @@ fn every_public_response_family_tolerates_top_level_additions() {
     assert_accepts_additive_field::<WindowManagerCapabilities>(json!({
         "desktop_id": desktop(),
         "desktop_generation": generation(),
-        "model_revision": 7,
+        "model_revision": "7",
         "supported": []
     }));
     assert_accepts_additive_field::<OneTimeViewerTicket>(json!({
@@ -548,22 +591,22 @@ fn every_public_response_family_tolerates_top_level_additions() {
     assert_accepts_additive_field::<ElementListPage>(element_page());
     assert_accepts_additive_field::<ElementQueryPage>(element_page());
     assert_accepts_additive_field::<ElementSnapshotResult>(json!({
-        "snapshot_revision": 3,
+        "snapshot_revision": "3",
         "element": { "snapshot": element_snapshot() }
     }));
     assert_accepts_additive_field::<ElementResolveResult>(json!({
         "desktop_id": desktop(),
         "desktop_generation": generation(),
-        "atspi_generation": 1,
-        "snapshot_revision": 3,
+        "atspi_generation": "1",
+        "snapshot_revision": "3",
         "element": { "snapshot": element_snapshot() }
     }));
     assert_accepts_additive_field::<ElementWaitResult>(json!({
         "desktop_id": desktop(),
         "desktop_generation": generation(),
-        "atspi_generation": 1,
+        "atspi_generation": "1",
         "status": "matched",
-        "evaluated_revision": 3,
+        "evaluated_revision": "3",
         "predicate_satisfied": true,
         "matched_count": 1,
         "elements": [{ "snapshot": element_snapshot() }],
@@ -574,7 +617,7 @@ fn every_public_response_family_tolerates_top_level_additions() {
     assert_accepts_additive_field::<AccessibilityEvent>(json!({
         "desktop_id": desktop(),
         "desktop_generation": generation(),
-        "atspi_generation": 1,
+        "atspi_generation": "1",
         "source": element_reference(),
         "raw_source": {
             "bus_name": ":1.42",
@@ -591,8 +634,8 @@ fn every_public_response_family_tolerates_top_level_additions() {
             "value": null,
             "bounds": null
         },
-        "revision": 4,
-        "cache_sequence": 8,
+        "revision": "4",
+        "cache_sequence": "8",
         "source_stale": false
     }));
 }
@@ -683,7 +726,7 @@ fn response_families_tolerate_relevant_nested_additions() {
     }
     let binary_clipboard = json!({
         "selection": "clipboard",
-        "revision": 1,
+        "revision": "1",
         "evidence": {
             "target": "application/octet-stream",
             "transfer": { "mode": "direct" },
@@ -707,7 +750,7 @@ fn response_families_tolerate_relevant_nested_additions() {
     let page = json!({
         "desktop_id": desktop(),
         "desktop_generation": generation(),
-        "snapshot_revision": 7,
+        "snapshot_revision": "7",
         "windows": [window_entry()],
         "next_cursor": null
     });
@@ -759,7 +802,7 @@ fn response_families_tolerate_relevant_nested_additions() {
     let event = json!({
         "desktop_id": desktop(),
         "desktop_generation": generation(),
-        "atspi_generation": 1,
+        "atspi_generation": "1",
         "source": element_reference(),
         "raw_source": {
             "bus_name": ":1.42",
@@ -776,8 +819,8 @@ fn response_families_tolerate_relevant_nested_additions() {
             "value": null,
             "bounds": null
         },
-        "revision": 4,
-        "cache_sequence": 8,
+        "revision": "4",
+        "cache_sequence": "8",
         "source_stale": false
     });
     assert_accepts_nested_addition::<AccessibilityEvent>(event, "/raw_source");

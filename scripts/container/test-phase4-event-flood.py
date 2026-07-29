@@ -73,7 +73,7 @@ def subscribe(client: Any, desktop_id: str, generation: str) -> str:
     require(
         replay.get("desktop_id") == desktop_id
         and replay.get("desktop_generation") == generation
-        and valid_nonnegative_integer(replay.get("through_sequence")),
+        and parse_u64_string(replay.get("through_sequence")) is not None,
         "initial replay boundary was invalid",
     )
     return request_id
@@ -235,11 +235,11 @@ def expect_terminal_resync(
         if message_type == "event":
             event = message.get("event")
             require(isinstance(event, dict), "slow subscriber event envelope was absent")
-            sequence = event.get("sequence")
+            sequence = parse_u64_string(event.get("sequence"), minimum=1)
             require(
                 event.get("desktop_id") == desktop_id
                 and event.get("desktop_generation") == generation
-                and valid_positive_integer(sequence)
+                and sequence is not None
                 and sequence > last_sequence,
                 "slow subscriber event continuity was invalid before resync",
             )
@@ -249,8 +249,8 @@ def expect_terminal_resync(
             continue
         require(message_type == "events.resync_required", "slow subscriber received an unexpected message")
         reason = message.get("reason")
-        dropped_through = message.get("dropped_through")
-        latest_sequence = message.get("latest_sequence")
+        dropped_through = parse_u64_string(message.get("dropped_through"), minimum=1)
+        latest_sequence = parse_u64_string(message.get("latest_sequence"), minimum=1)
         require(
             reason == "history_lost",
             "slow subscriber did not receive the raw observation-gap history barrier",
@@ -258,8 +258,8 @@ def expect_terminal_resync(
         require(
             message.get("desktop_id") == desktop_id
             and message.get("desktop_generation") == generation
-            and valid_positive_integer(dropped_through)
-            and valid_positive_integer(latest_sequence)
+            and dropped_through is not None
+            and latest_sequence is not None
             and dropped_through <= latest_sequence,
             "slow subscriber resync evidence was invalid",
         )
@@ -395,7 +395,10 @@ def capture_sentinel_authority(
                 require(
                     reference.get("desktop_id") == desktop_id
                     and reference.get("desktop_generation") == generation
-                    and valid_positive_integer(reference.get("observed_generation"))
+                    and parse_u64_string(
+                        reference.get("observed_generation"), minimum=1
+                    )
+                    is not None
                     and isinstance(reference.get("identity_hash"), str)
                     and isinstance(token_value, str),
                     "pre-gap sentinel authority was malformed",
@@ -463,8 +466,14 @@ def require_reminted_sentinel(
             require(
                 reference.get("desktop_id") == desktop_id
                 and reference.get("desktop_generation") == generation
-                and valid_positive_integer(reference.get("observed_generation"))
-                and reference["observed_generation"] > initial_reference["observed_generation"]
+                and (
+                    observed_generation := parse_u64_string(
+                        reference.get("observed_generation"), minimum=1
+                    )
+                )
+                is not None
+                and observed_generation
+                > int(initial_reference["observed_generation"])
                 and reference.get("identity_hash") != initial_reference.get("identity_hash")
                 and reference != initial_reference,
                 "post-gap sentinel XID was not reminted with a fresh exact identity",
@@ -496,7 +505,7 @@ def prove_coherent_snapshot(api_base: str, token: bytes, desktop_id: str, genera
     require(
         page.get("desktop_id") == desktop_id
         and page.get("desktop_generation") == generation
-        and valid_positive_integer(revision)
+        and parse_u64_string(revision, minimum=1) is not None
         and page.get("next_cursor") is None
         and len(windows) <= 200,
         "authoritative window page scope or bounds were incoherent",
@@ -512,7 +521,8 @@ def prove_coherent_snapshot(api_base: str, token: bytes, desktop_id: str, genera
         require(
             reference.get("desktop_id") == desktop_id
             and reference.get("desktop_generation") == generation
-            and all(valid_positive_integer(part) for part in identity)
+            and valid_positive_integer(identity[0])
+            and parse_u64_string(identity[1], minimum=1) is not None
             and snapshot.get("model_revision") == revision
             and identity not in identities,
             "window page contained stale, duplicate, or cross-revision evidence",
@@ -545,6 +555,15 @@ def valid_positive_integer(value: Any) -> bool:
 
 def valid_nonnegative_integer(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def parse_u64_string(value: Any, *, minimum: int = 0) -> int | None:
+    if not isinstance(value, str) or re.fullmatch(r"0|[1-9][0-9]{0,19}", value) is None:
+        return None
+    parsed = int(value)
+    if parsed < minimum or parsed > (1 << 64) - 1:
+        return None
+    return parsed
 
 
 def run(args: argparse.Namespace) -> tuple[str, int, float]:

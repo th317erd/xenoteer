@@ -69,7 +69,8 @@ pub const ACCESSIBILITY_CURSOR_TTL_MS: u32 = 30_000;
 pub const MAX_ACCESSIBILITY_CURSORS_PER_PRINCIPAL: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema)]
-pub struct AtspiGeneration(#[schemars(range(min = 1))] u64);
+#[schemars(schema_with = "crate::wire_integer::nonzero_schema")]
+pub struct AtspiGeneration(u64);
 
 impl AtspiGeneration {
     pub const fn new(value: u64) -> Result<Self, AccessibilityValidationError> {
@@ -90,7 +91,7 @@ impl Serialize for AtspiGeneration {
     where
         S: Serializer,
     {
-        serializer.serialize_u64(self.0)
+        crate::wire_integer::nonzero::serialize(&self.0, serializer)
     }
 }
 
@@ -99,12 +100,14 @@ impl<'de> Deserialize<'de> for AtspiGeneration {
     where
         D: Deserializer<'de>,
     {
-        Self::new(u64::deserialize(deserializer)?).map_err(de::Error::custom)
+        Self::new(crate::wire_integer::nonzero::deserialize(deserializer)?)
+            .map_err(de::Error::custom)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema)]
-pub struct AccessibilityRevision(#[schemars(range(min = 1))] u64);
+#[schemars(schema_with = "crate::wire_integer::nonzero_schema")]
+pub struct AccessibilityRevision(u64);
 
 impl AccessibilityRevision {
     pub const fn new(value: u64) -> Result<Self, AccessibilityValidationError> {
@@ -125,7 +128,7 @@ impl Serialize for AccessibilityRevision {
     where
         S: Serializer,
     {
-        serializer.serialize_u64(self.0)
+        crate::wire_integer::nonzero::serialize(&self.0, serializer)
     }
 }
 
@@ -134,7 +137,8 @@ impl<'de> Deserialize<'de> for AccessibilityRevision {
     where
         D: Deserializer<'de>,
     {
-        Self::new(u64::deserialize(deserializer)?).map_err(de::Error::custom)
+        Self::new(crate::wire_integer::nonzero::deserialize(deserializer)?)
+            .map_err(de::Error::custom)
     }
 }
 
@@ -308,7 +312,8 @@ pub struct ApplicationRef {
     pub atspi_generation: AtspiGeneration,
     pub unique_bus_name: AtspiBusName,
     pub root_object_path: AtspiObjectPath,
-    #[schemars(range(min = 1))]
+    #[serde(with = "crate::wire_integer::nonzero")]
+    #[schemars(schema_with = "crate::wire_integer::nonzero_schema")]
     pub app_instance_generation: u64,
     pub identity_hash: AccessibilityIdentityHash,
 }
@@ -332,7 +337,8 @@ pub(crate) struct StrictApplicationRef {
     atspi_generation: AtspiGeneration,
     unique_bus_name: AtspiBusName,
     root_object_path: AtspiObjectPath,
-    #[schemars(range(min = 1))]
+    #[serde(with = "crate::wire_integer::nonzero")]
+    #[schemars(schema_with = "crate::wire_integer::nonzero_schema")]
     app_instance_generation: u64,
     identity_hash: AccessibilityIdentityHash,
 }
@@ -368,7 +374,8 @@ pub struct ElementRef {
     pub application: ApplicationRef,
     pub object_path: AtspiObjectPath,
     pub object_identity_hash: AccessibilityIdentityHash,
-    #[schemars(range(min = 1))]
+    #[serde(with = "crate::wire_integer::nonzero")]
+    #[schemars(schema_with = "crate::wire_integer::nonzero_schema")]
     pub cache_sequence: u64,
 }
 
@@ -401,7 +408,8 @@ pub(crate) struct StrictElementRef {
     application: ApplicationRef,
     object_path: AtspiObjectPath,
     object_identity_hash: AccessibilityIdentityHash,
-    #[schemars(range(min = 1))]
+    #[serde(with = "crate::wire_integer::nonzero")]
+    #[schemars(schema_with = "crate::wire_integer::nonzero_schema")]
     cache_sequence: u64,
 }
 
@@ -1799,6 +1807,8 @@ pub struct AccessibilityEvent {
     pub resync_reason: Option<AccessibilityResyncReason>,
     pub detail: AccessibilityEventDetail,
     pub revision: AccessibilityRevision,
+    #[serde(with = "crate::wire_integer::nonzero")]
+    #[schemars(schema_with = "crate::wire_integer::nonzero_schema")]
     pub cache_sequence: u64,
     pub source_stale: bool,
 }

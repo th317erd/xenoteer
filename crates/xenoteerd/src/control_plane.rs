@@ -7715,7 +7715,7 @@ mod tests {
             event: RuntimeEvent::Broadcast {
                 event: NormalizedEvent::new(
                     EventTopic::new("window.changed")?,
-                    serde_json::json!({"model_revision": 17}),
+                    serde_json::json!({"model_revision": "17"}),
                 )?,
             },
         };
@@ -7786,9 +7786,9 @@ mod tests {
             resync_notify: Arc::new(Notify::new()),
         };
         let topic = EventTopic::new("window.changed")?;
-        ingress.try_broadcast(topic.clone(), serde_json::json!({"model_revision": 1}))?;
+        ingress.try_broadcast(topic.clone(), serde_json::json!({"model_revision": "1"}))?;
         assert_eq!(
-            ingress.try_broadcast(topic, serde_json::json!({"model_revision": 2})),
+            ingress.try_broadcast(topic, serde_json::json!({"model_revision": "2"})),
             Err(ExternalEventIngressError::Full)
         );
         assert_eq!(resync_state.load(Ordering::Acquire), 1);
@@ -7811,14 +7811,14 @@ mod tests {
         ingress.require_resync();
         assert_eq!(resync_state.load(Ordering::Acquire), 1);
         assert_eq!(
-            ingress.try_broadcast(topic.clone(), serde_json::json!({"model_revision": 1})),
+            ingress.try_broadcast(topic.clone(), serde_json::json!({"model_revision": "1"})),
             Err(ExternalEventIngressError::Full)
         );
         assert!(receiver.try_recv().is_err());
         assert_eq!(claim_external_resync(&resync_state), Some(2));
         assert_eq!(claim_external_resync(&resync_state), None);
 
-        ingress.try_broadcast(topic, serde_json::json!({"model_revision": 2}))?;
+        ingress.try_broadcast(topic, serde_json::json!({"model_revision": "2"}))?;
         let queued = receiver.try_recv()?;
         assert_eq!(queued.admission_epoch, 2);
         assert!(matches!(
@@ -7842,7 +7842,7 @@ mod tests {
             Ok(RuntimeEvent::Broadcast {
                 event: NormalizedEvent::new(
                     EventTopic::new("window.changed")?,
-                    serde_json::json!({"model_revision": 7}),
+                    serde_json::json!({"model_revision": "7"}),
                 )?,
             })
         };
@@ -7887,7 +7887,7 @@ mod tests {
         };
         ingress.try_broadcast(
             EventTopic::new("window.changed")?,
-            serde_json::json!({"model_revision": 7}),
+            serde_json::json!({"model_revision": "7"}),
         )?;
 
         let generation = DesktopGeneration::new();
@@ -7914,7 +7914,7 @@ mod tests {
 
         ingress.try_broadcast(
             EventTopic::new("window.changed")?,
-            serde_json::json!({"model_revision": 8}),
+            serde_json::json!({"model_revision": "8"}),
         )?;
         assert!(matches!(
             event_after_external_barrier(receiver.try_recv()?, claimed_epoch),
@@ -7937,7 +7937,7 @@ mod tests {
             Ok(RuntimeEvent::Broadcast {
                 event: NormalizedEvent::new(
                     EventTopic::new("window.changed")?,
-                    serde_json::json!({"model_revision": 9}),
+                    serde_json::json!({"model_revision": "9"}),
                 )?,
             })
         };

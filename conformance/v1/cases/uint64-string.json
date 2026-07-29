@@ -1,0 +1,144 @@
+{
+  "format_version": 1,
+  "license": "Apache-2.0",
+  "suite": "wire.uint64-string",
+  "description": "Canonical decimal-string encoding for precision-sensitive unsigned 64-bit values.",
+  "cases": [
+    {
+      "id": "uint64.invalid.empty",
+      "description": "The empty string is not an integer.",
+      "operation": "decode_uint64_string",
+      "input": {"allow_zero": true, "wire": ""},
+      "expect": {"outcome": "rejected", "code": "invalid_uint64_string"},
+      "tags": ["integer", "negative", "wire"]
+    },
+    {
+      "id": "uint64.invalid.leading-plus",
+      "description": "A leading plus sign is not canonical decimal.",
+      "operation": "decode_uint64_string",
+      "input": {"allow_zero": true, "wire": "+1"},
+      "expect": {"outcome": "rejected", "code": "invalid_uint64_string"},
+      "tags": ["integer", "negative", "wire"]
+    },
+    {
+      "id": "uint64.invalid.leading-zero",
+      "description": "A multi-digit value with a leading zero is rejected.",
+      "operation": "decode_uint64_string",
+      "input": {"allow_zero": true, "wire": "01"},
+      "expect": {"outcome": "rejected", "code": "invalid_uint64_string"},
+      "tags": ["canonical", "integer", "negative"]
+    },
+    {
+      "id": "uint64.invalid.negative",
+      "description": "Negative decimal text is outside unsigned syntax.",
+      "operation": "decode_uint64_string",
+      "input": {"allow_zero": true, "wire": "-1"},
+      "expect": {"outcome": "rejected", "code": "invalid_uint64_string"},
+      "tags": ["integer", "negative", "wire"]
+    },
+    {
+      "id": "uint64.invalid.non-ascii-digit",
+      "description": "Unicode decimal digits are rejected in favor of ASCII wire syntax.",
+      "operation": "decode_uint64_string",
+      "input": {"allow_zero": true, "wire": "١"},
+      "expect": {"outcome": "rejected", "code": "invalid_uint64_string"},
+      "tags": ["canonical", "integer", "negative"]
+    },
+    {
+      "id": "uint64.invalid.nonzero-zero",
+      "description": "A nonzero counter rejects the otherwise canonical zero string.",
+      "operation": "decode_uint64_string",
+      "input": {"allow_zero": false, "wire": "0"},
+      "expect": {"outcome": "rejected", "code": "invalid_uint64_string"},
+      "tags": ["integer", "negative", "nonzero"]
+    },
+    {
+      "id": "uint64.invalid.null",
+      "description": "Null is not an encoded unsigned integer.",
+      "operation": "decode_uint64_string",
+      "input": {"allow_zero": true, "wire": null},
+      "expect": {"outcome": "rejected", "code": "invalid_uint64_string"},
+      "tags": ["integer", "negative", "type"]
+    },
+    {
+      "id": "uint64.invalid.number",
+      "description": "A JSON number is rejected even when it is exactly representable.",
+      "operation": "decode_uint64_string",
+      "input": {"allow_zero": true, "wire": 1},
+      "expect": {"outcome": "rejected", "code": "invalid_uint64_string"},
+      "tags": ["integer", "negative", "precision"]
+    },
+    {
+      "id": "uint64.invalid.overflow",
+      "description": "One above unsigned 64-bit maximum is rejected.",
+      "operation": "decode_uint64_string",
+      "input": {"allow_zero": true, "wire": "18446744073709551616"},
+      "expect": {"outcome": "rejected", "code": "invalid_uint64_string"},
+      "tags": ["boundary", "integer", "negative"]
+    },
+    {
+      "id": "uint64.invalid.trailing-space",
+      "description": "Whitespace is never trimmed from canonical wire integers.",
+      "operation": "decode_uint64_string",
+      "input": {"allow_zero": true, "wire": "1 "},
+      "expect": {"outcome": "rejected", "code": "invalid_uint64_string"},
+      "tags": ["canonical", "integer", "negative"]
+    },
+    {
+      "id": "uint64.invalid.twenty-one-digits",
+      "description": "More than twenty digits is rejected before numeric conversion.",
+      "operation": "decode_uint64_string",
+      "input": {"allow_zero": true, "wire": "100000000000000000000"},
+      "expect": {"outcome": "rejected", "code": "invalid_uint64_string"},
+      "tags": ["boundary", "integer", "negative"]
+    },
+    {
+      "id": "uint64.valid.javascript-safe-max",
+      "description": "The largest JavaScript safe integer still uses string encoding.",
+      "operation": "decode_uint64_string",
+      "input": {"allow_zero": true, "wire": "9007199254740991"},
+      "expect": {"outcome": "accepted", "decimal": "9007199254740991"},
+      "tags": ["boundary", "integer", "precision"]
+    },
+    {
+      "id": "uint64.valid.javascript-safe-plus-one",
+      "description": "Two to the fifty-third remains exact across SDK languages.",
+      "operation": "decode_uint64_string",
+      "input": {"allow_zero": true, "wire": "9007199254740992"},
+      "expect": {"outcome": "accepted", "decimal": "9007199254740992"},
+      "tags": ["boundary", "integer", "precision"]
+    },
+    {
+      "id": "uint64.valid.javascript-safe-plus-two",
+      "description": "The first non-exact JavaScript number must retain all decimal digits.",
+      "operation": "decode_uint64_string",
+      "input": {"allow_zero": true, "wire": "9007199254740993"},
+      "expect": {"outcome": "accepted", "decimal": "9007199254740993"},
+      "tags": ["boundary", "integer", "precision"]
+    },
+    {
+      "id": "uint64.valid.max",
+      "description": "Unsigned 64-bit maximum round-trips exactly.",
+      "operation": "decode_uint64_string",
+      "input": {"allow_zero": true, "wire": "18446744073709551615"},
+      "expect": {"outcome": "accepted", "decimal": "18446744073709551615"},
+      "tags": ["boundary", "integer", "wire"]
+    },
+    {
+      "id": "uint64.valid.one",
+      "description": "The smallest nonzero counter is accepted.",
+      "operation": "decode_uint64_string",
+      "input": {"allow_zero": false, "wire": "1"},
+      "expect": {"outcome": "accepted", "decimal": "1"},
+      "tags": ["integer", "nonzero", "wire"]
+    },
+    {
+      "id": "uint64.valid.zero",
+      "description": "Zero is accepted for counters whose schema permits it.",
+      "operation": "decode_uint64_string",
+      "input": {"allow_zero": true, "wire": "0"},
+      "expect": {"outcome": "accepted", "decimal": "0"},
+      "tags": ["integer", "wire", "zero"]
+    }
+  ]
+}

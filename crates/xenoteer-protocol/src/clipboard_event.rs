@@ -19,7 +19,8 @@ pub struct ClipboardOwnerChangedEvent {
     /// CLIPBOARD or PRIMARY; the selections remain independent.
     pub selection: SelectionName,
     /// Actor-local monotonic revision used only as advisory ordering evidence.
-    #[schemars(range(min = 1))]
+    #[serde(with = "crate::wire_integer::nonzero")]
+    #[schemars(schema_with = "crate::wire_integer::nonzero_schema")]
     pub revision: u64,
     /// Whether Xenoteer's hidden selection window is now the owner.
     pub owned_by_xenoteer: bool,

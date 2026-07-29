@@ -1245,7 +1245,7 @@ mod tests {
                 "desktop_id": DesktopId::new(),
                 "desktop_generation": DesktopGeneration::new(),
                 "xid": 42,
-                "observed_generation": 1,
+                "observed_generation": "1",
                 "identity_hash": "d".repeat(WINDOW_IDENTITY_HASH_BYTES)
             },
             "state": "above",

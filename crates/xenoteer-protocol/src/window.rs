@@ -44,7 +44,8 @@ pub const MAX_WINDOW_PROCESS_EVIDENCE: usize = 8;
 
 /// One non-zero actor-local model revision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema)]
-pub struct WindowModelRevision(#[schemars(range(min = 1))] u64);
+#[schemars(schema_with = "crate::wire_integer::nonzero_schema")]
+pub struct WindowModelRevision(u64);
 
 impl WindowModelRevision {
     /// Creates a non-zero model revision.
@@ -67,7 +68,7 @@ impl Serialize for WindowModelRevision {
     where
         S: Serializer,
     {
-        serializer.serialize_u64(self.0)
+        crate::wire_integer::nonzero::serialize(&self.0, serializer)
     }
 }
 
@@ -76,7 +77,8 @@ impl<'de> Deserialize<'de> for WindowModelRevision {
     where
         D: Deserializer<'de>,
     {
-        Self::new(u64::deserialize(deserializer)?).map_err(de::Error::custom)
+        Self::new(crate::wire_integer::nonzero::deserialize(deserializer)?)
+            .map_err(de::Error::custom)
     }
 }
 
@@ -154,7 +156,8 @@ pub struct WindowRef {
     #[schemars(range(min = 1))]
     pub xid: u32,
     /// Per-XID birth marker incremented whenever an absent XID reappears.
-    #[schemars(range(min = 1))]
+    #[serde(with = "crate::wire_integer::nonzero")]
+    #[schemars(schema_with = "crate::wire_integer::nonzero_schema")]
     pub observed_generation: u64,
     /// Server-generated binding to first-observed identity evidence.
     pub identity_hash: WindowIdentityHash,
@@ -169,7 +172,8 @@ pub(crate) struct StrictWindowRef {
     desktop_generation: DesktopGeneration,
     #[schemars(range(min = 1))]
     xid: u32,
-    #[schemars(range(min = 1))]
+    #[serde(with = "crate::wire_integer::nonzero")]
+    #[schemars(schema_with = "crate::wire_integer::nonzero_schema")]
     observed_generation: u64,
     identity_hash: WindowIdentityHash,
 }

@@ -1,0 +1,199 @@
+{
+  "format_version": 1,
+  "license": "Apache-2.0",
+  "suite": "scenarios.stale-references",
+  "description": "Concrete generation- and birth-fenced references never silently retarget.",
+  "cases": [
+    {
+      "id": "reference.accessibility.app-restart",
+      "description": "An application-instance generation change makes the original element stale.",
+      "operation": "reference_lifecycle",
+      "input": {
+        "kind": "element",
+        "original": {
+          "desktop_id": "20000000-0000-4000-8000-000000000001",
+          "desktop_generation": "30000000-0000-4000-8000-000000000001",
+          "atspi_generation": "1",
+          "application": {
+            "desktop_id": "20000000-0000-4000-8000-000000000001",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "atspi_generation": "1",
+            "unique_bus_name": ":1.42",
+            "root_object_path": "/org/a11y/root",
+            "app_instance_generation": "1",
+            "identity_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "object_path": "/org/a11y/button",
+          "object_identity_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "cache_sequence": "10"
+        },
+        "current": {
+          "desktop_id": "20000000-0000-4000-8000-000000000001",
+          "desktop_generation": "30000000-0000-4000-8000-000000000001",
+          "atspi_generation": "1",
+          "application": {
+            "desktop_id": "20000000-0000-4000-8000-000000000001",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "atspi_generation": "1",
+            "unique_bus_name": ":1.43",
+            "root_object_path": "/org/a11y/root",
+            "app_instance_generation": "2",
+            "identity_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          },
+          "object_path": "/org/a11y/button",
+          "object_identity_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "cache_sequence": "1"
+        },
+        "relocated": {
+          "desktop_id": "20000000-0000-4000-8000-000000000001",
+          "desktop_generation": "30000000-0000-4000-8000-000000000001",
+          "atspi_generation": "1",
+          "application": {
+            "desktop_id": "20000000-0000-4000-8000-000000000001",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "atspi_generation": "1",
+            "unique_bus_name": ":1.43",
+            "root_object_path": "/org/a11y/root",
+            "app_instance_generation": "2",
+            "identity_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          },
+          "object_path": "/org/a11y/button",
+          "object_identity_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "cache_sequence": "1"
+        },
+        "server_problem": {
+          "type": "https://xenoteer.dev/problems/stale-reference",
+          "title": "Reference is stale",
+          "status": 409,
+          "code": "stale_reference",
+          "detail": "The application instance no longer matches.",
+          "instance": null,
+          "retry": "after_resync",
+          "effect_stage": "none",
+          "desktop_generation": "30000000-0000-4000-8000-000000000001",
+          "details": {}
+        }
+      },
+      "expect": {
+        "stale": true,
+        "server_error_code": "stale_reference",
+        "identity_unchanged": true,
+        "relocated_distinct": true,
+        "generation_changed": true
+      },
+      "tags": ["accessibility", "reference", "stale"]
+    },
+    {
+      "id": "reference.accessibility.bus-reconnect",
+      "description": "An AT-SPI generation change keeps a reused bus path from retargeting.",
+      "operation": "reference_lifecycle",
+      "input": {
+        "kind": "element",
+        "original": {
+          "desktop_id": "20000000-0000-4000-8000-000000000001",
+          "desktop_generation": "30000000-0000-4000-8000-000000000001",
+          "atspi_generation": "4",
+          "application": {
+            "desktop_id": "20000000-0000-4000-8000-000000000001",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "atspi_generation": "4",
+            "unique_bus_name": ":1.42",
+            "root_object_path": "/org/a11y/root",
+            "app_instance_generation": "2",
+            "identity_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "object_path": "/org/a11y/button",
+          "object_identity_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "cache_sequence": "78"
+        },
+        "current": {
+          "desktop_id": "20000000-0000-4000-8000-000000000001",
+          "desktop_generation": "30000000-0000-4000-8000-000000000001",
+          "atspi_generation": "5",
+          "application": {
+            "desktop_id": "20000000-0000-4000-8000-000000000001",
+            "desktop_generation": "30000000-0000-4000-8000-000000000001",
+            "atspi_generation": "5",
+            "unique_bus_name": ":1.42",
+            "root_object_path": "/org/a11y/root",
+            "app_instance_generation": "2",
+            "identity_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "object_path": "/org/a11y/button",
+          "object_identity_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "cache_sequence": "1"
+        },
+        "relocated": null,
+        "server_problem": {
+          "type": "https://xenoteer.dev/problems/stale-reference",
+          "title": "Reference is stale",
+          "status": 409,
+          "code": "stale_reference",
+          "detail": "The AT-SPI generation no longer matches.",
+          "instance": null,
+          "retry": "after_resync",
+          "effect_stage": "none",
+          "desktop_generation": "30000000-0000-4000-8000-000000000001",
+          "details": {}
+        }
+      },
+      "expect": {
+        "stale": true,
+        "server_error_code": "stale_reference",
+        "identity_unchanged": true,
+        "relocated_distinct": false,
+        "generation_changed": true
+      },
+      "tags": ["accessibility", "generation", "stale"]
+    },
+    {
+      "id": "reference.window.xid-reuse",
+      "description": "A reused XID with a new birth marker is distinct from the original window.",
+      "operation": "reference_lifecycle",
+      "input": {
+        "kind": "window",
+        "original": {
+          "desktop_id": "20000000-0000-4000-8000-000000000001",
+          "desktop_generation": "30000000-0000-4000-8000-000000000001",
+          "xid": 4194305,
+          "observed_generation": "1",
+          "identity_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "current": {
+          "desktop_id": "20000000-0000-4000-8000-000000000001",
+          "desktop_generation": "30000000-0000-4000-8000-000000000001",
+          "xid": 4194305,
+          "observed_generation": "2",
+          "identity_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "relocated": {
+          "desktop_id": "20000000-0000-4000-8000-000000000001",
+          "desktop_generation": "30000000-0000-4000-8000-000000000001",
+          "xid": 4194305,
+          "observed_generation": "2",
+          "identity_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "server_problem": {
+          "type": "https://xenoteer.dev/problems/stale-reference",
+          "title": "Reference is stale",
+          "status": 409,
+          "code": "stale_reference",
+          "detail": "The XID birth marker no longer matches.",
+          "instance": null,
+          "retry": "after_resync",
+          "effect_stage": "none",
+          "desktop_generation": "30000000-0000-4000-8000-000000000001",
+          "details": {}
+        }
+      },
+      "expect": {
+        "stale": true,
+        "server_error_code": "stale_reference",
+        "identity_unchanged": true,
+        "relocated_distinct": true,
+        "generation_changed": true
+      },
+      "tags": ["reference", "stale", "window"]
+    }
+  ]
+}

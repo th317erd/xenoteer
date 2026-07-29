@@ -23,6 +23,7 @@ pub mod problem;
 pub mod process;
 pub mod result;
 pub mod schema;
+pub mod status;
 pub mod timestamp;
 pub mod version;
 pub mod viewer;
@@ -30,6 +31,7 @@ pub mod websocket;
 pub mod window;
 pub mod window_control;
 pub mod window_selector;
+mod wire_integer;
 
 #[cfg(test)]
 mod accessibility_tests;
@@ -81,8 +83,12 @@ pub use result::{
     CommandTraceStage, CommandTraceStatus, CommandTraceStep, CommandTraceValidationError,
     EffectStage, MAX_COMMAND_TRACE_STEPS, ResultInvariantError, Warning, WarningValidationError,
 };
+pub use status::{
+    DesktopState, DesktopStatus, MAX_DESKTOP_REASON_CODE_BYTES, MAX_SERVER_VERSION_BYTES,
+    StatusResponse, StatusValidationError,
+};
 pub use timestamp::{Timestamp, TimestampError};
-pub use version::{ProtocolVersion, VersionRange};
+pub use version::{ProtocolVersion, VersionError, VersionRange};
 pub use viewer::*;
 pub use websocket::{
     ACTION_LIFECYCLE_TOPIC, COMMAND_LIFECYCLE_TOPIC, ClientHello, EventResumeRequest,

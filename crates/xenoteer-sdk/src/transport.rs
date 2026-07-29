@@ -1,54 +1,77 @@
 //! Bounded, retry-neutral HTTP transport for the v1 control API.
 
-use std::{fmt, time::Duration};
+use std::{
+    fmt, io,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use bytes::{Bytes, BytesMut};
+use futures_util::StreamExt;
 use http::{
-    HeaderMap, HeaderValue, Method, Request, Response, Uri,
-    header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE},
+    HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri,
+    header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE},
 };
-use http_body_util::{BodyExt, Full};
-use hyper::body::Incoming;
+use http_body_util::{BodyExt, Full, StreamBody, combinators::UnsyncBoxBody};
+use hyper::body::{Frame, Incoming};
+use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
     rt::TokioExecutor,
 };
 use serde::{Serialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::Notify;
+use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use xenoteer_protocol::{
-    CommandEnvelope, CommandId, CommandResult, DesktopGeneration, DesktopId, LeaseAcquireRequest,
-    LeaseReleaseRequest, LeaseRenewRequest, LeaseStateView, Problem,
+    ArtifactContentType, ArtifactRef, CapabilityReport, CommandEnvelope, CommandId, CommandResult,
+    DesktopGeneration, DesktopId, LeaseAcquireRequest, LeaseReleaseRequest, LeaseRenewRequest,
+    LeaseStateView, Problem, Sha256Digest, StatusResponse, VersionRange,
 };
 
 /// Maximum response-body size accepted by the SDK.
 pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+/// Maximum response body for accessibility endpoints that permit large trees.
+pub const MAX_ACCESSIBILITY_RESPONSE_BYTES: usize =
+    xenoteer_protocol::MAX_ACCESSIBILITY_SNAPSHOT_BYTES as usize;
 
 /// Maximum long-poll duration accepted by [`Client::wait_command`].
 pub const MAX_WAIT_TIMEOUT_MS: u32 = 30_000;
 
 /// Default end-to-end deadline for one HTTP exchange, including response body.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
+/// Maximum time client shutdown waits for owned event supervisors.
+pub const DEFAULT_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 const MIN_BEARER_TOKEN_BYTES: usize = 32;
 const MAX_BEARER_TOKEN_BYTES: usize = 1024;
+const ARTIFACT_SHA256_HEADER: &str = "x-content-sha256";
 
-type HttpClient = HyperClient<HttpConnector, Full<Bytes>>;
+type RequestBody = UnsyncBoxBody<Bytes, io::Error>;
+type HttpClient = HyperClient<HttpsConnector<HttpConnector>, RequestBody>;
 
-/// An origin-only HTTP base URI.
+/// An origin-only HTTPS or loopback HTTP base URI.
 #[derive(Clone, PartialEq, Eq)]
 pub struct BaseUri {
     origin: String,
 }
 
 impl BaseUri {
-    /// Parses an `http://loopback-IP[:port]` origin.
+    /// Parses an HTTPS origin or `http://loopback-IP[:port]` development origin.
     ///
-    /// TLS is expected to terminate at an external gateway in the initial SDK.
-    /// Paths, queries, fragments, user information, and non-HTTP schemes are
+    /// Paths, queries, fragments, user information, and other schemes are
     /// rejected so endpoint construction cannot silently change API routing.
     pub fn parse(value: &str) -> Result<Self, SdkError> {
+        if value.contains('#') {
+            return Err(SdkError::InvalidBaseUri);
+        }
         let uri = value.parse::<Uri>().map_err(|_| SdkError::InvalidBaseUri)?;
-        if uri.scheme_str() != Some("http")
+        if !matches!(uri.scheme_str(), Some("http" | "https"))
             || uri.authority().is_none()
             || uri
                 .authority()
@@ -61,11 +84,14 @@ impl BaseUri {
 
         let authority = uri.authority().ok_or(SdkError::InvalidBaseUri)?;
         let host = uri.host().ok_or(SdkError::InvalidBaseUri)?;
-        if !is_loopback_host(host) {
+        if uri.scheme_str() == Some("http") && !is_loopback_host(host) {
             return Err(SdkError::InvalidBaseUri);
         }
         Ok(Self {
-            origin: format!("http://{authority}"),
+            origin: format!(
+                "{}://{authority}",
+                uri.scheme_str().ok_or(SdkError::InvalidBaseUri)?
+            ),
         })
     }
 
@@ -73,6 +99,14 @@ impl BaseUri {
         format!("{}{path_and_query}", self.origin)
             .parse()
             .map_err(|_| SdkError::BuildRequest)
+    }
+
+    pub(crate) fn websocket_url(&self) -> String {
+        if let Some(authority) = self.origin.strip_prefix("https://") {
+            format!("wss://{authority}/v1/ws")
+        } else {
+            format!("ws://{}/v1/ws", self.origin.trim_start_matches("http://"))
+        }
     }
 }
 
@@ -131,9 +165,12 @@ impl fmt::Debug for BearerToken {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum SdkError {
-    /// The base URI is not an origin-only HTTP URI.
+    /// The base URI is not a supported origin-only URI.
     #[error("invalid SDK base URI")]
     InvalidBaseUri,
+    /// Platform TLS roots or the Rustls connector could not be initialized.
+    #[error("failed to initialize SDK TLS configuration")]
+    TlsConfiguration,
     /// The bearer token is outside its bounds or contains invalid bytes.
     #[error("invalid bearer token")]
     InvalidBearerToken,
@@ -176,9 +213,47 @@ pub enum SdkError {
     /// A response body or its protocol invariants were invalid.
     #[error("invalid SDK response")]
     InvalidResponse,
+    /// An immutable generation- or identity-bound handle is no longer current.
+    #[error("SDK handle is stale and must be explicitly reacquired")]
+    StaleReference,
+    /// The desktop lifetime changed; reacquire generation-bound state before retrying.
+    #[error("desktop generation changed; generation-bound state must be reacquired")]
+    GenerationChanged,
     /// The server returned a validated RFC 9457 problem document.
     #[error("server returned a structured API problem")]
     Problem(Box<Problem>),
+    /// The client and server do not share a supported protocol version.
+    #[error("client and server do not share a protocol version")]
+    UnsupportedProtocol,
+    /// Status does not yet advertise a live desktop generation.
+    #[error("desktop session is not currently available")]
+    DesktopUnavailable,
+    /// A local overall command-wait deadline elapsed without cancelling the command.
+    #[error("local command wait timed out; the server command was not cancelled")]
+    CommandWaitTimeout,
+    /// A released lease handle cannot submit or renew work.
+    #[error("controller lease was already released")]
+    LeaseReleased,
+    /// The WebSocket upgrade was permanently rejected.
+    #[error("event WebSocket handshake was rejected with HTTP status {status}")]
+    EventHandshakeRejected {
+        /// Upgrade response status.
+        status: u16,
+    },
+    /// The server rejected the event subscription with a stable protocol code.
+    #[error("server rejected the event subscription ({code:?})")]
+    EventRejected {
+        /// Stable server code.
+        code: xenoteer_protocol::ErrorCode,
+        /// Bounded server-safe detail.
+        detail: String,
+    },
+    /// The shared client was explicitly closed.
+    #[error("SDK client is closed")]
+    ClientClosed,
+    /// A caller-provided artifact destination rejected output bytes.
+    #[error("artifact destination write failed")]
+    ArtifactOutput,
 }
 
 impl SdkError {
@@ -199,6 +274,26 @@ pub struct Client {
     token: BearerToken,
     http: HttpClient,
     request_timeout: Duration,
+    state: Arc<ClientState>,
+}
+
+struct ClientState {
+    closed: AtomicBool,
+    cancellation: CancellationToken,
+    active_event_tasks: AtomicUsize,
+    event_tasks_idle: Notify,
+}
+
+pub(crate) struct EventTaskGuard {
+    state: Arc<ClientState>,
+}
+
+impl Drop for EventTaskGuard {
+    fn drop(&mut self) {
+        if self.state.active_event_tasks.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.state.event_tasks_idle.notify_waiters();
+        }
+    }
 }
 
 impl Client {
@@ -209,14 +304,26 @@ impl Client {
     ) -> Result<Self, SdkError> {
         let base = BaseUri::parse(base_uri.as_ref())?;
         let token = BearerToken::new(bearer_token)?;
+        let connector = HttpsConnectorBuilder::new()
+            .with_native_roots()
+            .map_err(|_| SdkError::TlsConfiguration)?
+            .https_or_http()
+            .enable_http1()
+            .build();
         let mut builder = HyperClient::builder(TokioExecutor::new());
         builder.retry_canceled_requests(false);
-        let http = builder.build_http::<Full<Bytes>>();
+        let http = builder.build::<_, RequestBody>(connector);
         Ok(Self {
             base,
             token,
             http,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            state: Arc::new(ClientState {
+                closed: AtomicBool::new(false),
+                cancellation: CancellationToken::new(),
+                active_event_tasks: AtomicUsize::new(0),
+                event_tasks_idle: Notify::new(),
+            }),
         })
     }
 
@@ -227,6 +334,79 @@ impl Client {
         }
         self.request_timeout = timeout;
         Ok(self)
+    }
+
+    /// Closes this client and every clone derived from it.
+    ///
+    /// New HTTP and WebSocket operations fail immediately. Owned event
+    /// supervisors are cancelled and given a bounded interval to terminate.
+    pub async fn close(&self) {
+        if !self.state.closed.swap(true, Ordering::AcqRel) {
+            self.state.cancellation.cancel();
+        }
+        let wait = async {
+            while self.state.active_event_tasks.load(Ordering::Acquire) != 0 {
+                self.state.event_tasks_idle.notified().await;
+            }
+        };
+        let _bounded = tokio::time::timeout(DEFAULT_CLOSE_TIMEOUT, wait).await;
+    }
+
+    /// Returns whether this shared transport has been explicitly closed.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.state.closed.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn ensure_open(&self) -> Result<(), SdkError> {
+        if self.is_closed() {
+            Err(SdkError::ClientClosed)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn cancellation_token(&self) -> CancellationToken {
+        self.state.cancellation.clone()
+    }
+
+    pub(crate) fn register_event_task(&self) -> Result<EventTaskGuard, SdkError> {
+        self.ensure_open()?;
+        self.state.active_event_tasks.fetch_add(1, Ordering::AcqRel);
+        if self.is_closed() {
+            let guard = EventTaskGuard {
+                state: self.state.clone(),
+            };
+            drop(guard);
+            return Err(SdkError::ClientClosed);
+        }
+        Ok(EventTaskGuard {
+            state: self.state.clone(),
+        })
+    }
+
+    /// Discovers and validates authenticated server, desktop, and capability status.
+    pub async fn status(&self) -> Result<StatusResponse, SdkError> {
+        let mut response: StatusResponse = self.send_empty(Method::GET, "/v1/status").await?;
+        response.validate().map_err(|_| SdkError::InvalidResponse)?;
+        let server = VersionRange::new(
+            response.protocol_min.major(),
+            response.protocol_min.minor(),
+            response.protocol_max.minor(),
+        )
+        .map_err(|_| SdkError::InvalidResponse)?;
+        VersionRange::V1
+            .negotiate(server)
+            .map_err(|_| SdkError::UnsupportedProtocol)?;
+        Ok(response)
+    }
+
+    /// Reads and validates the current capability report.
+    pub async fn capabilities(&self) -> Result<CapabilityReport, SdkError> {
+        let mut response: CapabilityReport =
+            self.send_empty(Method::GET, "/v1/capabilities").await?;
+        response.validate().map_err(|_| SdkError::InvalidResponse)?;
+        Ok(response)
     }
 
     /// Reads redacted controller-lease state for a desktop.
@@ -342,6 +522,291 @@ impl Client {
         validate_command_response(response, command_id)
     }
 
+    pub(crate) async fn get_json<R>(&self, path: &str) -> Result<R, SdkError>
+    where
+        R: DeserializeOwned,
+    {
+        self.send_empty(Method::GET, path).await
+    }
+
+    pub(crate) async fn post_json<T, R>(&self, path: &str, value: &T) -> Result<R, SdkError>
+    where
+        T: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
+        self.send_json(Method::POST, path, value, &[]).await
+    }
+
+    pub(crate) async fn post_json_with_limit<T, R>(
+        &self,
+        path: &str,
+        value: &T,
+        response_limit: usize,
+    ) -> Result<R, SdkError>
+    where
+        T: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
+        self.send_json_with_limit(Method::POST, path, value, &[], response_limit)
+            .await
+    }
+
+    pub(crate) async fn post_json_with_headers<T, R>(
+        &self,
+        path: &str,
+        value: &T,
+        headers: &[(&'static str, HeaderValue)],
+    ) -> Result<R, SdkError>
+    where
+        T: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
+        self.send_json(Method::POST, path, value, headers).await
+    }
+
+    pub(crate) fn websocket_url(&self) -> String {
+        self.base.websocket_url()
+    }
+
+    pub(crate) fn authorization_header(&self) -> HeaderValue {
+        self.token.authorization.clone()
+    }
+
+    pub(crate) async fn upload_artifact(
+        &self,
+        path: &str,
+        content_type: &ArtifactContentType,
+        body: Bytes,
+    ) -> Result<ArtifactRef, SdkError> {
+        self.ensure_open()?;
+        if body.is_empty() {
+            return Err(SdkError::InvalidRequest);
+        }
+        if u64::try_from(body.len()).unwrap_or(u64::MAX)
+            > xenoteer_protocol::MAX_CLIPBOARD_ARTIFACT_BYTES
+        {
+            return Err(SdkError::RequestTooLarge {
+                limit: xenoteer_protocol::MAX_CLIPBOARD_ARTIFACT_BYTES as usize,
+            });
+        }
+        let body_length = body.len();
+        let digest = sha256_digest(&body)?;
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(self.base.endpoint(path)?)
+            .header(AUTHORIZATION, self.token.authorization.clone())
+            .header(ACCEPT, "application/json, application/problem+json")
+            .header(CONTENT_TYPE, content_type.as_str())
+            .header(CONTENT_LENGTH, body_length)
+            .header(ARTIFACT_SHA256_HEADER, digest.as_str())
+            .body(full_body(body))
+            .map_err(|_| SdkError::BuildRequest)?;
+        let exchange = async {
+            let response = self
+                .http
+                .request(request)
+                .await
+                .map_err(|_| SdkError::Transport)?;
+            let artifact: ArtifactRef = decode_response(response, MAX_RESPONSE_BYTES).await?;
+            artifact.validate().map_err(|_| SdkError::InvalidResponse)?;
+            if artifact.content_type != *content_type
+                || artifact.content_length != u64::try_from(body_length).unwrap_or(u64::MAX)
+                || artifact.sha256 != digest
+            {
+                return Err(SdkError::InvalidResponse);
+            }
+            Ok(artifact)
+        };
+        tokio::time::timeout(self.request_timeout, exchange)
+            .await
+            .map_err(|_| SdkError::RequestTimeout)?
+    }
+
+    pub(crate) async fn upload_artifact_from<R>(
+        &self,
+        path: &str,
+        content_type: &ArtifactContentType,
+        content_length: u64,
+        reader: R,
+    ) -> Result<ArtifactRef, SdkError>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+    {
+        self.ensure_open()?;
+        if content_length == 0 || content_length > xenoteer_protocol::MAX_CLIPBOARD_ARTIFACT_BYTES {
+            return Err(SdkError::RequestTooLarge {
+                limit: xenoteer_protocol::MAX_CLIPBOARD_ARTIFACT_BYTES as usize,
+            });
+        }
+        let digest_state = Arc::new(Mutex::new((Sha256::new(), 0_u64)));
+        let stream_state = digest_state.clone();
+        let stream =
+            ReaderStream::new(reader.take(content_length.saturating_add(1))).map(move |result| {
+                let bytes = result?;
+                let mut state = stream_state
+                    .lock()
+                    .map_err(|_| io::Error::other("artifact digest state failed"))?;
+                state.0.update(&bytes);
+                state.1 = state
+                    .1
+                    .checked_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+                    .ok_or_else(|| io::Error::other("artifact byte count overflow"))?;
+                drop(state);
+                Ok::<Frame<Bytes>, io::Error>(Frame::data(bytes))
+            });
+        let body = StreamBody::new(stream).boxed_unsync();
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(self.base.endpoint(path)?)
+            .header(AUTHORIZATION, self.token.authorization.clone())
+            .header(ACCEPT, "application/json, application/problem+json")
+            .header(CONTENT_TYPE, content_type.as_str())
+            .header(CONTENT_LENGTH, content_length)
+            .body(body)
+            .map_err(|_| SdkError::BuildRequest)?;
+        let exchange = async {
+            let response = self
+                .http
+                .request(request)
+                .await
+                .map_err(|_| SdkError::Transport)?;
+            let artifact: ArtifactRef = decode_response(response, MAX_RESPONSE_BYTES).await?;
+            artifact.validate().map_err(|_| SdkError::InvalidResponse)?;
+            let state = digest_state.lock().map_err(|_| SdkError::InvalidResponse)?;
+            if state.1 != content_length {
+                return Err(SdkError::InvalidResponse);
+            }
+            let digest = Sha256Digest::new(encode_lower_hex(state.0.clone().finalize().as_ref()))
+                .map_err(|_| SdkError::InvalidResponse)?;
+            if artifact.content_type != *content_type
+                || artifact.content_length != content_length
+                || artifact.sha256 != digest
+            {
+                return Err(SdkError::InvalidResponse);
+            }
+            Ok(artifact)
+        };
+        tokio::select! {
+            result = tokio::time::timeout(self.request_timeout, exchange) => {
+                result.map_err(|_| SdkError::RequestTimeout)?
+            }
+            () = self.state.cancellation.cancelled() => Err(SdkError::ClientClosed),
+        }
+    }
+
+    pub(crate) async fn download_artifact_to<W>(
+        &self,
+        path: &str,
+        artifact: &ArtifactRef,
+        output: &mut W,
+    ) -> Result<(), SdkError>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        self.ensure_open()?;
+        artifact.validate().map_err(|_| SdkError::InvalidRequest)?;
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(self.base.endpoint(path)?)
+            .header(AUTHORIZATION, self.token.authorization.clone())
+            .header(ACCEPT, artifact.content_type.as_str())
+            .body(full_body(Bytes::new()))
+            .map_err(|_| SdkError::BuildRequest)?;
+        let exchange = async {
+            let mut response = self
+                .http
+                .request(request)
+                .await
+                .map_err(|_| SdkError::Transport)?;
+            if response.status() != StatusCode::OK {
+                return Err(decode_error_response(response).await);
+            }
+            let expected_length =
+                usize::try_from(artifact.content_length).map_err(|_| SdkError::InvalidResponse)?;
+            validate_exact_header(
+                response.headers(),
+                CONTENT_LENGTH.as_str(),
+                &expected_length.to_string(),
+            )?;
+            validate_exact_header(
+                response.headers(),
+                CONTENT_TYPE.as_str(),
+                artifact.content_type.as_str(),
+            )?;
+            validate_exact_header(
+                response.headers(),
+                ARTIFACT_SHA256_HEADER,
+                artifact.sha256.as_str(),
+            )?;
+            if response.headers().contains_key(CONTENT_RANGE) {
+                return Err(SdkError::InvalidResponse);
+            }
+            let mut received = 0_usize;
+            let mut digest = Sha256::new();
+            while let Some(frame) = response.body_mut().frame().await {
+                let frame = frame.map_err(|_| SdkError::Transport)?;
+                if let Ok(data) = frame.into_data() {
+                    received =
+                        received
+                            .checked_add(data.len())
+                            .ok_or(SdkError::ResponseTooLarge {
+                                limit: expected_length,
+                            })?;
+                    if received > expected_length {
+                        return Err(SdkError::ResponseTooLarge {
+                            limit: expected_length,
+                        });
+                    }
+                    digest.update(&data);
+                    output
+                        .write_all(&data)
+                        .await
+                        .map_err(|_| SdkError::ArtifactOutput)?;
+                }
+            }
+            if received != expected_length
+                || encode_lower_hex(digest.finalize().as_ref()) != artifact.sha256.as_str()
+            {
+                return Err(SdkError::InvalidResponse);
+            }
+            output.flush().await.map_err(|_| SdkError::ArtifactOutput)?;
+            Ok(())
+        };
+        tokio::time::timeout(self.request_timeout, exchange)
+            .await
+            .map_err(|_| SdkError::RequestTimeout)?
+    }
+
+    pub(crate) async fn delete_artifact(&self, path: &str) -> Result<(), SdkError> {
+        self.ensure_open()?;
+        let request = Request::builder()
+            .method(Method::DELETE)
+            .uri(self.base.endpoint(path)?)
+            .header(AUTHORIZATION, self.token.authorization.clone())
+            .header(ACCEPT, "application/problem+json")
+            .body(full_body(Bytes::new()))
+            .map_err(|_| SdkError::BuildRequest)?;
+        let exchange = async {
+            let response = self
+                .http
+                .request(request)
+                .await
+                .map_err(|_| SdkError::Transport)?;
+            if response.status() != StatusCode::NO_CONTENT {
+                return Err(decode_error_response(response).await);
+            }
+            validate_content_length(response.headers(), 0)?;
+            let body = collect_bounded(response.into_body(), 0).await?;
+            if !body.is_empty() {
+                return Err(SdkError::InvalidResponse);
+            }
+            Ok(())
+        };
+        tokio::time::timeout(self.request_timeout, exchange)
+            .await
+            .map_err(|_| SdkError::RequestTimeout)?
+    }
+
     async fn send_json<T, R>(
         &self,
         method: Method,
@@ -353,21 +818,58 @@ impl Client {
         T: Serialize + ?Sized,
         R: DeserializeOwned,
     {
+        self.send_json_with_limit(method, path, value, extra_headers, MAX_RESPONSE_BYTES)
+            .await
+    }
+
+    async fn send_json_with_limit<T, R>(
+        &self,
+        method: Method,
+        path: &str,
+        value: &T,
+        extra_headers: &[(&'static str, HeaderValue)],
+        response_limit: usize,
+    ) -> Result<R, SdkError>
+    where
+        T: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
         let body = serde_json::to_vec(value).map_err(|_| SdkError::EncodeRequest)?;
         if body.len() > MAX_RESPONSE_BYTES {
             return Err(SdkError::RequestTooLarge {
                 limit: MAX_RESPONSE_BYTES,
             });
         }
-        self.send(method, path, Bytes::from(body), true, extra_headers)
-            .await
+        self.send(
+            method,
+            path,
+            Bytes::from(body),
+            true,
+            extra_headers,
+            response_limit,
+        )
+        .await
     }
 
     async fn send_empty<R>(&self, method: Method, path: &str) -> Result<R, SdkError>
     where
         R: DeserializeOwned,
     {
-        self.send(method, path, Bytes::new(), false, &[]).await
+        self.send_empty_with_limit(method, path, MAX_RESPONSE_BYTES)
+            .await
+    }
+
+    async fn send_empty_with_limit<R>(
+        &self,
+        method: Method,
+        path: &str,
+        response_limit: usize,
+    ) -> Result<R, SdkError>
+    where
+        R: DeserializeOwned,
+    {
+        self.send(method, path, Bytes::new(), false, &[], response_limit)
+            .await
     }
 
     async fn send<R>(
@@ -377,10 +879,12 @@ impl Client {
         body: Bytes,
         has_json_body: bool,
         extra_headers: &[(&'static str, HeaderValue)],
+        response_limit: usize,
     ) -> Result<R, SdkError>
     where
         R: DeserializeOwned,
     {
+        self.ensure_open()?;
         let mut builder = Request::builder()
             .method(method)
             .uri(self.base.endpoint(path)?)
@@ -393,7 +897,7 @@ impl Client {
             builder = builder.header(*name, value.clone());
         }
         let request = builder
-            .body(Full::new(body))
+            .body(full_body(body))
             .map_err(|_| SdkError::BuildRequest)?;
 
         // This is intentionally the only network attempt made for the request.
@@ -403,11 +907,14 @@ impl Client {
                 .request(request)
                 .await
                 .map_err(|_| SdkError::Transport)?;
-            decode_response(response).await
+            decode_response(response, response_limit).await
         };
-        tokio::time::timeout(self.request_timeout, exchange)
-            .await
-            .map_err(|_| SdkError::RequestTimeout)?
+        tokio::select! {
+            result = tokio::time::timeout(self.request_timeout, exchange) => {
+                result.map_err(|_| SdkError::RequestTimeout)?
+            }
+            () = self.state.cancellation.cancelled() => Err(SdkError::ClientClosed),
+        }
     }
 }
 
@@ -424,6 +931,12 @@ impl fmt::Debug for Client {
 
 fn command_path(desktop_id: DesktopId, command_id: CommandId) -> String {
     format!("/v1/desktops/{desktop_id}/commands/{command_id}")
+}
+
+fn full_body(bytes: Bytes) -> RequestBody {
+    Full::new(bytes)
+        .map_err(|never| match never {})
+        .boxed_unsync()
 }
 
 fn validate_command_ids(desktop_id: DesktopId, command_id: CommandId) -> Result<(), SdkError> {
@@ -458,14 +971,17 @@ fn validate_command_response(
     Ok(response)
 }
 
-async fn decode_response<R>(response: Response<Incoming>) -> Result<R, SdkError>
+async fn decode_response<R>(
+    response: Response<Incoming>,
+    response_limit: usize,
+) -> Result<R, SdkError>
 where
     R: DeserializeOwned,
 {
     let status = response.status();
-    validate_content_length(response.headers())?;
+    validate_content_length(response.headers(), response_limit)?;
     let content_type = response.headers().get(CONTENT_TYPE).cloned();
-    let body = collect_bounded(response.into_body()).await?;
+    let body = collect_bounded(response.into_body(), response_limit).await?;
 
     if !status.is_success() {
         if !content_type_is(content_type.as_ref(), "application/problem+json") {
@@ -488,7 +1004,42 @@ where
     serde_json::from_slice(&body).map_err(|_| SdkError::InvalidResponse)
 }
 
-fn validate_content_length(headers: &HeaderMap) -> Result<(), SdkError> {
+async fn decode_error_response(response: Response<Incoming>) -> SdkError {
+    match decode_response::<serde_json::Value>(response, MAX_RESPONSE_BYTES).await {
+        Err(error) => error,
+        Ok(_) => SdkError::InvalidResponse,
+    }
+}
+
+fn validate_exact_header(
+    headers: &HeaderMap,
+    name: &'static str,
+    expected: &str,
+) -> Result<(), SdkError> {
+    let mut values = headers.get_all(name).iter();
+    let value = values.next().ok_or(SdkError::InvalidResponse)?;
+    if values.next().is_some() || value.as_bytes() != expected.as_bytes() {
+        return Err(SdkError::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn sha256_digest(bytes: &[u8]) -> Result<Sha256Digest, SdkError> {
+    Sha256Digest::new(encode_lower_hex(Sha256::digest(bytes).as_ref()))
+        .map_err(|_| SdkError::EncodeRequest)
+}
+
+fn encode_lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn validate_content_length(headers: &HeaderMap, limit: usize) -> Result<(), SdkError> {
     let mut lengths = headers.get_all(CONTENT_LENGTH).iter();
     let Some(length) = lengths.next() else {
         return Ok(());
@@ -501,30 +1052,23 @@ fn validate_content_length(headers: &HeaderMap) -> Result<(), SdkError> {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .ok_or(SdkError::InvalidResponse)?;
-    if length > MAX_RESPONSE_BYTES {
-        return Err(SdkError::ResponseTooLarge {
-            limit: MAX_RESPONSE_BYTES,
-        });
+    if length > limit {
+        return Err(SdkError::ResponseTooLarge { limit });
     }
     Ok(())
 }
 
-async fn collect_bounded(mut body: Incoming) -> Result<Bytes, SdkError> {
+async fn collect_bounded(mut body: Incoming, limit: usize) -> Result<Bytes, SdkError> {
     let mut collected = BytesMut::new();
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(|_| SdkError::Transport)?;
         if let Ok(data) = frame.into_data() {
-            let new_len =
-                collected
-                    .len()
-                    .checked_add(data.len())
-                    .ok_or(SdkError::ResponseTooLarge {
-                        limit: MAX_RESPONSE_BYTES,
-                    })?;
-            if new_len > MAX_RESPONSE_BYTES {
-                return Err(SdkError::ResponseTooLarge {
-                    limit: MAX_RESPONSE_BYTES,
-                });
+            let new_len = collected
+                .len()
+                .checked_add(data.len())
+                .ok_or(SdkError::ResponseTooLarge { limit })?;
+            if new_len > limit {
+                return Err(SdkError::ResponseTooLarge { limit });
             }
             collected.extend_from_slice(&data);
         }
@@ -562,8 +1106,8 @@ mod tests {
         time::timeout,
     };
     use xenoteer_protocol::{
-        Command, DesktopProbeCommand, EffectStage, ErrorCode, ProtocolVersion, RequestId,
-        RetryAdvice, Timestamp,
+        ArtifactId, ArtifactPurpose, Command, DesktopProbeCommand, EffectStage, ErrorCode,
+        ProtocolVersion, RequestId, RetryAdvice, Timestamp,
     };
 
     use super::*;
@@ -576,6 +1120,12 @@ mod tests {
         let token = BearerToken::new(secret)?;
         let client = Client::new("http://127.0.0.1:8080", secret)?;
         assert!(BaseUri::parse("http://[::1]:8080").is_ok());
+        assert!(BaseUri::parse("https://xenoteer.example").is_ok());
+        assert!(BaseUri::parse("https://xenoteer.example:8443/").is_ok());
+        assert_eq!(
+            BaseUri::parse("https://xenoteer.example:8443/")?.websocket_url(),
+            "wss://xenoteer.example:8443/v1/ws"
+        );
 
         let token_debug = format!("{token:?}");
         let client_debug = format!("{client:?}");
@@ -589,18 +1139,23 @@ mod tests {
         ));
 
         for invalid in [
-            "https://127.0.0.1",
             "http://127.0.0.1/api",
             "http://127.0.0.1/?tenant=one",
             "http://user@127.0.0.1",
             "http://localhost:8080",
             "http://192.0.2.1:8080",
+            "http://example.test:8080",
+            "ftp://127.0.0.1:8080",
+            "https://user@example.test",
+            "https://example.test/api",
+            "https://example.test?tenant=one",
+            "https://example.test/#fragment",
             "127.0.0.1:8080",
         ] {
-            assert!(matches!(
-                BaseUri::parse(invalid),
-                Err(SdkError::InvalidBaseUri)
-            ));
+            assert!(
+                matches!(BaseUri::parse(invalid), Err(SdkError::InvalidBaseUri)),
+                "unexpectedly accepted {invalid}"
+            );
         }
         Ok(())
     }
@@ -719,6 +1274,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn close_is_shared_and_rejects_every_derived_transport_call() -> Result<(), TestError> {
+        let client = Client::new("http://127.0.0.1:9", test_token())?;
+        let derived = client.clone();
+        client.close().await;
+
+        assert!(client.is_closed());
+        assert!(derived.is_closed());
+        assert!(matches!(
+            derived
+                .get_command(DesktopId::new(), CommandId::new())
+                .await,
+            Err(SdkError::ClientClosed)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_waits_for_owned_event_guard_and_cancels_inflight_http() -> Result<(), TestError>
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let base = format!("http://{}", listener.local_addr()?);
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let _request = read_request(&mut stream).await?;
+            std::future::pending::<io::Result<()>>().await
+        });
+        let client = Client::new(base, test_token())?;
+        let guard = client.register_event_task()?;
+        let request_client = client.clone();
+        let request = tokio::spawn(async move {
+            request_client
+                .get_command(DesktopId::new(), CommandId::new())
+                .await
+        });
+        tokio::task::yield_now().await;
+        let close_client = client.clone();
+        let close = tokio::spawn(async move {
+            close_client.close().await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!close.is_finished());
+        drop(guard);
+        timeout(Duration::from_secs(1), close).await??;
+        assert!(matches!(
+            timeout(Duration::from_secs(1), request).await??,
+            Err(SdkError::ClientClosed)
+        ));
+        server.abort();
+        let _aborted = server.await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn failed_submission_is_not_replayed() -> Result<(), TestError> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let base = format!("http://{}", listener.local_addr()?);
@@ -762,6 +1370,245 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn endpoint_specific_json_limit_accepts_valid_large_accessibility_shape()
+    -> Result<(), TestError> {
+        let value = serde_json::json!({"payload": "x".repeat(MAX_RESPONSE_BYTES + 1)});
+        let response = json_response("200 OK", "application/json", &value)?;
+        let (base, server) = serve_once(response).await?;
+        let client = Client::new(base, test_token())?;
+        let returned: serde_json::Value = client
+            .post_json_with_limit(
+                "/v1/desktops/test/accessibility/elements/snapshot",
+                &serde_json::json!({}),
+                MAX_ACCESSIBILITY_RESPONSE_BYTES,
+            )
+            .await?;
+        assert_eq!(returned, value);
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_download_streams_only_after_exact_metadata_and_digest_validation()
+    -> Result<(), TestError> {
+        let body = Bytes::from_static(b"verified-artifact-body");
+        let artifact = artifact_ref(ArtifactPurpose::Screenshot, &body)?;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nx-content-sha256: {}\r\nConnection: close\r\n\r\n",
+            artifact.content_type.as_str(),
+            artifact.content_length,
+            artifact.sha256.as_str()
+        )
+        .into_bytes();
+        let mut response = response;
+        response.extend_from_slice(&body);
+        let (base, server) = serve_once(response).await?;
+        let client = Client::new(base, test_token())?;
+        let mut output = Vec::new();
+        client
+            .download_artifact_to("/v1/artifacts/test", &artifact, &mut output)
+            .await?;
+        assert_eq!(output, body);
+        let request = String::from_utf8(server.await??)?;
+        assert!(request.starts_with("GET /v1/artifacts/test HTTP/1.1"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_download_rejects_metadata_before_writing_output() -> Result<(), TestError> {
+        let body = Bytes::from_static(b"verified-artifact-body");
+        let artifact = artifact_ref(ArtifactPurpose::Screenshot, &body)?;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nx-content-sha256: {}\r\nConnection: close\r\n\r\n",
+            artifact.content_length,
+            artifact.sha256.as_str()
+        )
+        .into_bytes();
+        let mut response = response;
+        response.extend_from_slice(&body);
+        let (base, server) = serve_once(response).await?;
+        let client = Client::new(base, test_token())?;
+        let mut output = Vec::new();
+        assert!(matches!(
+            client
+                .download_artifact_to("/v1/artifacts/test", &artifact, &mut output)
+                .await,
+            Err(SdkError::InvalidResponse)
+        ));
+        assert!(output.is_empty());
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_download_rejects_partial_content_without_writing() -> Result<(), TestError> {
+        let body = Bytes::from_static(b"partial");
+        let complete = Bytes::from_static(b"partial-artifact");
+        let artifact = artifact_ref(ArtifactPurpose::Screenshot, &complete)?;
+        let mut response = format!(
+            "HTTP/1.1 206 Partial Content\r\nContent-Type: {}\r\nContent-Length: {}\r\nContent-Range: bytes 0-{}/{}\r\nx-content-sha256: {}\r\nConnection: close\r\n\r\n",
+            artifact.content_type.as_str(),
+            body.len(),
+            body.len() - 1,
+            artifact.content_length,
+            artifact.sha256.as_str()
+        )
+        .into_bytes();
+        response.extend_from_slice(&body);
+        let (base, server) = serve_once(response).await?;
+        let client = Client::new(base, test_token())?;
+        let mut output = Vec::new();
+        assert!(matches!(
+            client
+                .download_artifact_to("/v1/artifacts/test", &artifact, &mut output)
+                .await,
+            Err(SdkError::UnexpectedContentType | SdkError::InvalidResponse)
+        ));
+        assert!(output.is_empty());
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_upload_sends_exact_length_type_and_digest() -> Result<(), TestError> {
+        let body = Bytes::from_static(b"clipboard artifact");
+        let artifact = artifact_ref(ArtifactPurpose::ClipboardInput, &body)?;
+        let response = json_response("201 Created", "application/json", &artifact)?;
+        let (base, server) = serve_once(response).await?;
+        let client = Client::new(base, test_token())?;
+        let content_type = ArtifactContentType::new("application/octet-stream")?;
+        let returned = client
+            .upload_artifact(
+                "/v1/artifacts?purpose=clipboard_input",
+                &content_type,
+                body.clone(),
+            )
+            .await?;
+        assert_eq!(returned, artifact);
+        let request = String::from_utf8(server.await??)?;
+        let request_lower = request.to_ascii_lowercase();
+        assert!(request_lower.starts_with("post /v1/artifacts?purpose=clipboard_input http/1.1"));
+        assert!(request_lower.contains("content-type: application/octet-stream"));
+        assert!(request_lower.contains(&format!("content-length: {}", body.len())));
+        assert!(request_lower.contains(&format!("x-content-sha256: {}", artifact.sha256.as_str())));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_upload_streams_an_exact_async_reader_without_a_body_buffer()
+    -> Result<(), TestError> {
+        let body = Bytes::from(vec![b'x'; 64 * 1024]);
+        let artifact = artifact_ref(ArtifactPurpose::ClipboardInput, &body)?;
+        let response = json_response("201 Created", "application/json", &artifact)?;
+        let (base, server) = serve_once(response).await?;
+        let client = Client::new(base, test_token())?;
+        let content_type = ArtifactContentType::new("application/octet-stream")?;
+        let (mut writer, reader) = tokio::io::duplex(1_024);
+        let payload = body.clone();
+        let producer = tokio::spawn(async move {
+            for chunk in payload.chunks(509) {
+                writer.write_all(chunk).await?;
+                tokio::task::yield_now().await;
+            }
+            writer.shutdown().await
+        });
+        let returned = client
+            .upload_artifact_from(
+                "/v1/artifacts?purpose=clipboard_input",
+                &content_type,
+                u64::try_from(body.len())?,
+                reader,
+            )
+            .await?;
+        assert_eq!(returned, artifact);
+        producer.await??;
+        let request = server.await??;
+        let header_end = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .ok_or("missing request header terminator")?
+            + 4;
+        assert_eq!(&request[header_end..], body.as_ref());
+        let headers = String::from_utf8(request[..header_end].to_vec())?.to_ascii_lowercase();
+        assert!(headers.contains(&format!("content-length: {}", body.len())));
+        // The digest is computed while streaming and verified against the
+        // returned immutable reference; it need not be known as a request header.
+        assert!(!headers.contains("x-content-sha256:"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_upload_rejects_a_reader_shorter_than_its_declared_length()
+    -> Result<(), TestError> {
+        let declared = Bytes::from_static(b"declared-eight");
+        let artifact = artifact_ref(ArtifactPurpose::ClipboardInput, &declared)?;
+        let response = json_response("201 Created", "application/json", &artifact)?;
+        let (base, server) = serve_once(response).await?;
+        let client =
+            Client::new(base, test_token())?.with_request_timeout(Duration::from_millis(150))?;
+        let content_type = ArtifactContentType::new("application/octet-stream")?;
+        let reader = std::io::Cursor::new(b"short".to_vec());
+        assert!(matches!(
+            client
+                .upload_artifact_from(
+                    "/v1/artifacts?purpose=clipboard_input",
+                    &content_type,
+                    u64::try_from(declared.len())?,
+                    reader,
+                )
+                .await,
+            Err(SdkError::Transport | SdkError::RequestTimeout | SdkError::InvalidResponse)
+        ));
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_upload_rejects_a_reader_longer_than_its_declared_length()
+    -> Result<(), TestError> {
+        let declared = Bytes::from_static(b"declared");
+        let artifact = artifact_ref(ArtifactPurpose::ClipboardInput, &declared)?;
+        let response = json_response("201 Created", "application/json", &artifact)?;
+        let (base, server) = serve_once(response).await?;
+        let client =
+            Client::new(base, test_token())?.with_request_timeout(Duration::from_millis(150))?;
+        let content_type = ArtifactContentType::new("application/octet-stream")?;
+        let reader = std::io::Cursor::new(b"declared-extra".to_vec());
+        assert!(matches!(
+            client
+                .upload_artifact_from(
+                    "/v1/artifacts?purpose=clipboard_input",
+                    &content_type,
+                    u64::try_from(declared.len())?,
+                    reader,
+                )
+                .await,
+            Err(SdkError::Transport | SdkError::RequestTimeout | SdkError::InvalidResponse)
+        ));
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_delete_requires_an_exact_empty_no_content_response() -> Result<(), TestError>
+    {
+        let response =
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
+        let (base, server) = serve_once(response).await?;
+        let client = Client::new(base, test_token())?;
+        client
+            .delete_artifact("/v1/artifacts/test?desktop_id=a&desktop_generation=b")
+            .await?;
+        let request = String::from_utf8(server.await??)?;
+        assert!(
+            request.starts_with(
+                "DELETE /v1/artifacts/test?desktop_id=a&desktop_generation=b HTTP/1.1"
+            )
+        );
+        Ok(())
+    }
+
     fn test_token() -> &'static str {
         "test-token-0123456789abcdefghijklmnop"
     }
@@ -775,6 +1622,20 @@ mod tests {
             DesktopGeneration::new(),
             Command::DesktopProbe(DesktopProbeCommand {}),
         )?)
+    }
+
+    fn artifact_ref(purpose: ArtifactPurpose, body: &[u8]) -> Result<ArtifactRef, TestError> {
+        Ok(ArtifactRef {
+            artifact_id: ArtifactId::new(),
+            purpose,
+            desktop_id: DesktopId::new(),
+            desktop_generation: DesktopGeneration::new(),
+            content_type: ArtifactContentType::new("application/octet-stream")?,
+            content_length: u64::try_from(body.len())?,
+            sha256: sha256_digest(body)?,
+            created_at: Timestamp::parse("2026-07-23T00:00:00Z")?,
+            expires_at: Timestamp::parse("2026-07-23T01:00:00Z")?,
+        })
     }
 
     fn json_response<T: Serialize>(

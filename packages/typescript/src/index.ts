@@ -1,0 +1,120 @@
+// SPDX-License-Identifier: Apache-2.0
+
+export {
+  XenoteerClient,
+  admitRequestVersion,
+  negotiateProtocol,
+  type OpenEventSessionOptions,
+} from "./client.js";
+export {
+  Desktop,
+  customCommand,
+  namedKey,
+  scalarKey,
+  type ElementQuerySpec,
+  type ElementListSpec,
+  type ElementResolveSpec,
+  type ElementWaitSpec,
+  type SubmitOptions,
+  type WindowListSpec,
+  type WindowQuerySpec,
+  type WindowResolveSpec,
+  type WindowWaitSpec,
+} from "./desktop.js";
+export { CommandHandle, CommandSubmission } from "./command.js";
+export { ControlLease, Keyboard, Mouse } from "./lease.js";
+export {
+  Applications,
+  Artifact,
+  Artifacts,
+  Capture,
+  Clipboard,
+  ClipboardValue,
+  IssuedViewerTicket,
+  Viewer,
+  artifactCommandRef,
+} from "./domains.js";
+export { ElementHandle, WindowHandle } from "./handles.js";
+export {
+  EventSession,
+  decodeEventMessage,
+  type AuthenticatedWebSocketOptions,
+  type EventSessionOptions,
+  type EventSessionTerminalReason,
+  type EventSubscription,
+  type KnownEvent,
+  type ReplayCompleteEvent,
+  type UnknownEvent,
+  type UnknownServerMessage,
+  type ResyncRequiredEvent,
+  type WebSocketFactory,
+  type WebSocketLike,
+  type XenoteerEvent,
+} from "./events.js";
+export {
+  BearerToken,
+  redactedClientOptions,
+  type TokenProvider,
+  type TokenSource,
+  type XenoteerClientOptions,
+} from "./options.js";
+export {
+  XenoteerError,
+  type SdkErrorCode,
+} from "./errors.js";
+export {
+  asCanonicalUInt64,
+  decodeUInt64,
+  encodeUInt64,
+} from "./wire.js";
+export {
+  classifyCommandEffect,
+  decodeAdditiveServerResponse,
+  exactProtocolVersion,
+  validateCommandEnvelopeInput,
+  type DecodedServerResponse,
+  type EffectClassification,
+} from "./compatibility.js";
+export type {
+  AccessibilityLimits,
+  ApiProblem,
+  ArtifactPurpose,
+  ArtifactRef,
+  CanonicalUInt64,
+  CapabilityReport,
+  CleanupStatus,
+  ClipboardReadRequest,
+  ClipboardReadResult,
+  CommandEnvelope,
+  CommandLifecycle,
+  CommandResult,
+  DesktopState,
+  DesktopStatus,
+  EffectStage,
+  ElementQueryPage,
+  ElementResolveResult,
+  ElementSnapshotResult,
+  ElementWaitResult,
+  EventMessageWire,
+  EventWire,
+  JsonObject,
+  JsonValue,
+  KeyboardKeyIdentifier,
+  LeaseAvailability,
+  LeaseState,
+  ProtocolRange,
+  ProtocolVersion,
+  ProcessRef,
+  RetryAdvice,
+  ScreenshotRequest,
+  ScreenshotResult,
+  SelectionName,
+  StatusResponse,
+  ViewerTicket,
+  WindowListPage,
+  WindowQueryPage,
+  WindowResolveResult,
+  WindowSnapshotResult,
+  WindowWaitResult,
+  WireCommand,
+} from "./protocol.generated.js";

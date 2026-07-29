@@ -14,7 +14,8 @@ use thiserror::Error;
 use xenoteer_protocol::{
     CommandEnvelope, CommandId, CommandResult, ControlLeaseId, DesktopGeneration, DesktopId,
     EnvelopeValidationError, EventResyncReason, LeaseAcquireRequest, LeaseReleaseRequest,
-    LeaseRenewRequest, LeaseStateView, LeaseValidationError, RequestId, SequencedEvent,
+    LeaseRenewRequest, LeaseStateView, LeaseValidationError, ProtocolVersion, RequestId,
+    SequencedEvent,
 };
 
 use crate::{
@@ -422,6 +423,7 @@ async fn acquire_lease(
     if let Err(problem) = validate_lease_request(
         &state,
         desktop_id,
+        request.protocol_version,
         request.desktop_id,
         request.desktop_generation,
         request.validate(),
@@ -465,6 +467,7 @@ async fn renew_lease(
     if let Err(problem) = validate_lease_request(
         &state,
         desktop_id,
+        request.protocol_version,
         request.desktop_id,
         request.desktop_generation,
         request.validate(),
@@ -508,6 +511,7 @@ async fn release_lease(
     if let Err(problem) = validate_lease_request(
         &state,
         desktop_id,
+        request.protocol_version,
         request.desktop_id,
         request.desktop_generation,
         request.validate(),
@@ -703,6 +707,7 @@ fn context(principal: Principal, request_id: RequestId) -> ControlRequestContext
 fn validate_lease_request(
     state: &ApiState,
     path_desktop: DesktopId,
+    protocol_version: ProtocolVersion,
     body_desktop: DesktopId,
     generation: DesktopGeneration,
     validation: Result<(), LeaseValidationError>,
@@ -713,6 +718,9 @@ fn validate_lease_request(
             LeaseValidationError::UnsupportedMajor => ApiProblem::unsupported_version(request_id),
             _ => ApiProblem::invalid_request(request_id),
         });
+    }
+    if !crate::protocol_version::supports_exact(protocol_version) {
+        return Err(ApiProblem::unsupported_version(request_id));
     }
     if body_desktop != path_desktop {
         return Err(ApiProblem::invalid_request(request_id));
@@ -733,6 +741,9 @@ fn validate_command(
             }
             _ => ApiProblem::invalid_request(request_id),
         });
+    }
+    if !crate::protocol_version::supports_exact(command.protocol_version) {
+        return Err(ApiProblem::unsupported_version(request_id));
     }
     if command.desktop_id != path_desktop {
         return Err(ApiProblem::invalid_request(request_id));
@@ -1553,6 +1564,86 @@ mod tests {
             .await?;
         assert_eq!(key_conflict.status(), StatusCode::BAD_REQUEST);
         assert_eq!(control.submit_calls.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unsupported_rest_minor_is_rejected_before_every_effect_adapter()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let desktop_id = DesktopId::new();
+        let generation = DesktopGeneration::new();
+        let lease_id = ControlLeaseId::new();
+        let control = Arc::new(MockControl::new(desktop_id, generation, SubmitMode::New));
+        let principal = Principal::local_operator()?;
+
+        let mut command = serde_json::to_value(probe_envelope(desktop_id, generation))?;
+        command["protocol_version"] = serde_json::json!({"major": 1, "minor": 1});
+        let command_id = command["command_id"]
+            .as_str()
+            .ok_or("command fixture lacks an ID")?;
+        let command_request =
+            axum::http::Request::post(format!("/v1/desktops/{desktop_id}/commands"))
+                .header(header::AUTHORIZATION, authorization())
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(IDEMPOTENCY_KEY, command_id)
+                .body(Body::from(serde_json::to_vec(&command)?))?;
+
+        let mut requests = vec![command_request];
+        for (method, uri, mut value) in [
+            (
+                axum::http::Method::POST,
+                format!("/v1/desktops/{desktop_id}/lease"),
+                serde_json::to_value(LeaseAcquireRequest {
+                    protocol_version: ProtocolVersion::V1_0,
+                    request_id: RequestId::new(),
+                    desktop_id,
+                    desktop_generation: generation,
+                    ttl_ms: Some(1_000),
+                })?,
+            ),
+            (
+                axum::http::Method::POST,
+                format!("/v1/desktops/{desktop_id}/lease/{lease_id}/renew"),
+                serde_json::to_value(LeaseRenewRequest {
+                    protocol_version: ProtocolVersion::V1_0,
+                    request_id: RequestId::new(),
+                    desktop_id,
+                    desktop_generation: generation,
+                    lease_id,
+                    ttl_ms: Some(1_000),
+                })?,
+            ),
+            (
+                axum::http::Method::DELETE,
+                format!("/v1/desktops/{desktop_id}/lease/{lease_id}"),
+                serde_json::to_value(LeaseReleaseRequest {
+                    protocol_version: ProtocolVersion::V1_0,
+                    request_id: RequestId::new(),
+                    desktop_id,
+                    desktop_generation: generation,
+                    lease_id,
+                })?,
+            ),
+        ] {
+            value["protocol_version"] = serde_json::json!({"major": 1, "minor": 1});
+            requests.push(json_authorization_request(method, uri, value)?);
+        }
+
+        for request in requests {
+            let response = application(
+                desktop_id,
+                generation,
+                principal.clone(),
+                Arc::clone(&control),
+            )?
+            .oneshot(request)
+            .await?;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = to_bytes(response.into_body(), 4_096).await?;
+            let problem: serde_json::Value = serde_json::from_slice(&body)?;
+            assert_eq!(problem["code"], "unsupported_version");
+        }
+        assert_eq!(control.adapter_calls.load(Ordering::SeqCst), 0);
         Ok(())
     }
 

@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 use tokio::sync::watch;
-use xenoteer_protocol::DesktopGeneration;
+use xenoteer_protocol::{DesktopGeneration, DesktopState};
 
 /// Coarse externally visible desktop lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -22,6 +22,20 @@ pub enum DesktopReadiness {
     Stopped,
     /// A critical invariant or subsystem failed.
     Failed,
+}
+
+impl From<DesktopReadiness> for DesktopState {
+    fn from(value: DesktopReadiness) -> Self {
+        match value {
+            DesktopReadiness::Booting => Self::Booting,
+            DesktopReadiness::Probing => Self::Probing,
+            DesktopReadiness::Ready => Self::Ready,
+            DesktopReadiness::Degraded => Self::Degraded,
+            DesktopReadiness::Draining => Self::Draining,
+            DesktopReadiness::Stopped => Self::Stopped,
+            DesktopReadiness::Failed => Self::Failed,
+        }
+    }
 }
 
 /// Immutable current readiness snapshot.

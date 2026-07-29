@@ -1,0 +1,133 @@
+{
+  "format_version": 1,
+  "license": "Apache-2.0",
+  "suite": "protocol.negotiation",
+  "description": "Highest-common-minor negotiation and exact post-handshake request version fencing.",
+  "cases": [
+    {
+      "id": "negotiation.disjoint-minors",
+      "description": "Ranges in the same major with no common minor fail closed.",
+      "operation": "negotiate_protocol_range",
+      "input": {
+        "client": {"major": 1, "min_minor": 0, "max_minor": 1},
+        "server": {"major": 1, "min_minor": 2, "max_minor": 4}
+      },
+      "expect": {"outcome": "rejected", "code": "no_shared_minor"},
+      "tags": ["minor", "negotiation", "negative"]
+    },
+    {
+      "id": "negotiation.exact-v1",
+      "description": "The frozen v1.0 peers negotiate exactly protocol 1.0.",
+      "operation": "negotiate_protocol_range",
+      "input": {
+        "client": {"major": 1, "min_minor": 0, "max_minor": 0},
+        "server": {"major": 1, "min_minor": 0, "max_minor": 0}
+      },
+      "expect": {
+        "outcome": "accepted",
+        "selected": {"major": 1, "minor": 0}
+      },
+      "tags": ["negotiation", "positive", "v1"]
+    },
+    {
+      "id": "negotiation.highest-common-minor",
+      "description": "Peers choose the highest minor in the intersection, not either maximum.",
+      "operation": "negotiate_protocol_range",
+      "input": {
+        "client": {"major": 1, "min_minor": 0, "max_minor": 5},
+        "server": {"major": 1, "min_minor": 2, "max_minor": 3}
+      },
+      "expect": {
+        "outcome": "accepted",
+        "selected": {"major": 1, "minor": 3}
+      },
+      "tags": ["minor", "negotiation", "positive"]
+    },
+    {
+      "id": "negotiation.major-mismatch",
+      "description": "Different protocol majors never negotiate through additive decoding.",
+      "operation": "negotiate_protocol_range",
+      "input": {
+        "client": {"major": 2, "min_minor": 0, "max_minor": 0},
+        "server": {"major": 1, "min_minor": 0, "max_minor": 9}
+      },
+      "expect": {"outcome": "rejected", "code": "unsupported_major"},
+      "tags": ["major", "negotiation", "negative"]
+    },
+    {
+      "id": "negotiation.reversed-client-range",
+      "description": "A client range whose minimum exceeds its maximum is malformed.",
+      "operation": "negotiate_protocol_range",
+      "input": {
+        "client": {"major": 1, "min_minor": 2, "max_minor": 1},
+        "server": {"major": 1, "min_minor": 0, "max_minor": 3}
+      },
+      "expect": {"outcome": "rejected", "code": "reversed_minor_range"},
+      "tags": ["negotiation", "negative", "range"]
+    },
+    {
+      "id": "negotiation.reversed-server-range",
+      "description": "A server range whose minimum exceeds its maximum is malformed.",
+      "operation": "negotiate_protocol_range",
+      "input": {
+        "client": {"major": 1, "min_minor": 0, "max_minor": 3},
+        "server": {"major": 1, "min_minor": 4, "max_minor": 3}
+      },
+      "expect": {"outcome": "rejected", "code": "reversed_minor_range"},
+      "tags": ["negotiation", "negative", "range"]
+    },
+    {
+      "id": "request-version.exact-negotiated",
+      "description": "A request carrying the exact negotiated major/minor is admitted.",
+      "operation": "admit_request_version",
+      "input": {
+        "negotiated": {"major": 1, "minor": 3},
+        "request": {"major": 1, "minor": 3}
+      },
+      "expect": {"outcome": "accepted"},
+      "tags": ["fencing", "positive", "request"]
+    },
+    {
+      "id": "request-version.higher-minor",
+      "description": "A post-handshake request cannot silently raise the negotiated minor.",
+      "operation": "admit_request_version",
+      "input": {
+        "negotiated": {"major": 1, "minor": 2},
+        "request": {"major": 1, "minor": 3}
+      },
+      "expect": {
+        "outcome": "rejected",
+        "code": "unsupported_version"
+      },
+      "tags": ["fencing", "minor", "negative"]
+    },
+    {
+      "id": "request-version.lower-minor",
+      "description": "A post-handshake request cannot silently lower the negotiated minor.",
+      "operation": "admit_request_version",
+      "input": {
+        "negotiated": {"major": 1, "minor": 2},
+        "request": {"major": 1, "minor": 1}
+      },
+      "expect": {
+        "outcome": "rejected",
+        "code": "unsupported_version"
+      },
+      "tags": ["fencing", "minor", "negative"]
+    },
+    {
+      "id": "request-version.other-major",
+      "description": "A request from another major fails the negotiated connection fence.",
+      "operation": "admit_request_version",
+      "input": {
+        "negotiated": {"major": 1, "minor": 0},
+        "request": {"major": 2, "minor": 0}
+      },
+      "expect": {
+        "outcome": "rejected",
+        "code": "unsupported_version"
+      },
+      "tags": ["fencing", "major", "negative"]
+    }
+  ]
+}

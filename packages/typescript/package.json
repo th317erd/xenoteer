@@ -1,0 +1,35 @@
+{
+  "name": "@xenoteer/sdk",
+  "version": "0.1.0",
+  "description": "Async TypeScript SDK for the Xenoteer v1 desktop automation API",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "sideEffects": false,
+  "files": [
+    "dist/src",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "types": "./dist/src/index.d.ts",
+  "scripts": {
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "conformance": "npm run build && python3 ../../scripts/conformance/run.py --adapter node scripts/conformance-adapter.mjs",
+    "verify-pack": "npm run build && node scripts/verify-package.mjs",
+    "check": "npm test && npm run conformance && npm run verify-pack"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.0",
+    "typescript": "5.9.3"
+  }
+}

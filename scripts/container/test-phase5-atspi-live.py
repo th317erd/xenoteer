@@ -84,6 +84,19 @@ def is_integer(value: object, *, minimum: int = 0) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
 
 
+def parse_u64_string(value: object, *, minimum: int = 0) -> int | None:
+    if not isinstance(value, str) or re.fullmatch(r"0|[1-9][0-9]{0,19}", value) is None:
+        return None
+    parsed = int(value)
+    if parsed < minimum or parsed > (1 << 64) - 1:
+        return None
+    return parsed
+
+
+def is_u64_string(value: object, *, minimum: int = 0) -> bool:
+    return parse_u64_string(value, minimum=minimum) is not None
+
+
 def is_signed_integer(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -1263,8 +1276,8 @@ def element_reference(entry: dict[str, Any]) -> dict[str, Any]:
     reference = element_snapshot(entry).get("ref")
     require(isinstance(reference, dict), "accessibility snapshot omitted its reference")
     require(
-        is_integer(reference.get("atspi_generation"), minimum=1)
-        and is_integer(reference.get("cache_sequence"), minimum=1),
+        is_u64_string(reference.get("atspi_generation"), minimum=1)
+        and is_u64_string(reference.get("cache_sequence"), minimum=1),
         "accessibility reference generations were invalid",
     )
     return reference
@@ -1554,11 +1567,11 @@ def require_semantic_result(
         action.get("operation") == operation and action.get("element") == reference,
         "semantic outcome changed operation or element identity",
     )
-    before = action.get("revision_before")
-    after = action.get("revision_after")
+    before = parse_u64_string(action.get("revision_before"), minimum=1)
+    after = parse_u64_string(action.get("revision_after"), minimum=1)
     require(
-        is_integer(before, minimum=1)
-        and is_integer(after, minimum=1)
+        before is not None
+        and after is not None
         and after >= before,
         "semantic revision evidence was invalid",
     )
@@ -1600,13 +1613,15 @@ def require_physical_result(
     extents_before = click.get("extents_before_queue")
     extents_after = click.get("extents_after_queue")
     click_point = click.get("click_point")
+    revision_before = parse_u64_string(click.get("revision_before_queue"), minimum=1)
+    revision_after = parse_u64_string(click.get("revision_after_queue"), minimum=1)
     require(
         click.get("element") == reference
         and click.get("window") == window
         and click.get("correlation") in {"strong", "exact_process"}
-        and is_integer(click.get("revision_before_queue"), minimum=1)
-        and is_integer(click.get("revision_after_queue"), minimum=1)
-        and click["revision_after_queue"] >= click["revision_before_queue"]
+        and revision_before is not None
+        and revision_after is not None
+        and revision_after >= revision_before
         and isinstance(extents_before, dict)
         and isinstance(extents_after, dict)
         and extents_before == extents_after
@@ -2460,7 +2475,7 @@ def exercise_missing_event_poll_fallback(
             and wait_result.get("matched_count") == 1
             and wait_result.get("poll_fallback_used") is True
             and wait_result.get("truncated") is False
-            and is_integer(wait_result.get("evaluated_revision"), minimum=1)
+            and is_u64_string(wait_result.get("evaluated_revision"), minimum=1)
             and isinstance(elements, list)
             and len(elements) == 1
             and wait_elapsed <= 6,
@@ -2555,7 +2570,7 @@ def exercise_stress_and_reconnect(container: LiveContainer, api: ApiClient) -> N
         and geometry_wait.get("matched_count") == 1
         and geometry_wait.get("poll_fallback_used") is False
         and geometry_wait.get("truncated") is False
-        and is_integer(geometry_wait.get("evaluated_revision"), minimum=1),
+        and is_u64_string(geometry_wait.get("evaluated_revision"), minimum=1),
         "custom canvas public geometry wait did not match deterministically",
     )
     waited_elements = geometry_wait.get("elements")
@@ -2790,7 +2805,7 @@ def subscribe_events(
     require(
         replay.get("desktop_id") == api.desktop_id
         and replay.get("desktop_generation") == api.generation
-        and is_integer(replay.get("through_sequence")),
+        and is_u64_string(replay.get("through_sequence")),
         "event replay boundary identity or sequence was invalid",
     )
     return request_id
@@ -2813,15 +2828,15 @@ def wait_flood_resync(
             "event flood produced an unrelated application message",
         )
         if message.get("type") == "events.resync_required":
-            dropped = message.get("dropped_through")
-            latest = message.get("latest_sequence")
+            dropped = parse_u64_string(message.get("dropped_through"), minimum=1)
+            latest = parse_u64_string(message.get("latest_sequence"), minimum=1)
             require(
                 message.get("desktop_id") == api.desktop_id
                 and message.get("desktop_generation") == api.generation
                 and message.get("reason")
                 in {"history_lost", "subscriber_lag", "outbound_backpressure"}
-                and is_integer(dropped, minimum=1)
-                and is_integer(latest, minimum=1)
+                and dropped is not None
+                and latest is not None
                 and dropped <= latest,
                 "transport resync barrier did not match the closed protocol shape",
             )
@@ -2829,9 +2844,9 @@ def wait_flood_resync(
         require(message.get("type") == "event", "event flood returned an unknown message")
         event = message.get("event")
         require(isinstance(event, dict), "event flood omitted its sequence envelope")
-        sequence = event.get("sequence")
+        sequence = parse_u64_string(event.get("sequence"), minimum=1)
         require(
-            is_integer(sequence, minimum=1)
+            sequence is not None
             and sequence > last_sequence
             and event.get("desktop_id") == api.desktop_id
             and event.get("desktop_generation") == api.generation,
@@ -2857,9 +2872,9 @@ def wait_flood_resync(
             require(
                 payload.get("desktop_id") == api.desktop_id
                 and payload.get("desktop_generation") == api.generation
-                and is_integer(payload.get("atspi_generation"), minimum=1)
-                and is_integer(payload.get("revision"), minimum=1)
-                and is_integer(payload.get("cache_sequence"), minimum=1),
+                and is_u64_string(payload.get("atspi_generation"), minimum=1)
+                and is_u64_string(payload.get("revision"), minimum=1)
+                and is_u64_string(payload.get("cache_sequence"), minimum=1),
                 "accessibility resync payload identity or revision was invalid",
             )
             return "accessibility", count

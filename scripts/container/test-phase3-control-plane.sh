@@ -798,7 +798,10 @@ jq -e '
   .effect_stage == "process_started"
     and .outcome.type == "application_launched"
     and (.outcome.process.pid | type == "number" and . > 0)
-    and (.outcome.process.proc_start_ticks | type == "number" and . > 0)
+    and (
+      .outcome.process.proc_start_ticks
+      | type == "string" and test("^[1-9][0-9]{0,19}$")
+    )
     and (.outcome.process.launch_id | type == "string")
 ' "$launch_terminal" >/dev/null
 process_reference=$(jq -c '.outcome.process' "$launch_terminal")

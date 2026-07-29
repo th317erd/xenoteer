@@ -436,6 +436,7 @@ pub enum SelectionTransferMode {
     /// Property-delete handshake with one or more chunks and a zero-length terminator.
     Incr {
         /// Untrusted lower-bound byte count announced by the peer.
+        #[schemars(range(max = MAX_SELECTION_BYTES))]
         announced_minimum_bytes: u64,
         /// Non-terminal content chunks processed.
         #[schemars(range(max = MAX_INCR_CHUNKS))]
@@ -593,7 +594,8 @@ pub struct ClipboardReadResult {
     /// Selection converted.
     pub selection: SelectionName,
     /// Actor-local monotonic selection revision.
-    #[schemars(range(min = 1))]
+    #[serde(with = "crate::wire_integer::nonzero")]
+    #[schemars(schema_with = "crate::wire_integer::nonzero_schema")]
     pub revision: u64,
     /// Wire transfer evidence.
     pub evidence: SelectionTransferEvidence,
@@ -1264,8 +1266,10 @@ pub struct TextInsertEvidence {
     #[schemars(range(max = MAX_TEXT_INSERT_BYTES))]
     pub utf8_bytes: u64,
     /// Source Unicode scalar values, not grapheme clusters.
+    #[schemars(range(max = MAX_TEXT_INSERT_BYTES))]
     pub unicode_scalars: u64,
     /// Complete scalars delivered before success/failure/cancellation.
+    #[schemars(range(max = MAX_TEXT_INSERT_BYTES))]
     pub completed_scalars: u64,
     /// Required exactly when clipboard strategy was selected.
     pub clipboard: Option<ClipboardPasteEvidence>,

@@ -686,7 +686,7 @@ mod tests {
                 "desktop_id": desktop_id,
                 "desktop_generation": generation,
                 "xid": 43,
-                "observed_generation": 1,
+                "observed_generation": "1",
                 "identity_hash": "b".repeat(64)
             },
             "workspace": 3,
