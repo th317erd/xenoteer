@@ -187,7 +187,7 @@
 - Final Phase-6 non-container verification is green: the full Rust workspace;
   Rustfmt, Clippy, Rustdoc, schema generation/check, API documentation, and the
   Rust public-package verifier; TypeScript 53/53 tests, conformance, and package
-  inspection; Python 38/38 tests, Ruff, mypy, wheel/sdist inspection, and the
+  inspection; Python 41/41 tests, Ruff, mypy, wheel/sdist inspection, and the
   deterministic event-completion barrier; the 13/13 CI-contract tests; and the
   static mirror, first-party license, and cargo-deny gates.
 - Phase-6 public quick-start qualification must install the staged crate/npm/
@@ -195,25 +195,71 @@
   against the same immutable release-candidate image ID, cover bounded
   invalid-auth/failure cleanup as well as success, and reject daemon binary
   overrides.
+- The Phase-6 example audit found that semantic text previously proved only
+  character counts. Closure adds a content-private AT-SPI backend comparison
+  that returns only exact-match boolean evidence for unprotected fields, keeps
+  protected fields length-only, and never exposes either requested or observed
+  text in protocol data, diagnostics, or `Debug`. Exact readback now uses raw
+  D-Bus `s` replies, rejects oversized/malformed bodies before typed decoding,
+  and borrows the verified string without a second content allocation. The
+  shared pinned zbus transport still necessarily admits its hardcoded 128 MiB
+  raw-message allocation because it exposes no per-call receive-size knob.
+- Rust `Desktop::with_control` may promise awaited release only after normal
+  callback completion. Dropping/cancelling/panicking the outer future cannot
+  await asynchronous cleanup. A renewal failure must fence new submissions and
+  reach bounded cleanup even if the callback stops cooperating; it must not
+  silently await that callback forever after renewals stop. The callback remains
+  concurrently polled while a renewal exchange is pending, renewal-failure grace
+  is capped at 250 ms, and abort evidence retains exact ambiguous in-flight
+  command IDs. An ambiguous scoped release exposes its exact lease capability
+  only through the explicit `lease_id()` recovery accessor; `Debug` and
+  `Display` redact it.
 - The executable Phase-6 gate is
   `scripts/sdk/test-public-quickstarts.py`. It reproduces the Docker build
   wrapper's source-tree identity, requires it to equal the image label, resolves
   and runs only one immutable image ID, safely extracts both Rust archives,
   installs the npm tarball plus Python wheel and sdist into isolated roots, and
-  runs typed invalid-auth and successful v1 status probes for every variant.
-  Its unit, archive-install, and bounded mock-runtime proofs pass. No Docker
-  image was built during final closure, so the exact-image execution and
+  runs a typed invalid-auth probe followed by the canonical ten public behaviors
+  for every variant in a fresh fixture container. Its unit, archive-install,
+  identity/ancestry, source-fence, output-contract, and cleanup proofs pass. No
+  Docker image was built during final closure, so the exact-image execution and
   identity record intentionally remain pending until the coherent Phase-6 image
   is built.
+- Fixture ancestry labels and a production-layer prefix prove where derivation
+  began, but not that an added layer did not shadow production paths. The public
+  behavior gate inspects stopped base/fixture containers without executing
+  either image, checks stopped state and image identity before and after copying,
+  requires the inherited first-party manifest to be byte-identical, validates
+  every manifest-listed hash in both root filesystems, and compares exact
+  critical path/type/mode/symlink/content inventories. It also binds fixture
+  source modes and bytes plus the artifact lock to the current repository, and
+  requires all inherited Docker runtime configuration and labels to remain
+  unchanged except the exact six validated fixture-only labels.
 - Phase-7 transport hardening must operate before Axum/Tower request middleware:
   the accepted-connection permit, header count/bytes/read deadline, keep-alive
   idle bound, incomplete-request bound, and reserved health/shutdown capacity
   must be proven with raw sockets. Router-level body/rate tests are not evidence
   for this boundary.
+- Phase-7 reserved operational capacity cannot be made reliable on the public
+  listener because the request path is unknown until after headers consume a
+  parser slot. Use the existing private `metrics_listen` seam for a separate
+  loopback/private health and metrics listener, while preserving public health
+  compatibility without claiming it is the reserved path.
 - Phase-7 runtime authentication must add atomic complete token-set reload,
   metadata/expiry/revocation and scoped principals, including defined closure or
   reauthorization of already-active WebSockets. The existing multi-record auth
   library alone is not runtime rotation evidence.
+- Runtime reload cannot reuse the current unlinked one-shot token handoff. The
+  final design needs a GUI-inaccessible daemon-readable replacement or a narrow
+  privileged reload broker, explicit SIGHUP handling, token-revision watches,
+  and near-effect authorization revalidation so closing WebSockets cannot leave
+  queued effects authorized.
+- Phase-7 operations work must either add the currently missing persistent
+  profile marker/migration/reset and drain seams or narrow the documented
+  contract to ephemeral rematerialization plus bounded signal-driven shutdown.
+  The aggregate OCI image license label should remain `NOASSERTION` with a
+  separate first-party BUSL declaration and linked manifests; claiming the
+  whole Debian image is BUSL would be inaccurate.
 - Phase-7 environmental release observations that cannot be honestly reproduced
   locally include protected GitHub environments/tags, OIDC registry signing,
   public-registry clean-host verification, a genuine 24-hour active soak, and

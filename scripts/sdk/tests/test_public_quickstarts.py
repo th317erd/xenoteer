@@ -4,9 +4,11 @@
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import io
 import json
+import shutil
 import sys
 import tarfile
 import tempfile
@@ -46,8 +48,78 @@ class RecordingExecutor:
         return MODULE.CommandResult(0, "", "")
 
 
+class StoppedCopyExecutor:
+    """Model only Docker's create/inspect/cp/rm path; reject execution."""
+
+    def __init__(self, image_roots: dict[str, Path]) -> None:
+        self.image_roots = image_roots
+        self.containers: dict[str, str] = {}
+        self.commands: list[tuple[str, ...]] = []
+
+    def run(
+        self,
+        command: list[str] | tuple[str, ...],
+        *,
+        timeout: int,
+        check: bool = True,
+        **_: object,
+    ) -> MODULE.CommandResult:
+        del timeout, check
+        values = tuple(command)
+        self.commands.append(values)
+        if values[0] != "docker" or values[1] in ("exec", "run", "start"):
+            raise AssertionError(f"unexpected executable command: {values}")
+        if values[1] == "create":
+            name = values[3]
+            image_id = values[4]
+            self.containers[name] = image_id
+            return MODULE.CommandResult(0, name, "")
+        if values[1] == "inspect":
+            name = values[2]
+            if values[-1] == "{{.Image}}":
+                return MODULE.CommandResult(0, self.containers[name] + "\n", "")
+            if values[-1] == "{{.State.Running}}":
+                return MODULE.CommandResult(0, "false\n", "")
+        if values[1] == "cp":
+            container_name, absolute_path = values[2].split(":", 1)
+            source = self.image_roots[self.containers[container_name]].joinpath(
+                *Path(absolute_path).parts[1:]
+            )
+            target = Path(values[3])
+            if source.is_dir():
+                shutil.copytree(source, target, symlinks=True)
+            else:
+                shutil.copy2(source, target, follow_symlinks=False)
+            return MODULE.CommandResult(0, "", "")
+        if values[1:4] == ("rm", "--force", "--volumes"):
+            self.containers.pop(values[4])
+            return MODULE.CommandResult(0, "", "")
+        raise AssertionError(f"unexpected Docker command: {values}")
+
+
 class PublicQuickstartContractTests(unittest.TestCase):
     """Prove identity, artifact, auth-gate, and cleanup primitives."""
+
+    @staticmethod
+    def _write_runtime_parity_root(
+        root: Path,
+        contents: dict[str, bytes],
+    ) -> None:
+        entries: list[tuple[str, str]] = []
+        for absolute_path, payload in contents.items():
+            target = root.joinpath(*Path(absolute_path).parts[1:])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+            target.chmod(0o755 if absolute_path.startswith("/usr/local/bin/") else 0o644)
+            entries.append((absolute_path, MODULE.file_sha256(target)))
+        manifest = root.joinpath(*Path(MODULE.FIRST_PARTY_MANIFEST_PATH).parts[1:])
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        lines = ["path\tsha256\tlicense_expression\tlicense_evidence"]
+        lines.extend(
+            f"{path}\t{digest}\tBUSL-1.1\t/usr/share/doc/xenoteer/LICENSE"
+            for path, digest in sorted(entries)
+        )
+        manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def test_rejects_every_known_daemon_override_even_when_empty(self) -> None:
         for variable in MODULE.DAEMON_OVERRIDE_ENVIRONMENTS:
@@ -67,6 +139,346 @@ class PublicQuickstartContractTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(MODULE.GateError):
                     MODULE.validate_image_id(invalid)
+
+    def test_fixture_identity_requires_exact_base_ancestry_and_source(self) -> None:
+        production = "sha256:" + ("a1" * 32)
+        fixture = "sha256:" + ("b2" * 32)
+        source = "c3" * 32
+        electron_digest = "d4" * 32
+        inherited_labels = {
+            "com.aeor.xenoteer.source-tree.sha256": source,
+            "com.aeor.xenoteer.protocol": "v1",
+        }
+        inherited_config = {
+            "Env": ["DISPLAY=:99", "XENOTEER__SERVER__LISTEN=0.0.0.0:8080"],
+            "Entrypoint": ["/init"],
+            "Cmd": None,
+            "Healthcheck": {"Test": ["CMD", "/healthcheck"]},
+            "User": "root",
+            "WorkingDir": "",
+            "StopSignal": "SIGTERM",
+        }
+        inspected_values = [
+            {
+                "Id": production,
+                "RootFS": {"Layers": ["sha256:base-one", "sha256:base-two"]},
+                "Config": {
+                    **inherited_config,
+                    "Labels": inherited_labels,
+                },
+            },
+            {
+                "Id": fixture,
+                "RootFS": {
+                    "Layers": [
+                        "sha256:base-one",
+                        "sha256:base-two",
+                        "sha256:fixture-one",
+                    ]
+                },
+                "Config": {
+                    **inherited_config,
+                    "Labels": {
+                        **inherited_labels,
+                        "com.aeor.xenoteer.distribution-scope": (
+                            "test-only-non-distributable"
+                        ),
+                        "com.aeor.xenoteer.fixture": "phase-2-desktop-apps",
+                        "com.aeor.xenoteer.fixture.debian-snapshot": (
+                            MODULE.FIXTURE_DEBIAN_SNAPSHOT
+                        ),
+                        "com.aeor.xenoteer.fixture.base-image-id": production,
+                        "com.aeor.xenoteer.fixture.electron-version": "43.1.1",
+                        (
+                            "com.aeor.xenoteer.fixture."
+                            "electron-linux-x64-sha256"
+                        ): electron_digest,
+                    },
+                },
+            },
+        ]
+        inspected = json.dumps(inspected_values)
+        identity = MODULE.validate_fixture_image_metadata(
+            fixture,
+            production,
+            inspected,
+        )
+        self.assertEqual(identity.fixture_id, fixture)
+        self.assertEqual(identity.production_id, production)
+        self.assertEqual(identity.source_tree_sha256, source)
+        self.assertEqual(identity.electron_version, "43.1.1")
+        self.assertEqual(identity.electron_linux_x64_sha256, electron_digest)
+
+        mutations = [
+            inspected.replace(production, "sha256:" + ("d4" * 32), 1),
+            inspected.replace("phase-2-desktop-apps", "wrong-fixture", 1),
+            inspected.replace('"sha256:base-two", "sha256:fixture-one"', '"sha256:other"'),
+            inspected.replace(source, "not-a-source-hash", 1),
+        ]
+        for field, value in (
+            ("Env", ["XENOTEERD_BINARY_OVERRIDE=/tmp/fake"]),
+            ("Entrypoint", ["/tmp/fake"]),
+            ("Cmd", ["/tmp/fake"]),
+            ("Healthcheck", {"Test": ["CMD", "/tmp/fake"]}),
+            ("User", "nobody"),
+            ("WorkingDir", "/tmp"),
+            ("StopSignal", "SIGKILL"),
+        ):
+            mutation = copy.deepcopy(inspected_values)
+            mutation[1]["Config"][field] = value
+            mutations.append(json.dumps(mutation))
+        for label, value in (
+            ("com.aeor.xenoteer.protocol", "v2"),
+            ("com.aeor.xenoteer.unexpected", "allowed"),
+            ("com.aeor.xenoteer.fixture.electron-version", "unvalidated"),
+        ):
+            mutation = copy.deepcopy(inspected_values)
+            mutation[1]["Config"]["Labels"][label] = value
+            mutations.append(json.dumps(mutation))
+        missing_label = copy.deepcopy(inspected_values)
+        del missing_label[1]["Config"]["Labels"][
+            "com.aeor.xenoteer.fixture.debian-snapshot"
+        ]
+        mutations.append(json.dumps(missing_label))
+        missing_config = copy.deepcopy(inspected_values)
+        missing_config[1]["Config"] = None
+        mutations.append(json.dumps(missing_config))
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(MODULE.GateError):
+                    MODULE.validate_fixture_image_metadata(
+                        fixture,
+                        production,
+                        mutation,
+                    )
+
+    def test_copied_runtime_parity_accepts_only_identical_manifest_backed_trees(
+        self,
+    ) -> None:
+        contents = {
+            "/usr/local/bin/xenoteerd": b"production-daemon",
+            "/etc/xenoteer/config.toml": b"[server]\n",
+        }
+        critical_paths = ("/usr/local/bin/xenoteerd", "/etc/xenoteer")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = root / "production"
+            fixture = root / "fixture"
+            self._write_runtime_parity_root(production, contents)
+            self._write_runtime_parity_root(fixture, contents)
+            MODULE.validate_copied_runtime_parity(
+                production,
+                fixture,
+                critical_paths=critical_paths,
+            )
+
+            (fixture / "usr/local/bin/xenoteerd").write_bytes(b"overwritten-daemon")
+            with self.assertRaisesRegex(MODULE.GateError, "manifest hash"):
+                MODULE.validate_copied_runtime_parity(
+                    production,
+                    fixture,
+                    critical_paths=critical_paths,
+                )
+
+            self._write_runtime_parity_root(production, contents)
+            self._write_runtime_parity_root(fixture, contents)
+            (fixture / "etc/xenoteer/config.toml").write_bytes(
+                b"[server]\noverride=true\n"
+            )
+            with self.assertRaisesRegex(MODULE.GateError, "manifest hash"):
+                MODULE.validate_copied_runtime_parity(
+                    production,
+                    fixture,
+                    critical_paths=critical_paths,
+                )
+
+            self._write_runtime_parity_root(production, contents)
+            self._write_runtime_parity_root(fixture, contents)
+            injected = fixture / "etc/xenoteer/injected.toml"
+            injected.write_text("unexpected=true\n", encoding="utf-8")
+            with self.assertRaisesRegex(MODULE.GateError, "critical runtime tree"):
+                MODULE.validate_copied_runtime_parity(
+                    production,
+                    fixture,
+                    critical_paths=critical_paths,
+                )
+
+            injected.unlink()
+            (production / "etc/xenoteer/escape").symlink_to("../../../outside")
+            (fixture / "etc/xenoteer/escape").symlink_to("../../../outside")
+            with self.assertRaisesRegex(MODULE.GateError, "symlink"):
+                MODULE.validate_copied_runtime_parity(
+                    production,
+                    fixture,
+                    critical_paths=critical_paths,
+                )
+
+    def test_runtime_parity_rejects_lies_additions_and_escaping_symlinks(self) -> None:
+        contents = {
+            "/usr/local/bin/xenoteerd": b"production-daemon",
+            "/etc/xenoteer/config.toml": b"[server]\n",
+        }
+        critical_paths = ("/usr/local/bin/xenoteerd", "/etc/xenoteer")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = root / "production"
+            fixture = root / "fixture"
+            self._write_runtime_parity_root(production, contents)
+            self._write_runtime_parity_root(fixture, contents)
+            production_manifest = production.joinpath(
+                *Path(MODULE.FIRST_PARTY_MANIFEST_PATH).parts[1:]
+            )
+            fixture_manifest = fixture.joinpath(
+                *Path(MODULE.FIRST_PARTY_MANIFEST_PATH).parts[1:]
+            )
+
+            lying = production_manifest.read_text(encoding="utf-8").replace(
+                MODULE.file_sha256(production / "usr/local/bin/xenoteerd"),
+                "0" * 64,
+            )
+            production_manifest.write_text(lying, encoding="utf-8")
+            fixture_manifest.write_text(lying, encoding="utf-8")
+            with self.assertRaisesRegex(MODULE.GateError, "manifest hash"):
+                MODULE.validate_copied_runtime_parity(
+                    production,
+                    fixture,
+                    critical_paths=critical_paths,
+                )
+
+    def test_fixture_image_inputs_must_byte_match_the_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture_root = root / "copied-fixture"
+            repository_root = root / "repository"
+            copied_sources = fixture_root.joinpath(
+                *Path(MODULE.FIXTURE_IMAGE_PATH).parts[1:]
+            )
+            repository_sources = repository_root / MODULE.FIXTURE_REPOSITORY_PATH
+            copied_lock = fixture_root.joinpath(
+                *Path(MODULE.FIXTURE_ARTIFACT_LOCK_IMAGE_PATH).parts[1:]
+            )
+            repository_lock = (
+                repository_root / MODULE.FIXTURE_ARTIFACT_LOCK_REPOSITORY_PATH
+            )
+            for sources in (copied_sources, repository_sources):
+                sources.mkdir(parents=True)
+                (sources / "gtk3-fixture.py").write_bytes(b"exact fixture\n")
+                (sources / "fixture.html").write_bytes(b"<p>exact</p>\n")
+            for lock in (copied_lock, repository_lock):
+                lock.parent.mkdir(parents=True, exist_ok=True)
+                lock.write_bytes(b"electron\tsha256:locked\n")
+
+            MODULE.validate_fixture_repository_inputs(
+                fixture_root,
+                repository_root,
+            )
+            (copied_sources / "gtk3-fixture.py").write_bytes(b"fake fixture\n")
+            with self.assertRaisesRegex(MODULE.GateError, "fixture image sources"):
+                MODULE.validate_fixture_repository_inputs(
+                    fixture_root,
+                    repository_root,
+                )
+
+            (copied_sources / "gtk3-fixture.py").write_bytes(b"exact fixture\n")
+            (copied_sources / "gtk3-fixture.py").chmod(0o755)
+            with self.assertRaisesRegex(MODULE.GateError, "fixture image sources"):
+                MODULE.validate_fixture_repository_inputs(
+                    fixture_root,
+                    repository_root,
+                )
+
+            (copied_sources / "gtk3-fixture.py").chmod(0o664)
+            (copied_sources / "unexpected-empty").mkdir()
+            with self.assertRaisesRegex(MODULE.GateError, "fixture image sources"):
+                MODULE.validate_fixture_repository_inputs(
+                    fixture_root,
+                    repository_root,
+                )
+
+            (copied_sources / "unexpected-empty").rmdir()
+            copied_lock.write_bytes(b"electron\tsha256:changed\n")
+            with self.assertRaisesRegex(MODULE.GateError, "artifact lock"):
+                MODULE.validate_fixture_repository_inputs(
+                    fixture_root,
+                    repository_root,
+                )
+
+    def test_runtime_evidence_uses_only_stopped_container_copying(self) -> None:
+        production_id = "sha256:" + ("a1" * 32)
+        fixture_id = "sha256:" + ("b2" * 32)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            image_roots = {
+                production_id: root / "production-image",
+                fixture_id: root / "fixture-image",
+            }
+            contents = {
+                "/etc/s6-overlay/s6-rc.d/xenoteerd/run": b"#!/bin/sh\n",
+                "/etc/xenoteer/config.toml": b"[server]\n",
+                "/usr/local/libexec/xenoteer/session": b"#!/bin/sh\n",
+                "/usr/share/novnc/mandatory.json": b"{}\n",
+                "/usr/share/xenoteer/profile.txt": b"profile\n",
+                f"{MODULE.FIXTURE_IMAGE_PATH}/gtk3-fixture.py": b"fixture\n",
+                "/etc/at-spi2/accessibility.conf": b"[a11y]\n",
+                "/etc/dbus-1/session-local.conf": b"<busconfig/>\n",
+                "/usr/local/bin/xenoteerd": b"daemon\n",
+                "/usr/local/bin/xenoteer-processd": b"processd\n",
+            }
+            for image_root in image_roots.values():
+                self._write_runtime_parity_root(image_root, contents)
+                artifact_lock = image_root.joinpath(
+                    *Path(MODULE.FIXTURE_ARTIFACT_LOCK_IMAGE_PATH).parts[1:]
+                )
+                artifact_lock.parent.mkdir(parents=True, exist_ok=True)
+                artifact_lock.write_bytes(
+                    b"ELECTRON_VERSION=43.1.1\n"
+                    b"ELECTRON_LINUX_X64_URL=https://example.invalid/electron.zip\n"
+                    + b"ELECTRON_LINUX_X64_SHA256="
+                    + (b"d4" * 32)
+                    + b"\n"
+                )
+
+            repository_root = root / "repository"
+            repository_fixture = (
+                repository_root / MODULE.FIXTURE_REPOSITORY_PATH
+            )
+            repository_fixture.mkdir(parents=True)
+            (repository_fixture / "gtk3-fixture.py").write_bytes(b"fixture\n")
+            (repository_fixture / "gtk3-fixture.py").chmod(0o644)
+            repository_lock = (
+                repository_root / MODULE.FIXTURE_ARTIFACT_LOCK_REPOSITORY_PATH
+            )
+            repository_lock.parent.mkdir(parents=True)
+            repository_lock.write_bytes(
+                b"ELECTRON_VERSION=43.1.1\n"
+                b"ELECTRON_LINUX_X64_URL=https://example.invalid/electron.zip\n"
+                + b"ELECTRON_LINUX_X64_SHA256="
+                + (b"d4" * 32)
+                + b"\n"
+            )
+            executor = StoppedCopyExecutor(image_roots)
+
+            MODULE.validate_fixture_runtime_parity(
+                executor,
+                MODULE.ExactFixtureImage(
+                    fixture_id,
+                    production_id,
+                    "c3" * 32,
+                    MODULE.FIXTURE_DEBIAN_SNAPSHOT,
+                    "43.1.1",
+                    "d4" * 32,
+                ),
+                root / "evidence",
+                repository_root,
+            )
+
+            actions = [command[1] for command in executor.commands]
+            self.assertEqual(actions.count("create"), 2)
+            self.assertGreater(actions.count("cp"), 2)
+            self.assertEqual(actions.count("inspect"), 8)
+            self.assertEqual(actions.count("rm"), 2)
+            self.assertFalse({"exec", "run", "start"} & set(actions))
+            self.assertEqual(executor.containers, {})
 
     def test_source_snapshot_digest_binds_head_diff_mode_path_and_content(self) -> None:
         baseline = MODULE.source_snapshot_digest(
@@ -280,23 +692,22 @@ class PublicQuickstartContractTests(unittest.TestCase):
     def test_quickstart_sources_are_bounded_and_verify_installed_origins(self) -> None:
         sources = {
             "rust": REPOSITORY_ROOT
-            / "scripts"
-            / "sdk"
-            / "quickstarts"
-            / "rust"
-            / "main.rs",
+            / "crates"
+            / "xenoteer-sdk"
+            / "examples"
+            / "phase6_behaviors.rs",
             "typescript": REPOSITORY_ROOT
-            / "scripts"
-            / "sdk"
-            / "quickstarts"
+            / "packages"
             / "typescript"
-            / "quickstart.mjs",
+            / "examples"
+            / "phase6-behaviors.mjs",
             "python": REPOSITORY_ROOT
-            / "scripts"
-            / "sdk"
-            / "quickstarts"
+            / "packages"
             / "python"
-            / "quickstart.py",
+            / "src"
+            / "xenoteer"
+            / "examples"
+            / "phase6_behaviors.py",
         }
         for language, path in sources.items():
             with self.subTest(language=language):
@@ -308,11 +719,106 @@ class PublicQuickstartContractTests(unittest.TestCase):
                 self.assertNotIn("packages/", source)
                 self.assertNotIn("crates/", source)
                 self.assertNotIn("sleep(", source)
+                for behavior in MODULE.REQUIRED_BEHAVIORS:
+                    self.assertIn(behavior, source)
+                scoped_api = {
+                    "rust": "with_control",
+                    "typescript": "withControl",
+                    "python": "desktop.control",
+                }[language]
+                self.assertIn(scoped_api, source)
+                cleanup_aggregate = {
+                    "rust": "ControlScopeError",
+                    "typescript": "AggregateError",
+                    "python": "BaseExceptionGroup",
+                }[language]
+                self.assertIn(cleanup_aggregate, source)
+
+    def test_installed_quickstarts_never_copy_repository_quickstart_sources(self) -> None:
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        function = source[
+            source.index("def prepare_installed_quickstarts(") :
+            source.index("\ndef _docker_inspect(", source.index("def prepare_installed_quickstarts("))
+        ]
+        self.assertNotIn('"quickstarts"', function)
+        self.assertNotIn("shutil.copyfile(", function)
+        self.assertIn("examples/phase6_behaviors.rs", function)
+        self.assertIn("examples/phase6-behaviors.mjs", function)
+        self.assertIn("xenoteer.examples.phase6_behaviors", function)
+
+    def test_each_artifact_variant_gets_fresh_fixture_and_explicit_viewer_policy(self) -> None:
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        function = source[
+            source.index("def run_live_gate(") :
+            source.index("\ndef qualify(", source.index("def run_live_gate("))
+        ]
+        variant_loop = function.index("for name, command, installed_root in installed.variants():")
+        container_guard = function.index("with ContainerGuard(", variant_loop)
+        self.assertLess(variant_loop, container_guard)
+        self.assertIn('"XENOTEER__VIEWER__ENABLED=true"', function)
+        self.assertIn("XENOTEER__VIEWER__ALLOWED_ORIGINS", function)
+        self.assertIn("gtk3-fixture.py", function)
+        self.assertIn("image.fixture_id", function)
+
+    def test_success_output_requires_every_behavior_once_in_canonical_order(self) -> None:
+        language = "python-wheel"
+        output = "\n".join(
+            [
+                f"quickstart-ok language={language} behavior={behavior}"
+                for behavior in MODULE.REQUIRED_BEHAVIORS
+            ]
+            + [f"quickstart-ok language={language} mode=success", ""]
+        )
+        MODULE.validate_quickstart_output(
+            output,
+            language=language,
+            expect_auth_failure=False,
+        )
+        mutations = (
+            output.replace(
+                f"quickstart-ok language={language} behavior={MODULE.REQUIRED_BEHAVIORS[3]}\n",
+                "",
+                1,
+            ),
+            output.replace(
+                f"quickstart-ok language={language} behavior={MODULE.REQUIRED_BEHAVIORS[3]}",
+                f"quickstart-ok language={language} behavior={MODULE.REQUIRED_BEHAVIORS[2]}",
+                1,
+            ),
+            "\n".join(
+                output.splitlines()[1:2] + output.splitlines()[0:1] + output.splitlines()[2:]
+            )
+            + "\n",
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(MODULE.GateError):
+                    MODULE.validate_quickstart_output(
+                        mutation,
+                        language=language,
+                        expect_auth_failure=False,
+                    )
+
+    def test_auth_failure_output_cannot_impersonate_behavior_execution(self) -> None:
+        output = "quickstart-ok language=rust-crate mode=auth-failure\n"
+        MODULE.validate_quickstart_output(
+            output,
+            language="rust-crate",
+            expect_auth_failure=True,
+        )
+        with self.assertRaises(MODULE.GateError):
+            MODULE.validate_quickstart_output(
+                output
+                + "quickstart-ok language=rust-crate "
+                + f"behavior={MODULE.REQUIRED_BEHAVIORS[0]}\n",
+                language="rust-crate",
+                expect_auth_failure=True,
+            )
 
     def test_every_external_subprocess_timeout_is_bounded(self) -> None:
         self.assertLessEqual(MODULE.DEFAULT_COMMAND_TIMEOUT_SECONDS, 10)
         self.assertLessEqual(MODULE.PACKAGE_COMMAND_TIMEOUT_SECONDS, 120)
-        self.assertLessEqual(MODULE.QUICKSTART_COMMAND_TIMEOUT_SECONDS, 10)
+        self.assertLessEqual(MODULE.QUICKSTART_COMMAND_TIMEOUT_SECONDS, 120)
 
 
 if __name__ == "__main__":

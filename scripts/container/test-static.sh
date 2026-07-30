@@ -84,12 +84,12 @@ required=(
   scripts/packages/tests/test_verify_boundaries.py
   scripts/sdk/README.md
   scripts/sdk/public_quickstarts.py
-  scripts/sdk/quickstarts/python/quickstart.py
-  scripts/sdk/quickstarts/rust/main.rs
-  scripts/sdk/quickstarts/typescript/quickstart.mjs
   scripts/sdk/test-public-quickstarts.py
   scripts/sdk/test-phase6-ci-contract.py
   scripts/sdk/tests/test_public_quickstarts.py
+  crates/xenoteer-sdk/examples/phase6_behaviors.rs
+  packages/python/src/xenoteer/examples/phase6_behaviors.py
+  packages/typescript/examples/phase6-behaviors.mjs
   fixtures/x11/src/bin/x11-window-churn.rs
   container/rootfs/usr/share/xenoteer/fixtures/desktop-apps/phase4-atspi-text.py
   container/rootfs/usr/share/xenoteer/fixtures/desktop-apps/phase4-clipboard.py
@@ -184,13 +184,13 @@ for public_quickstart_python in \
     "$public_quickstart_python"
   grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' "$public_quickstart_python"
 done
-python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/sdk/quickstarts/python/quickstart.py").read_text())'
+python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("packages/python/src/xenoteer/examples/phase6_behaviors.py").read_text())'
 grep -Fxq '# SPDX-License-Identifier: Apache-2.0' \
-  scripts/sdk/quickstarts/python/quickstart.py
+  packages/python/src/xenoteer/examples/phase6_behaviors.py
 grep -Fq '// SPDX-License-Identifier: Apache-2.0' \
-  scripts/sdk/quickstarts/rust/main.rs
+  crates/xenoteer-sdk/examples/phase6_behaviors.rs
 grep -Fq '// SPDX-License-Identifier: Apache-2.0' \
-  scripts/sdk/quickstarts/typescript/quickstart.mjs
+  packages/typescript/examples/phase6-behaviors.mjs
 timeout 10s env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
   -s scripts/sdk/tests -p 'test_*.py'
 bash -n scripts/container/test-phase4-event-flood.sh
@@ -411,19 +411,19 @@ for public_quickstart_path in \
     exit 1
   fi
 done
-if ! awk -F '\t' '$1 == "scripts/sdk/quickstarts/rust/main.rs" && $3 == "Apache-2.0" && $4 == "crates/xenoteer-sdk/LICENSE|crates/xenoteer-sdk/NOTICE" { found = 1 } END { exit !found }' \
+if ! awk -F '\t' '$1 == "crates/xenoteer-sdk/examples/phase6_behaviors.rs" && $3 == "Apache-2.0" && $4 == "crates/xenoteer-sdk/LICENSE" { found = 1 } END { exit !found }' \
   /tmp/xenoteer-first-party.tsv; then
-  printf 'Rust public quick-start is not classified at the SDK Apache boundary\n' >&2
+  printf 'Rust behavior example is not classified at the SDK Apache boundary\n' >&2
   exit 1
 fi
-if ! awk -F '\t' '$1 == "scripts/sdk/quickstarts/typescript/quickstart.mjs" && $3 == "Apache-2.0" && $4 == "packages/typescript/LICENSE|packages/typescript/NOTICE" { found = 1 } END { exit !found }' \
+if ! awk -F '\t' '$1 == "packages/typescript/examples/phase6-behaviors.mjs" && $3 == "Apache-2.0" && $4 == "packages/typescript/LICENSE|packages/typescript/NOTICE" { found = 1 } END { exit !found }' \
   /tmp/xenoteer-first-party.tsv; then
-  printf 'TypeScript public quick-start is not classified at the SDK Apache boundary\n' >&2
+  printf 'TypeScript behavior example is not classified at the SDK Apache boundary\n' >&2
   exit 1
 fi
-if ! awk -F '\t' '$1 == "scripts/sdk/quickstarts/python/quickstart.py" && $3 == "Apache-2.0" && $4 == "packages/python/LICENSE|packages/python/NOTICE" { found = 1 } END { exit !found }' \
+if ! awk -F '\t' '$1 == "packages/python/src/xenoteer/examples/phase6_behaviors.py" && $3 == "Apache-2.0" && $4 == "packages/python/LICENSE|packages/python/NOTICE" { found = 1 } END { exit !found }' \
   /tmp/xenoteer-first-party.tsv; then
-  printf 'Python public quick-start is not classified at the SDK Apache boundary\n' >&2
+  printf 'Python behavior example is not classified at the SDK Apache boundary\n' >&2
   exit 1
 fi
 if ! awk -F '\t' '$1 == "schemas/v1/capabilities.json" && $3 == "Apache-2.0" && $4 == "schemas/LICENSE" { found = 1 } END { exit !found }' \

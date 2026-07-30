@@ -144,6 +144,24 @@ const wire = encodeUInt64(sequence);               // exact decimal string
 Noncanonical text, JSON numbers, overflow, signs, whitespace, and leading zeros
 are rejected.
 
+## Installed behavior example
+
+The npm tarball ships `examples/phase6-behaviors.mjs`. Run that file from the
+installed package, not from a repository checkout:
+
+```sh
+node node_modules/@xenoteer/sdk/examples/phase6-behaviors.mjs
+```
+
+It requires `XENOTEER_API_BASE`, `XENOTEER_TOKEN`,
+`XENOTEER_EXPECTED_INSTALL_ROOT`, `XENOTEER_EXPECT_AUTH_FAILURE`, and
+`XENOTEER_QUICKSTART_LANGUAGE`. The repository gate supplies those values and
+an exact derived-image GTK fixture. The example proves the same ten behaviors
+as the Rust and Python artifact examples: capabilities, scoped launch/lease,
+exact resolution, semantic invoke, smooth physical click, Unicode strategy
+evidence, screenshot after a real failed postcondition, reconnect by known
+command ID, stale reference after restart, and view-only browser ticket.
+
 ## Events and authentication
 
 `decodeEventMessage()` returns typed known topics and an `UnknownEvent` for

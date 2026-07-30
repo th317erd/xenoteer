@@ -17,6 +17,8 @@ src/xenoteer/conformance.py
 src/xenoteer/desktop.py
 src/xenoteer/errors.py
 src/xenoteer/events.py
+src/xenoteer/examples/__init__.py
+src/xenoteer/examples/phase6_behaviors.py
 src/xenoteer/lease.py
 src/xenoteer/options.py
 src/xenoteer/policy.py

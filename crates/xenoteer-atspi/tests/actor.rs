@@ -20,7 +20,7 @@ use xenoteer_atspi::{
     SemanticError, SemanticEvidence, SemanticObservationEvidence, SemanticObservationRequest,
     SemanticOperation, SemanticRect, SemanticRequest, SemanticTarget, SemanticTargetRequest,
     SemanticValueEvidence, TextInsertPosition, TextProtection, TextSelectionPolicy,
-    spawn_atspi_actor,
+    TextVerificationMode, spawn_atspi_actor,
 };
 
 type BootstrapPlan = Result<Vec<NormalizedCacheItem>, BackendFailure>;
@@ -1402,12 +1402,42 @@ async fn protected_text_write_is_length_only_and_secret_safe() -> Result<(), Box
         )
         .await?;
     let cached = page.nodes.first().ok_or("missing password node")?;
+    let denied_exact = semantic_request(
+        &health,
+        cached,
+        SemanticOperation::SetText {
+            text: RedactedText::new("protected-exact-secret-value")?,
+            selection: TextSelectionPolicy::CollapseAfter,
+            verification: TextVerificationMode::Exact,
+        },
+    );
+    assert!(
+        !format!("{denied_exact:?}").contains("protected-exact-secret-value"),
+        "exact protected request Debug must remain redacted"
+    );
+    let denied_result = spawned
+        .handle
+        .execute_semantic(denied_exact, CancellationToken::new())
+        .await;
+    assert!(matches!(
+        denied_result,
+        Err(SemanticError::InvalidRequest(
+            "exact verification is denied for protected text"
+        ))
+    ));
+    assert!(
+        !format!("{denied_result:?}").contains("protected-exact-secret-value"),
+        "exact protected failure Debug must remain redacted"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
     let request = semantic_request(
         &health,
         cached,
         SemanticOperation::SetText {
             text: RedactedText::new("protected-secret-value")?,
             selection: TextSelectionPolicy::CollapseAfter,
+            verification: TextVerificationMode::LengthOnly,
         },
     );
     let debug = format!("{request:?}");
@@ -1423,6 +1453,7 @@ async fn protected_text_write_is_length_only_and_secret_safe() -> Result<(), Box
             position: TextInsertPosition::LiveCaret,
             text: RedactedText::new("protected-insert-secret")?,
             selection: TextSelectionPolicy::CollapseAfter,
+            verification: TextVerificationMode::LengthOnly,
         },
     );
     assert!(!format!("{insert:?}").contains("protected-insert-secret"));
@@ -1470,6 +1501,7 @@ async fn unknown_role_text_write_fails_closed_without_backend_dispatch()
         SemanticOperation::SetText {
             text: RedactedText::new("unknown-secret-value")?,
             selection: TextSelectionPolicy::CollapseAfter,
+            verification: TextVerificationMode::LengthOnly,
         },
     );
     let result = spawned

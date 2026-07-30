@@ -1104,6 +1104,10 @@ test("viewer ticket and clipboard diagnostic surfaces redact bearer/content", { 
     },
   });
   const ticket = await client.desktop().viewer.issueTicket("https://viewer.example");
+  assert.equal(ticket.audience, "viewer_websocket");
+  assert.equal(ticket.usePolicy, "single_use");
+  assert.equal(ticket.toJSON()["audience"], "viewer_websocket");
+  assert.equal(ticket.toJSON()["usePolicy"], "single_use");
   assert.equal(ticket.consumeSecret(), viewerSecret);
   assert.equal(String(ticket).includes(viewerSecret), false);
   assert.equal(JSON.stringify(ticket).includes(viewerSecret), false);

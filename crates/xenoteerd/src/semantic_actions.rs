@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use xenoteer_atspi::{
     ActionSelector, RedactedText, ScrollPlacement, SelectionOperation, SemanticError,
     SemanticEvidence, SemanticObservationRequest, SemanticOperation, SemanticRequest,
-    SemanticResult, TextInsertPosition, TextSelectionPolicy,
+    SemanticResult, TextInsertPosition, TextSelectionPolicy, TextVerificationMode,
 };
 use xenoteer_core::correlation_authorizes_physical_effect;
 use xenoteer_protocol::{
@@ -367,6 +367,7 @@ where
             },
             text: RedactedText::new(text.clone()).map_err(SemanticActionFailure::Actor)?,
             selection: text_selection(options.selection),
+            verification: text_verification(options.verify_length_only),
         };
         let result = actor
             .execute_semantic(
@@ -396,11 +397,13 @@ where
             accepted,
             before: backend_before,
             after,
+            exact_match,
         } = result.evidence
         else {
             return Err(SemanticActionFailure::InvalidEvidence);
         };
         require_accepted(accepted)?;
+        validate_exact_match_evidence(options.verify_length_only, exact_match)?;
         let expected_after = backend_before
             .character_count
             .checked_add(inserted_characters)
@@ -787,6 +790,7 @@ impl SemanticActionPlan {
                 text: RedactedText::new(command.text.expose().to_owned())
                     .map_err(SemanticActionFailure::Actor)?,
                 selection: text_selection(command.selection),
+                verification: text_verification(command.verify_length_only),
             },
             Command::ElementInsertText(command) => SemanticOperation::InsertText {
                 position: TextInsertPosition::Offset(
@@ -796,6 +800,7 @@ impl SemanticActionPlan {
                 text: RedactedText::new(command.text.expose().to_owned())
                     .map_err(SemanticActionFailure::Actor)?,
                 selection: text_selection(command.selection),
+                verification: text_verification(command.verify_length_only),
             },
             Command::ElementScroll(command) => match command.target {
                 ElementScrollTarget::Alignment { alignment } => {
@@ -909,9 +914,11 @@ impl SemanticActionPlan {
                     accepted,
                     before: _,
                     after,
+                    exact_match,
                 },
             ) => {
                 require_accepted(accepted)?;
+                validate_exact_match_evidence(command.verify_length_only, exact_match)?;
                 let requested = text_character_count(command.text.expose())?;
                 if after.character_count != requested {
                     return Err(SemanticActionFailure::PostconditionFailed);
@@ -926,9 +933,11 @@ impl SemanticActionPlan {
                     accepted,
                     before: text_before,
                     after,
+                    exact_match,
                 },
             ) => {
                 require_accepted(accepted)?;
+                validate_exact_match_evidence(command.verify_length_only, exact_match)?;
                 let inserted = text_character_count(command.text.expose())?;
                 let expected = text_before
                     .character_count
@@ -977,10 +986,31 @@ fn validate_text_verification(
     snapshot: &ElementSnapshot,
     verify_length_only: bool,
 ) -> Result<(), SemanticActionFailure> {
-    if !verify_length_only || snapshot.role.role == xenoteer_protocol::ElementRole::Unknown {
+    if snapshot.role.role == xenoteer_protocol::ElementRole::Unknown
+        || (!verify_length_only && snapshot.is_protected())
+    {
         return Err(SemanticActionFailure::VerificationUnsupported);
     }
     Ok(())
+}
+
+const fn text_verification(verify_length_only: bool) -> TextVerificationMode {
+    if verify_length_only {
+        TextVerificationMode::LengthOnly
+    } else {
+        TextVerificationMode::Exact
+    }
+}
+
+fn validate_exact_match_evidence(
+    verify_length_only: bool,
+    exact_match: Option<bool>,
+) -> Result<(), SemanticActionFailure> {
+    match (verify_length_only, exact_match) {
+        (true, None) | (false, Some(true)) => Ok(()),
+        (false, Some(false)) => Err(SemanticActionFailure::PostconditionFailed),
+        (true, Some(_)) | (false, None) => Err(SemanticActionFailure::InvalidEvidence),
+    }
 }
 
 const fn text_selection(value: EditableTextSelectionPolicy) -> TextSelectionPolicy {

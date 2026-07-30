@@ -227,12 +227,17 @@ class Keyboard:
         strategy: str = "auto",
         preserve_clipboard: bool = True,
         paste_timeout: float = 2.0,
+        verify_length_only: bool = True,
     ) -> CommandSubmission:
         """Insert bounded inline text without putting content in diagnostics."""
 
         if not isinstance(text, str) or len(text.encode("utf-8")) > 256 * 1024:
             raise XenoteerError(
                 "invalid_request", "inline text must be no larger than 256 KiB"
+            )
+        if not isinstance(verify_length_only, bool):
+            raise XenoteerError(
+                "invalid_request", "verify_length_only must be a bool"
             )
         target_wire = copy.deepcopy(dict(target))
         clipboard_options = None
@@ -252,7 +257,7 @@ class Keyboard:
             semantic_options = {
                 "insertion_point": {"kind": "caret"},
                 "selection": "collapse_after",
-                "verify_length_only": True,
+                "verify_length_only": verify_length_only,
                 "postcondition": None,
             }
         if strategy == "auto" and target_wire.get("target") == "element":
@@ -269,8 +274,7 @@ class Keyboard:
             {
                 "type": "text_insert",
                 "text": {"source": "inline", "text": text},
-                "target": target_wire.get("target"),
-                **{key: value for key, value in target_wire.items() if key != "target"},
+                "target": target_wire,
                 "strategy": strategy,
                 "clipboard_options": clipboard_options,
                 "semantic_options": semantic_options,
@@ -307,8 +311,7 @@ class Keyboard:
             {
                 "type": "text_insert",
                 "text": {"source": "artifact", "artifact": artifact.wire()},
-                "target": target_wire.get("target"),
-                **{key: value for key, value in target_wire.items() if key != "target"},
+                "target": target_wire,
                 "strategy": strategy,
                 "semantic_options": None,
                 "clipboard_options": {
@@ -623,6 +626,7 @@ class ControlLease:
                 await asyncio.shield(release_task)
             except asyncio.CancelledError:
                 release_task.add_done_callback(_consume_release_failure)
+                raise
             except XenoteerError as error:
                 if exc is None:
                     raise
@@ -663,6 +667,7 @@ class ControlContext:
                 await asyncio.shield(release_task)
             except asyncio.CancelledError:
                 release_task.add_done_callback(_consume_release_failure)
+                raise
             except XenoteerError as error:
                 if exc is None:
                     raise

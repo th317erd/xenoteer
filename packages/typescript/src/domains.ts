@@ -551,6 +551,8 @@ export class IssuedViewerTicket {
   readonly #origin: string;
   readonly #expiresAt: string;
   readonly #mode: string;
+  readonly #audience: ViewerTicket["audience"];
+  readonly #usePolicy: ViewerTicket["use_policy"];
   #ticket: string | null;
 
   constructor(value: ViewerTicket) {
@@ -558,6 +560,8 @@ export class IssuedViewerTicket {
     this.#origin = value.origin;
     this.#expiresAt = value.expires_at;
     this.#mode = value.mode;
+    this.#audience = value.audience;
+    this.#usePolicy = value.use_policy;
   }
 
   /** Intentional one-time bearer access for a viewer WebSocket subprotocol only. */
@@ -578,6 +582,14 @@ export class IssuedViewerTicket {
     return this.#origin;
   }
 
+  get audience(): ViewerTicket["audience"] {
+    return this.#audience;
+  }
+
+  get usePolicy(): ViewerTicket["use_policy"] {
+    return this.#usePolicy;
+  }
+
   toString(): string {
     return `ViewerTicket(origin=${this.#origin}, expiresAt=${this.#expiresAt}, ticket=<redacted>)`;
   }
@@ -587,6 +599,8 @@ export class IssuedViewerTicket {
       origin: this.#origin,
       expiresAt: this.#expiresAt,
       mode: this.#mode,
+      audience: this.#audience,
+      usePolicy: this.#usePolicy,
       ticket: "<redacted>",
     });
   }

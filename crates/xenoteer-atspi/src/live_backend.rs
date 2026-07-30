@@ -49,7 +49,7 @@ use crate::semantic::{
     MAX_SELECTION_RANGES, ScrollPlacement, SelectionOperation, SelectionRangeEvidence,
     SemanticDispatchMarker, SemanticEvidence, SemanticObservationEvidence, SemanticOperation,
     SemanticRect, SemanticValueEvidence, TextInsertPosition, TextReadbackEvidence,
-    TextSelectionPolicy,
+    TextSelectionPolicy, TextVerificationMode,
 };
 use crate::{
     AtspiBackend, AtspiBackendConnector, BackendEvent, BackendEventIngress, BackendFailure,
@@ -71,6 +71,15 @@ const SEMANTIC_SETTLE_MAX_ATTEMPTS: usize = 32;
 // Pinned zbus 5.18 rejects a complete wire message above 128 MiB. This is a
 // transport allocation bound, not the much tighter decoded cache-item limit.
 const MAX_RAW_ATSPI_MESSAGE_BYTES: usize = 128 * 1_024 * 1_024;
+// A D-Bus string body is its u32 byte length, UTF-8 bytes, and trailing NUL.
+// Bound the raw body before zvariant exposes even a borrowed string. The shared
+// zbus connection still has its upstream 128 MiB raw-message allocation bound;
+// zbus 5.18 does not expose a smaller per-call receive limit.
+const DBUS_STRING_BODY_OVERHEAD_BYTES: usize =
+    std::mem::size_of::<u32>() + std::mem::size_of::<u8>();
+const MAX_EXACT_TEXT_REPLY_BODY_BYTES: usize =
+    crate::semantic::MAX_SEMANTIC_TEXT_BYTES + DBUS_STRING_BODY_OVERHEAD_BYTES;
+const _: () = assert!(DBUS_STRING_BODY_OVERHEAD_BYTES == 5);
 
 #[derive(Clone, Debug)]
 struct SemanticSettle {
@@ -1397,7 +1406,11 @@ async fn execute_live_semantic(
                 addressed_child_selected,
             })
         }
-        SemanticOperation::SetText { text, selection } => {
+        SemanticOperation::SetText {
+            text,
+            selection,
+            verification,
+        } => {
             execute_text_write(
                 connection,
                 &identity,
@@ -1407,6 +1420,7 @@ async fn execute_live_semantic(
                     position: None,
                     text,
                     selection_policy: selection,
+                    verification,
                 },
                 terminal_deadline,
             )
@@ -1416,6 +1430,7 @@ async fn execute_live_semantic(
             position,
             text,
             selection,
+            verification,
         } => {
             execute_text_write(
                 connection,
@@ -1426,6 +1441,7 @@ async fn execute_live_semantic(
                     position: Some(position),
                     text,
                     selection_policy: selection,
+                    verification,
                 },
                 terminal_deadline,
             )
@@ -2109,6 +2125,7 @@ struct LiveTextWrite {
     position: Option<TextInsertPosition>,
     text: crate::semantic::RedactedText,
     selection_policy: TextSelectionPolicy,
+    verification: TextVerificationMode,
 }
 
 impl TextSettleExpectation {
@@ -2172,6 +2189,7 @@ async fn execute_text_write(
         position,
         text,
         selection_policy,
+        verification,
     } = operation;
     let call_timeout = identity.proxy_call_timeout;
     let editable = timed_call(
@@ -2304,11 +2322,146 @@ async fn execute_text_write(
         // can report a deterministic postcondition failure after one dispatch.
         post_write
     };
+    let exact_match = if !exact_text_readback_required(verification) {
+        None
+    } else if accepted && after.character_count == expected_character_count {
+        Some(
+            read_exact_text_match(
+                &text_proxy,
+                position,
+                insertion_start,
+                &text,
+                terminal_deadline,
+                call_timeout,
+            )
+            .await?,
+        )
+    } else {
+        Some(false)
+    };
     Ok(SemanticEvidence::Text {
         accepted,
         before,
         after,
+        exact_match,
     })
+}
+
+const fn exact_text_readback_required(verification: TextVerificationMode) -> bool {
+    match verification {
+        TextVerificationMode::LengthOnly => false,
+        TextVerificationMode::Exact => true,
+    }
+}
+
+fn exact_text_readback_range(
+    position: Option<TextInsertPosition>,
+    insertion_start: u32,
+    inserted_characters: u32,
+) -> Result<(i32, i32), BackendFailure> {
+    let start = if position.is_some() {
+        insertion_start
+    } else {
+        0
+    };
+    let end = start.checked_add(inserted_characters).ok_or_else(|| {
+        BackendFailure::new(
+            BackendFailureKind::Protocol,
+            "exact text verification range overflow",
+        )
+    })?;
+    Ok((index_to_i32(start)?, index_to_i32(end)?))
+}
+
+fn exact_text_matches(
+    requested: &crate::semantic::RedactedText,
+    observed: &str,
+) -> Result<bool, BackendFailure> {
+    if observed.len() > crate::semantic::MAX_SEMANTIC_TEXT_BYTES {
+        return Err(BackendFailure::new(
+            BackendFailureKind::Protocol,
+            "exact text verification readback exceeds the adapter byte limit",
+        ));
+    }
+    let observed_characters = u32::try_from(observed.chars().count()).map_err(|_| {
+        BackendFailure::new(
+            BackendFailureKind::Protocol,
+            "exact text verification readback exceeds the adapter character limit",
+        )
+    })?;
+    Ok(observed_characters == requested.character_count()
+        && observed == requested.expose_to_backend())
+}
+
+fn decode_bounded_exact_text_reply<'data, 'bytes, 'fds>(
+    signature: &zbus::zvariant::Signature,
+    data: &'data zbus::zvariant::serialized::Data<'bytes, 'fds>,
+) -> Result<&'data str, BackendFailure> {
+    if data.len() > MAX_EXACT_TEXT_REPLY_BODY_BYTES {
+        return Err(BackendFailure::new(
+            BackendFailureKind::Protocol,
+            "Text.GetText reply exceeds the exact-verification byte limit",
+        ));
+    }
+    if signature != &zbus::zvariant::Signature::Str {
+        return Err(BackendFailure::new(
+            BackendFailureKind::Protocol,
+            "Text.GetText returned an unexpected reply signature",
+        ));
+    }
+    let (observed, consumed) = data.deserialize::<&str>().map_err(|_| {
+        BackendFailure::new(
+            BackendFailureKind::Protocol,
+            "Text.GetText returned a malformed string reply",
+        )
+    })?;
+    if consumed != data.len() {
+        return Err(BackendFailure::new(
+            BackendFailureKind::Protocol,
+            "Text.GetText returned trailing reply content",
+        ));
+    }
+    if observed.as_bytes().contains(&0) {
+        return Err(BackendFailure::new(
+            BackendFailureKind::Protocol,
+            "Text.GetText returned an embedded NUL",
+        ));
+    }
+    if observed.len() > crate::semantic::MAX_SEMANTIC_TEXT_BYTES {
+        return Err(BackendFailure::new(
+            BackendFailureKind::Protocol,
+            "exact text verification readback exceeds the adapter byte limit",
+        ));
+    }
+    Ok(observed)
+}
+
+async fn read_exact_text_match(
+    text_proxy: &TextProxy<'_>,
+    position: Option<TextInsertPosition>,
+    insertion_start: u32,
+    requested: &crate::semantic::RedactedText,
+    terminal_deadline: Instant,
+    call_timeout: Duration,
+) -> Result<bool, BackendFailure> {
+    let remaining = terminal_deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(BackendFailure::new(
+            BackendFailureKind::Timeout,
+            "exact text verification deadline expired",
+        ));
+    }
+    let (start, end) =
+        exact_text_readback_range(position, insertion_start, requested.character_count())?;
+    let reply = timed_secret_call(
+        remaining.min(call_timeout),
+        "Text.GetText",
+        text_proxy.inner().call_method("GetText", &(start, end)),
+    )
+    .await?;
+    let body = reply.body();
+    let observed = decode_bounded_exact_text_reply(body.signature(), body.data())?;
+    exact_text_matches(requested, observed)
 }
 
 async fn read_text_evidence(
@@ -4419,6 +4572,13 @@ mod tests {
         Ok((bus.to_owned(), OwnedObjectPath::try_from(path.to_owned())?))
     }
 
+    fn text_method_return(text: &str) -> Result<zbus::Message, Box<dyn Error>> {
+        let call = zbus::Message::method_call("/test/text", "GetText")?
+            .interface("org.a11y.atspi.Text")?
+            .build(&(0_i32, 1_i32))?;
+        Ok(zbus::Message::method_return(&call.header())?.build(&text)?)
+    }
+
     #[derive(Debug)]
     struct FakeLazySource {
         nodes: BTreeMap<ObjectAddress, LazyAccessibleNode>,
@@ -5596,6 +5756,132 @@ mod tests {
         let mut different = evidence.clone();
         different.caret_offset = 3;
         assert!(!TextSettleExpectation::Exact(different).reached(&evidence));
+    }
+
+    #[test]
+    fn exact_text_readback_is_unicode_scalar_bounded_and_content_free() -> Result<(), Box<dyn Error>>
+    {
+        const SECRET: &str = "é🦀a";
+        let requested = crate::semantic::RedactedText::new(SECRET)?;
+        assert_eq!(requested.character_count(), 3);
+        assert_eq!(
+            exact_text_readback_range(None, 17, requested.character_count())?,
+            (0, 3)
+        );
+        assert_eq!(
+            exact_text_readback_range(
+                Some(TextInsertPosition::Offset(2)),
+                2,
+                requested.character_count(),
+            )?,
+            (2, 5)
+        );
+        assert!(exact_text_matches(&requested, SECRET)?);
+        assert!(!exact_text_matches(&requested, "éa🦀")?);
+        assert!(!format!("{requested:?}").contains(SECRET));
+
+        let oversized = "x".repeat(crate::semantic::MAX_SEMANTIC_TEXT_BYTES + 1);
+        let error = exact_text_matches(&requested, &oversized);
+        assert!(matches!(
+            error,
+            Err(BackendFailure {
+                kind: BackendFailureKind::Protocol,
+                ..
+            })
+        ));
+        assert!(!format!("{error:?}").contains(SECRET));
+        Ok(())
+    }
+
+    #[test]
+    fn exact_text_reply_is_bounded_before_zero_copy_deserialization() -> Result<(), Box<dyn Error>>
+    {
+        const SECRET: &str = "é🦀a";
+        let reply = text_method_return(SECRET)?;
+        let body = reply.body();
+        assert_eq!(body.len(), SECRET.len() + DBUS_STRING_BODY_OVERHEAD_BYTES);
+        let encoded = body.data().bytes();
+        let encoded_start = encoded.as_ptr() as usize;
+        let encoded_end = encoded_start + encoded.len();
+        let observed = decode_bounded_exact_text_reply(body.signature(), body.data())?;
+        let observed_start = observed.as_ptr() as usize;
+        assert!(observed_start >= encoded_start);
+        assert!(observed_start + observed.len() <= encoded_end);
+        assert_eq!(observed, SECRET);
+
+        let boundary = "x".repeat(crate::semantic::MAX_SEMANTIC_TEXT_BYTES);
+        let boundary_reply = text_method_return(&boundary)?;
+        let boundary_body = boundary_reply.body();
+        assert_eq!(boundary_body.len(), MAX_EXACT_TEXT_REPLY_BODY_BYTES);
+        assert_eq!(
+            decode_bounded_exact_text_reply(boundary_body.signature(), boundary_body.data())?.len(),
+            crate::semantic::MAX_SEMANTIC_TEXT_BYTES
+        );
+
+        let oversized = "x".repeat(crate::semantic::MAX_SEMANTIC_TEXT_BYTES + 1);
+        let oversized_reply = text_method_return(&oversized)?;
+        let oversized_body = oversized_reply.body();
+        assert_eq!(oversized_body.len(), MAX_EXACT_TEXT_REPLY_BODY_BYTES + 1);
+        let failure =
+            decode_bounded_exact_text_reply(oversized_body.signature(), oversized_body.data());
+        assert!(matches!(
+            failure,
+            Err(BackendFailure {
+                kind: BackendFailureKind::Protocol,
+                ..
+            })
+        ));
+        assert!(!format!("{failure:?}").contains(SECRET));
+        Ok(())
+    }
+
+    #[test]
+    fn exact_text_reply_rejects_signature_nul_malformed_and_trailing_content()
+    -> Result<(), Box<dyn Error>> {
+        let reply = text_method_return("bounded")?;
+        let body = reply.body();
+        let alternate_signature = zbus::zvariant::Signature::I32;
+        assert!(
+            decode_bounded_exact_text_reply(&alternate_signature, body.data()).is_err(),
+            "an alternate body signature must fail before decoding"
+        );
+
+        let context = body.data().context();
+        let mut trailing_bytes = body.data().bytes().to_vec();
+        trailing_bytes.push(0x7f);
+        let trailing = zbus::zvariant::serialized::Data::new(trailing_bytes, context);
+        assert!(
+            decode_bounded_exact_text_reply(body.signature(), &trailing).is_err(),
+            "trailing encoded bytes must be rejected"
+        );
+
+        let mut malformed_bytes = body.data().bytes().to_vec();
+        malformed_bytes[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let malformed = zbus::zvariant::serialized::Data::new(malformed_bytes, context);
+        assert!(
+            decode_bounded_exact_text_reply(body.signature(), &malformed).is_err(),
+            "a malformed D-Bus string length must be rejected"
+        );
+
+        let embedded_nul_length = match context.endian() {
+            zbus::zvariant::Endian::Little => 3_u32.to_le_bytes(),
+            zbus::zvariant::Endian::Big => 3_u32.to_be_bytes(),
+        };
+        let embedded_nul_bytes = [embedded_nul_length.as_slice(), b"a\0b", &[0_u8]].concat();
+        let embedded_nul = zbus::zvariant::serialized::Data::new(embedded_nul_bytes, context);
+        assert!(
+            decode_bounded_exact_text_reply(body.signature(), &embedded_nul).is_err(),
+            "embedded NUL content must remain fail-closed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn length_only_mode_never_requests_exact_content_readback() {
+        assert!(!exact_text_readback_required(
+            TextVerificationMode::LengthOnly
+        ));
+        assert!(exact_text_readback_required(TextVerificationMode::Exact));
     }
 
     #[test]

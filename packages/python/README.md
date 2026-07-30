@@ -148,7 +148,28 @@ redacted from repr.
 
 HTTPS/WSS is required for non-loopback hosts. Plain HTTP/WS is accepted only for
 a numeric loopback address. Artifact streaming validates declared length and
-digest; a streaming destination may have received a corrupt prefix before a
+digest before returning success.
+
+## Installed behavior example
+
+Every wheel and source distribution ships
+`xenoteer.examples.phase6_behaviors`. It is an executable qualification example,
+not a source-tree test:
+
+```sh
+PYTHONNOUSERSITE=1 python -m xenoteer.examples.phase6_behaviors
+```
+
+The example requires `XENOTEER_API_BASE`, `XENOTEER_TOKEN`,
+`XENOTEER_EXPECTED_INSTALL_ROOT`, `XENOTEER_EXPECT_AUTH_FAILURE`, and
+`XENOTEER_QUICKSTART_LANGUAGE`. The repository gate supplies those values,
+starts the deterministic GTK fixture from a verified derived image, and runs
+the installed wheel and installed sdist in separate fresh containers. The
+example performs status/capability discovery, scoped launch and lease cleanup,
+exact window/element resolution, semantic invoke, interpolated physical click,
+Unicode strategy evidence, screenshot-on-real-failure, known-command reconnect,
+stale-reference restart, and exact-origin view-only ticket issuance.
+A streaming destination may have received a corrupt prefix before a
 final digest failure, so use an atomic temporary destination when partial output
 must never become visible. Temporary clipboard-input artifacts are deleted
 best-effort only after a terminal command result; expiry remains the reliable

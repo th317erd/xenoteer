@@ -2026,6 +2026,14 @@ fn validate_semantic_target(
     if request.operation.is_text_write() && node.item.text_protection == TextProtection::Unknown {
         return Err(SemanticError::UnclassifiedTextDenied);
     }
+    if node.item.text_protection == TextProtection::Protected
+        && request.operation.text_verification()
+            == Some(crate::semantic::TextVerificationMode::Exact)
+    {
+        return Err(SemanticError::InvalidRequest(
+            "exact verification is denied for protected text",
+        ));
+    }
     Ok(())
 }
 

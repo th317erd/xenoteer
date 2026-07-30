@@ -7,6 +7,8 @@ xenoteer/conformance.py
 xenoteer/desktop.py
 xenoteer/errors.py
 xenoteer/events.py
+xenoteer/examples/__init__.py
+xenoteer/examples/phase6_behaviors.py
 xenoteer/lease.py
 xenoteer/options.py
 xenoteer/policy.py

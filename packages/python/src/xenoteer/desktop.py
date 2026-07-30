@@ -1171,13 +1171,13 @@ class Applications:
         self._desktop = desktop
 
     def launch(
-        self, application: str, arguments: list[Mapping[str, Any]] | None = None
+        self, application: str, arguments: list[str] | None = None
     ) -> CommandSubmission:
         return self._desktop.submit(
             {
                 "type": "application_launch",
                 "application": application,
-                "arguments": [] if arguments is None else [dict(item) for item in arguments],
+                "arguments": [] if arguments is None else list(arguments),
             }
         )
 

@@ -321,7 +321,7 @@ test("deterministic package verifier accepts exactly the Apache SDK boundary", {
     ["scripts/verify-package.mjs"],
     { cwd: process.cwd(), timeout: 8_000 },
   );
-  assert.match(result.stdout, /verified deterministic Apache package: 60 files/u);
+  assert.match(result.stdout, /verified deterministic Apache package: 61 files/u);
   assert.equal(result.stderr, "");
 });
 

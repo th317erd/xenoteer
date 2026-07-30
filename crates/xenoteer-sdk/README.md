@@ -56,6 +56,13 @@ Important lifecycle rules:
 - `ControlLease::release(&mut self)` marks the local capability inactive only
   after a valid server response. A timeout or disconnect retains the exact
   capability so the caller can query or retry the ambiguous release.
+- `Desktop::with_control` awaits release when its future completes normally.
+  Renewal failure fences new work, allows only a bounded callback grace, and
+  reports exact IDs for submissions still in flight when that callback is
+  aborted. Outer cancellation, drop, or panic cannot await release; the
+  server-enforced lease TTL remains the fallback. An ambiguous scoped release
+  returns a redacted cleanup error whose explicit `lease_id()` accessor enables
+  state inspection and exact-ID release recovery.
 - Clipboard artifact upload accepts an exact-length `AsyncRead` and computes
   SHA-256 while streaming, without collecting the 16 MiB ceiling into one
   allocation.
@@ -82,3 +89,19 @@ The adapter evaluates declarative operations through the same protocol types,
 command submission, event continuity, client-close, and ambiguous-lease
 lifecycle policies used by the SDK. Release runs require all 73 v1 cases to
 pass with no skips.
+
+## Installed behavior example
+
+Every published crate includes `examples/phase6_behaviors.rs`. The release gate
+copies that source from the safely extracted `.crate` into an isolated consumer
+whose SDK and protocol dependencies also resolve only from extracted archives.
+The example requires `XENOTEER_API_BASE`, `XENOTEER_TOKEN`,
+`XENOTEER_EXPECTED_INSTALL_ROOT`, `XENOTEER_EXPECT_AUTH_FAILURE`, and
+`XENOTEER_QUICKSTART_LANGUAGE`.
+
+Against the exact derived GTK fixture image it proves the same ten behaviors as
+the npm, wheel, and sdist examples: capabilities; scoped lease and registered
+application launch; exact window/element resolution; semantic invoke; smooth
+physical click; exact Unicode strategy evidence; screenshot after an actual
+failed postcondition; reconnect by known command ID; stale reference after
+restart; and exact-origin view-only browser ticket.

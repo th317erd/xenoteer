@@ -58,5 +58,6 @@
   "dist/src/wire.d.ts.map",
   "dist/src/wire.js",
   "dist/src/wire.js.map",
+  "examples/phase6-behaviors.mjs",
   "package.json"
 ]

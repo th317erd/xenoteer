@@ -33,6 +33,7 @@ pub use semantic::{
     SemanticObservationResult, SemanticOperation, SemanticReconcileResult, SemanticRect,
     SemanticRequest, SemanticResult, SemanticTarget, SemanticTargetRequest, SemanticValueEvidence,
     TextInsertPosition, TextProtection, TextReadbackEvidence, TextSelectionPolicy,
+    TextVerificationMode,
 };
 
 /// Errors from the accessibility backend probe.

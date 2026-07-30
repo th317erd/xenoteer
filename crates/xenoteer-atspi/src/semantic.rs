@@ -117,10 +117,16 @@ impl RedactedText {
         self.0.is_empty()
     }
 
+    /// Unicode scalar count expected by AT-SPI text offsets.
+    #[must_use]
+    pub fn character_count(&self) -> u32 {
+        u32::try_from(self.0.chars().count()).unwrap_or(u32::MAX)
+    }
+
     /// Character length expected by AT-SPI's editable-text methods.
     #[cfg(feature = "live-atspi")]
     pub(crate) fn character_len(&self) -> i32 {
-        i32::try_from(self.0.chars().count()).unwrap_or(i32::MAX)
+        i32::try_from(self.character_count()).unwrap_or(i32::MAX)
     }
 
     #[cfg(feature = "live-atspi")]
@@ -266,6 +272,15 @@ pub enum TextSelectionPolicy {
     SelectInserted,
 }
 
+/// Content-verification policy for one semantic text write.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextVerificationMode {
+    /// Verify only public character-count, caret, and selection evidence.
+    LengthOnly,
+    /// Privately compare bounded AT-SPI text content and expose only the boolean result.
+    Exact,
+}
+
 /// Semantic operation accepted by the protocol-independent actor seam.
 #[derive(Debug, PartialEq)]
 pub enum SemanticOperation {
@@ -283,6 +298,8 @@ pub enum SemanticOperation {
         text: RedactedText,
         /// Explicit post-write caret and selection behavior.
         selection: TextSelectionPolicy,
+        /// Content verification permitted for this target.
+        verification: TextVerificationMode,
     },
     /// Insert editable text at a nonnegative character position.
     InsertText {
@@ -292,6 +309,8 @@ pub enum SemanticOperation {
         text: RedactedText,
         /// Explicit post-write caret and selection behavior.
         selection: TextSelectionPolicy,
+        /// Content verification permitted for this target.
+        verification: TextVerificationMode,
     },
     /// Scroll the target to a toolkit-independent placement.
     Scroll(ScrollPlacement),
@@ -320,7 +339,16 @@ impl SemanticOperation {
     }
 
     pub(crate) fn is_text_write(&self) -> bool {
-        matches!(self, Self::SetText { .. } | Self::InsertText { .. })
+        self.text_verification().is_some()
+    }
+
+    pub(crate) const fn text_verification(&self) -> Option<TextVerificationMode> {
+        match self {
+            Self::SetText { verification, .. } | Self::InsertText { verification, .. } => {
+                Some(*verification)
+            }
+            _ => None,
+        }
     }
 
     /// Validate bounded indices, finite values, and selector strings.
@@ -471,6 +499,8 @@ pub enum SemanticEvidence {
         before: TextReadbackEvidence,
         /// Content-free state after the write and selection policy.
         after: TextReadbackEvidence,
+        /// Sanitized exact-comparison result, absent for length-only verification.
+        exact_match: Option<bool>,
     },
     /// Geometry before and after a scroll request.
     Scroll {

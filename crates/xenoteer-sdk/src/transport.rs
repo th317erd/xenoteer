@@ -234,6 +234,9 @@ pub enum SdkError {
     /// A released lease handle cannot submit or renew work.
     #[error("controller lease was already released")]
     LeaseReleased,
+    /// A scoped lease renewal failed; no further controlled work may be prepared.
+    #[error("scoped controller lease renewal failed")]
+    ControlLeaseRenewalFailed,
     /// The WebSocket upgrade was permanently rejected.
     #[error("event WebSocket handshake was rejected with HTTP status {status}")]
     EventHandshakeRejected {

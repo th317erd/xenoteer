@@ -19,8 +19,11 @@ from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 from xenoteer import (
+    ArtifactRef,
     BearerToken,
     ClientOptions,
+    ControlLease,
+    Desktop,
     ProtocolRange,
     ResyncRequired,
     UINT64_MAX,
@@ -450,6 +453,235 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LeaseAndDomainTests(unittest.IsolatedAsyncioTestCase):
+    async def test_control_scopes_preserve_cancellation_while_release_finishes(self) -> None:
+        class CancellationTransport:
+            base_url = "https://xenoteer.test"
+
+            def __init__(self) -> None:
+                self.release_started = asyncio.Event()
+                self.allow_release = asyncio.Event()
+                self.release_finished = asyncio.Event()
+
+            async def authorization_header(self) -> str:
+                return f"Bearer {TOKEN}"
+
+            async def request(
+                self,
+                method: str,
+                path: str,
+                body: Mapping[str, Any] | None = None,
+                *,
+                headers: Mapping[str, str] | None = None,
+            ) -> dict[str, Any]:
+                del body, headers
+                if method == "POST" and path.endswith("/lease"):
+                    return {
+                        "desktop_id": DESKTOP_ID,
+                        "desktop_generation": GENERATION,
+                        "state": "held_by_caller",
+                        "lease_id": LEASE_ID,
+                        "expires_at": "2030-01-01T00:01:00Z",
+                    }
+                if method == "DELETE" and "/lease/" in path:
+                    self.release_started.set()
+                    await self.allow_release.wait()
+                    self.release_finished.set()
+                    return {
+                        "desktop_id": DESKTOP_ID,
+                        "desktop_generation": GENERATION,
+                        "state": "vacant",
+                        "lease_id": None,
+                        "expires_at": None,
+                    }
+                raise AssertionError((method, path))
+
+            async def close(self) -> None:
+                pass
+
+        for kind in ("lease", "control"):
+            with self.subTest(kind=kind):
+                transport = CancellationTransport()
+                desktop = Desktop(
+                    transport,
+                    DESKTOP_ID,
+                    GENERATION,
+                    {"major": 1, "minor": 0},
+                )
+                scope: Any
+                if kind == "lease":
+                    scope = ControlLease(
+                        desktop,
+                        transport,
+                        {
+                            "desktop_id": DESKTOP_ID,
+                            "desktop_generation": GENERATION,
+                            "state": "held_by_caller",
+                            "lease_id": LEASE_ID,
+                            "expires_at": "2030-01-01T00:01:00Z",
+                        },
+                        None,
+                    )
+                else:
+                    scope = desktop.control(ttl=60)
+
+                async def use_scope() -> None:
+                    async with scope:
+                        pass
+
+                task = asyncio.create_task(use_scope())
+                await asyncio.wait_for(transport.release_started.wait(), timeout=1)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                transport.allow_release.set()
+                await asyncio.wait_for(transport.release_finished.wait(), timeout=1)
+
+    async def test_application_launch_serializes_nonempty_string_arguments(self) -> None:
+        def responder(method, path, body, headers):
+            if path == "/v1/status":
+                return status()
+            if method == "POST" and path.endswith("/commands"):
+                return command_result(body["command_id"])
+            raise AssertionError((method, path))
+
+        transport = FakeTransport(responder)
+        client = await XenoteerClient.connect(
+            ClientOptions("https://xenoteer.test", TOKEN), transport=transport
+        )
+        arguments = ["--fixture-mode", "العربية"]
+        submission = client.desktop().applications.launch("editor", arguments)
+
+        self.assertEqual(
+            submission.envelope["command"],
+            {
+                "type": "application_launch",
+                "application": "editor",
+                "arguments": arguments,
+            },
+        )
+        await submission.send()
+        sent = transport.calls[-1][2]
+        self.assertEqual(sent["command"]["arguments"], arguments)
+        await client.close()
+
+    async def test_keyboard_text_insertions_nest_the_complete_text_target(self) -> None:
+        element_ref = {
+            "desktop_id": DESKTOP_ID,
+            "desktop_generation": GENERATION,
+            "atspi_generation": "4",
+            "application": {
+                "desktop_id": DESKTOP_ID,
+                "desktop_generation": GENERATION,
+                "atspi_generation": "4",
+                "unique_bus_name": ":1.42",
+                "root_object_path": "/root",
+                "app_instance_generation": "2",
+                "identity_hash": "b" * 64,
+            },
+            "object_path": "/entry",
+            "object_identity_hash": "c" * 64,
+            "cache_sequence": "78",
+        }
+
+        def responder(method, path, body, headers):
+            if path == "/v1/status":
+                return status()
+            if method == "POST" and path.endswith("/lease"):
+                return {
+                    "desktop_id": DESKTOP_ID,
+                    "desktop_generation": GENERATION,
+                    "state": "held_by_caller",
+                    "lease_id": LEASE_ID,
+                    "expires_at": "2026-07-23T00:01:00Z",
+                }
+            if method == "DELETE" and "/lease/" in path:
+                return {
+                    "desktop_id": DESKTOP_ID,
+                    "desktop_generation": GENERATION,
+                    "state": "vacant",
+                    "lease_id": None,
+                    "expires_at": None,
+                }
+            raise AssertionError((method, path))
+
+        transport = FakeTransport(responder)
+        client = await XenoteerClient.connect(
+            ClientOptions("https://xenoteer.test", TOKEN), transport=transport
+        )
+        lease = await client.desktop().acquire_control()
+        target = {
+            "target": "element",
+            "element": element_ref,
+            "window_fallback": None,
+        }
+        submission = lease.keyboard.insert_text(
+            "Latin — العربية — 中文 — e\u0301 — 😀",
+            target,
+            strategy="semantic",
+        )
+        command = submission.envelope["command"]
+
+        self.assertEqual(command["target"], target)
+        self.assertNotIn("element", command)
+        self.assertNotIn("window_fallback", command)
+        self.assertEqual(command["semantic_options"]["insertion_point"], {"kind": "caret"})
+        self.assertIs(command["semantic_options"]["verify_length_only"], True)
+        self.assertIsNone(command["clipboard_options"])
+
+        exact_submission = lease.keyboard.insert_text(
+            "exact semantic evidence",
+            target,
+            strategy="semantic",
+            verify_length_only=False,
+        )
+        self.assertIs(
+            exact_submission.envelope["command"]["semantic_options"][
+                "verify_length_only"
+            ],
+            False,
+        )
+
+        for invalid in (None, 0, 1, "false"):
+            with self.subTest(verify_length_only=invalid):
+                with self.assertRaisesRegex(
+                    XenoteerError, "verify_length_only must be a bool"
+                ) as caught:
+                    lease.keyboard.insert_text(
+                        "invalid semantic evidence mode",
+                        target,
+                        strategy="semantic",
+                        verify_length_only=invalid,
+                    )
+                self.assertEqual(caught.exception.code, "invalid_request")
+
+        artifact = ArtifactRef.from_wire(
+            {
+                "artifact_id": "10000000-0000-4000-8000-000000000005",
+                "purpose": "clipboard_input",
+                "desktop_id": DESKTOP_ID,
+                "desktop_generation": GENERATION,
+                "content_type": "text/plain;charset=utf-8",
+                "content_length": 24,
+                "sha256": "d" * 64,
+                "created_at": "2026-07-23T00:00:00Z",
+                "expires_at": "2026-07-23T00:01:00Z",
+            },
+            desktop_id=DESKTOP_ID,
+            desktop_generation=GENERATION,
+            purpose="clipboard_input",
+        )
+        artifact_submission = lease.keyboard.insert_artifact(
+            artifact,
+            target,
+            strategy="clipboard",
+        )
+        artifact_command = artifact_submission.envelope["command"]
+
+        self.assertEqual(artifact_command["target"], target)
+        self.assertNotIn("element", artifact_command)
+        self.assertNotIn("window_fallback", artifact_command)
+        await client.close()
+
     async def test_client_close_releases_owned_lease_without_masking_body_error(
         self,
     ) -> None:

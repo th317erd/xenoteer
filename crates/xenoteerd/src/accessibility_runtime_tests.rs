@@ -15,6 +15,7 @@ use xenoteer_atspi::{
     EventOfferResult, NormalizedCacheItem, ObjectAddress, SelectionRangeEvidence,
     SemanticDispatchMarker, SemanticEvidence, SemanticObservationEvidence, SemanticOperation,
     SemanticRect, SemanticValueEvidence, TextProtection, TextReadbackEvidence,
+    TextVerificationMode,
 };
 use xenoteer_core::{Config, ConfigOverrides};
 use xenoteer_protocol::{
@@ -98,6 +99,7 @@ struct FakeConnector {
     connections: Arc<AtomicUsize>,
     shutdowns: Arc<AtomicUsize>,
     semantic_calls: Arc<Mutex<Vec<&'static str>>>,
+    exact_text_matches: Arc<Mutex<VecDeque<Option<bool>>>>,
 }
 
 impl FakeConnector {
@@ -108,7 +110,15 @@ impl FakeConnector {
             connections: Arc::new(AtomicUsize::new(0)),
             shutdowns: Arc::new(AtomicUsize::new(0)),
             semantic_calls: Arc::new(Mutex::new(Vec::new())),
+            exact_text_matches: Arc::new(Mutex::new(VecDeque::new())),
         }
+    }
+
+    fn with_exact_text_matches(self, matches: impl IntoIterator<Item = Option<bool>>) -> Self {
+        if let Ok(mut configured) = self.exact_text_matches.lock() {
+            configured.extend(matches);
+        }
+        self
     }
 
     fn latest_ingress(&self) -> Result<BackendEventIngress, Box<dyn Error>> {
@@ -134,6 +144,7 @@ struct FakeBackend {
     bootstrap: Option<BootstrapPlan>,
     shutdowns: Arc<AtomicUsize>,
     semantic_calls: Arc<Mutex<Vec<&'static str>>>,
+    exact_text_matches: Arc<Mutex<VecDeque<Option<bool>>>>,
 }
 
 impl AtspiBackend for FakeBackend {
@@ -162,6 +173,7 @@ impl AtspiBackend for FakeBackend {
         dispatch: SemanticDispatchMarker,
     ) -> BackendFuture<'_, Result<SemanticEvidence, BackendFailure>> {
         let calls = Arc::clone(&self.semantic_calls);
+        let exact_text_matches = Arc::clone(&self.exact_text_matches);
         Box::pin(async move {
             request.dispatch_permit.ensure_current()?;
             dispatch.mark_dispatched();
@@ -203,22 +215,26 @@ impl AtspiBackend for FakeBackend {
                         addressed_child_selected: Some(true),
                     },
                 ),
-                SemanticOperation::SetText { text, .. } => (
+                SemanticOperation::SetText {
+                    text, verification, ..
+                } => (
                     "set_text",
                     SemanticEvidence::Text {
                         accepted: true,
                         before: text_evidence(2),
-                        after: text_evidence(u32::try_from(text.len()).unwrap_or(u32::MAX)),
+                        after: text_evidence(text.character_count()),
+                        exact_match: fake_exact_match(&exact_text_matches, verification)?,
                     },
                 ),
-                SemanticOperation::InsertText { text, .. } => (
+                SemanticOperation::InsertText {
+                    text, verification, ..
+                } => (
                     "insert_text",
                     SemanticEvidence::Text {
                         accepted: true,
                         before: text_evidence(2),
-                        after: text_evidence(
-                            2_u32.saturating_add(u32::try_from(text.len()).unwrap_or(u32::MAX)),
-                        ),
+                        after: text_evidence(2_u32.saturating_add(text.character_count())),
+                        exact_match: fake_exact_match(&exact_text_matches, verification)?,
                     },
                 ),
                 SemanticOperation::Scroll(_) | SemanticOperation::ScrollToPoint { .. } => (
@@ -303,12 +319,14 @@ impl AtspiBackendConnector for FakeConnector {
             .and_then(|mut plans| plans.pop_front());
         let shutdowns = Arc::clone(&self.shutdowns);
         let semantic_calls = Arc::clone(&self.semantic_calls);
+        let exact_text_matches = Arc::clone(&self.exact_text_matches);
         Box::pin(async move {
             match plan {
                 Some(bootstrap) => Ok(FakeBackend {
                     bootstrap: Some(bootstrap),
                     shutdowns,
                     semantic_calls,
+                    exact_text_matches,
                 }),
                 None => Err(BackendFailure::new(
                     BackendFailureKind::Connection,
@@ -316,6 +334,28 @@ impl AtspiBackendConnector for FakeConnector {
                 )),
             }
         })
+    }
+}
+
+fn fake_exact_match(
+    matches: &Mutex<VecDeque<Option<bool>>>,
+    verification: TextVerificationMode,
+) -> Result<Option<bool>, BackendFailure> {
+    let configured = matches
+        .lock()
+        .map_err(|_| {
+            BackendFailure::new(
+                BackendFailureKind::Protocol,
+                "fake exact-text match lock poisoned",
+            )
+        })?
+        .pop_front();
+    if let Some(configured) = configured {
+        return Ok(configured);
+    }
+    match verification {
+        TextVerificationMode::LengthOnly => Ok(None),
+        TextVerificationMode::Exact => Ok(Some(true)),
     }
 }
 
@@ -1155,6 +1195,276 @@ async fn semantic_text_insert_resolves_live_caret_and_returns_length_only_eviden
 }
 
 #[tokio::test]
+async fn unprotected_exact_unicode_set_and_insert_return_only_sanitized_success_evidence()
+-> Result<(), Box<dyn Error>> {
+    const SET_SECRET: &str = "é🦀a";
+    const INSERT_SECRET: &str = "λ🧪";
+    let desktop_id = DesktopId::new();
+    let desktop_generation = DesktopGeneration::new();
+    let connector = FakeConnector::new(vec![Ok(vec![app(":1.165")?, semantic_child(":1.165")?])]);
+    let runtime = spawn_accessibility_runtime_with_connector(
+        configured(None)?,
+        desktop_id,
+        desktop_generation,
+        connector.clone(),
+    )?;
+    wait_for_runtime(&runtime.reader(), |snapshot| snapshot.mirror_ready).await?;
+    let page = runtime
+        .plane()
+        .list_for(
+            "exact-unicode-semantic-text-test",
+            list_request(desktop_id, desktop_generation),
+        )
+        .await
+        .map_err(|error| format!("exact semantic text list failed: {error:?}"))?;
+    let element = page
+        .elements
+        .into_iter()
+        .find(|entry| entry.snapshot.role.role == xenoteer_protocol::ElementRole::Entry)
+        .ok_or("missing exact semantic text element")?
+        .snapshot
+        .element;
+    let semantic = runtime.semantic_runtime();
+
+    let set = execute_semantic_action(
+        &semantic,
+        Command::ElementSetText(ElementSetTextCommand {
+            element: element.clone(),
+            text: SemanticTextInput::new(SET_SECRET)?,
+            selection: EditableTextSelectionPolicy::CollapseAfter,
+            verify_length_only: false,
+            postcondition: None,
+        }),
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .map_err(|error| format!("exact Unicode set failed: {error:?}"))?;
+    assert_eq!(set.evidence.observed_text_length, Some(3));
+    assert!(!set.evidence.protected_text_verified_by_length_only);
+    assert!(!format!("{set:?}").contains(SET_SECRET));
+
+    let direct_insert = execute_semantic_action(
+        &semantic,
+        Command::ElementInsertText(ElementInsertTextCommand {
+            element: element.clone(),
+            offset: 1,
+            text: SemanticTextInput::new(INSERT_SECRET)?,
+            selection: EditableTextSelectionPolicy::SelectInserted,
+            verify_length_only: false,
+            postcondition: None,
+        }),
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .map_err(|error| format!("exact Unicode direct insert failed: {error:?}"))?;
+    assert_eq!(direct_insert.evidence.observed_text_length, Some(4));
+    assert!(
+        !direct_insert
+            .evidence
+            .protected_text_verified_by_length_only
+    );
+    assert!(!format!("{direct_insert:?}").contains(INSERT_SECRET));
+
+    let inserted = execute_semantic_text_insert(
+        &semantic,
+        element,
+        INSERT_SECRET.to_owned(),
+        SemanticTextInsertOptions {
+            insertion_point: SemanticTextInsertionPoint::Caret,
+            selection: EditableTextSelectionPolicy::CollapseAfter,
+            verify_length_only: false,
+            postcondition: None,
+        },
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .map_err(|error| format!("exact Unicode text.insert failed: {error:?}"))?;
+    assert_eq!(inserted.insertion_offset, 2);
+    assert_eq!(inserted.character_count_before, 2);
+    assert_eq!(inserted.character_count_after, 4);
+    assert!(!inserted.verified_length_only);
+    assert!(!format!("{inserted:?}").contains(INSERT_SECRET));
+    assert_eq!(
+        connector.semantic_calls()?,
+        vec!["set_text", "insert_text", "insert_text"]
+    );
+
+    let exit = runtime.shutdown().await;
+    assert_eq!(exit.actor_exit, Some(AtspiActorExit::Stopped));
+    assert!(exit.mirror_stopped);
+    Ok(())
+}
+
+#[tokio::test]
+async fn exact_same_character_count_mismatch_fails_after_one_dispatch_without_secret_leak()
+-> Result<(), Box<dyn Error>> {
+    const SECRET: &str = "🦀same-scalar-count";
+    let desktop_id = DesktopId::new();
+    let desktop_generation = DesktopGeneration::new();
+    let connector = FakeConnector::new(vec![Ok(vec![app(":1.166")?, semantic_child(":1.166")?])])
+        .with_exact_text_matches([Some(false)]);
+    let runtime = spawn_accessibility_runtime_with_connector(
+        configured(None)?,
+        desktop_id,
+        desktop_generation,
+        connector.clone(),
+    )?;
+    wait_for_runtime(&runtime.reader(), |snapshot| snapshot.mirror_ready).await?;
+    let page = runtime
+        .plane()
+        .list_for(
+            "exact-mismatch-semantic-text-test",
+            list_request(desktop_id, desktop_generation),
+        )
+        .await
+        .map_err(|error| format!("exact mismatch list failed: {error:?}"))?;
+    let element = page
+        .elements
+        .into_iter()
+        .find(|entry| entry.snapshot.role.role == xenoteer_protocol::ElementRole::Entry)
+        .ok_or("missing exact mismatch element")?
+        .snapshot
+        .element;
+    let command = Command::ElementSetText(ElementSetTextCommand {
+        element,
+        text: SemanticTextInput::new(SECRET)?,
+        selection: EditableTextSelectionPolicy::CollapseAfter,
+        verify_length_only: false,
+        postcondition: None,
+    });
+    assert!(!format!("{command:?}").contains(SECRET));
+    let result = execute_semantic_action(
+        &runtime.semantic_runtime(),
+        command,
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(SemanticActionFailure::PostconditionFailed)
+    ));
+    assert!(!format!("{result:?}").contains(SECRET));
+    assert_eq!(connector.semantic_calls()?, vec!["set_text"]);
+    let exit = runtime.shutdown().await;
+    assert_eq!(exit.actor_exit, Some(AtspiActorExit::Stopped));
+    assert!(exit.mirror_stopped);
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_missing_exact_match_evidence_is_rejected_after_dispatch()
+-> Result<(), Box<dyn Error>> {
+    let desktop_id = DesktopId::new();
+    let desktop_generation = DesktopGeneration::new();
+    let connector = FakeConnector::new(vec![Ok(vec![app(":1.167")?, semantic_child(":1.167")?])])
+        .with_exact_text_matches([None]);
+    let runtime = spawn_accessibility_runtime_with_connector(
+        configured(None)?,
+        desktop_id,
+        desktop_generation,
+        connector.clone(),
+    )?;
+    wait_for_runtime(&runtime.reader(), |snapshot| snapshot.mirror_ready).await?;
+    let page = runtime
+        .plane()
+        .list_for(
+            "missing-exact-evidence-test",
+            list_request(desktop_id, desktop_generation),
+        )
+        .await
+        .map_err(|error| format!("missing exact evidence list failed: {error:?}"))?;
+    let element = page
+        .elements
+        .into_iter()
+        .find(|entry| entry.snapshot.role.role == xenoteer_protocol::ElementRole::Entry)
+        .ok_or("missing exact evidence element")?
+        .snapshot
+        .element;
+    let result = execute_semantic_text_insert(
+        &runtime.semantic_runtime(),
+        element,
+        "bounded-canary".to_owned(),
+        SemanticTextInsertOptions {
+            insertion_point: SemanticTextInsertionPoint::Caret,
+            selection: EditableTextSelectionPolicy::CollapseAfter,
+            verify_length_only: false,
+            postcondition: None,
+        },
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(SemanticActionFailure::InvalidEvidence)
+    ));
+    assert!(!format!("{result:?}").contains("bounded-canary"));
+    assert_eq!(connector.semantic_calls()?, vec!["insert_text"]);
+    let exit = runtime.shutdown().await;
+    assert_eq!(exit.actor_exit, Some(AtspiActorExit::Stopped));
+    assert!(exit.mirror_stopped);
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_exact_match_evidence_on_length_only_is_rejected_after_dispatch()
+-> Result<(), Box<dyn Error>> {
+    let desktop_id = DesktopId::new();
+    let desktop_generation = DesktopGeneration::new();
+    let connector = FakeConnector::new(vec![Ok(vec![app(":1.168")?, semantic_child(":1.168")?])])
+        .with_exact_text_matches([Some(true)]);
+    let runtime = spawn_accessibility_runtime_with_connector(
+        configured(None)?,
+        desktop_id,
+        desktop_generation,
+        connector.clone(),
+    )?;
+    wait_for_runtime(&runtime.reader(), |snapshot| snapshot.mirror_ready).await?;
+    let page = runtime
+        .plane()
+        .list_for(
+            "unexpected-exact-evidence-test",
+            list_request(desktop_id, desktop_generation),
+        )
+        .await
+        .map_err(|error| format!("unexpected exact evidence list failed: {error:?}"))?;
+    let element = page
+        .elements
+        .into_iter()
+        .find(|entry| entry.snapshot.role.role == xenoteer_protocol::ElementRole::Entry)
+        .ok_or("missing unexpected exact evidence element")?
+        .snapshot
+        .element;
+    let result = execute_semantic_action(
+        &runtime.semantic_runtime(),
+        Command::ElementSetText(ElementSetTextCommand {
+            element,
+            text: SemanticTextInput::new("length-only-canary")?,
+            selection: EditableTextSelectionPolicy::CollapseAfter,
+            verify_length_only: true,
+            postcondition: None,
+        }),
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(SemanticActionFailure::InvalidEvidence)
+    ));
+    assert!(!format!("{result:?}").contains("length-only-canary"));
+    assert_eq!(connector.semantic_calls()?, vec!["set_text"]);
+    let exit = runtime.shutdown().await;
+    assert_eq!(exit.actor_exit, Some(AtspiActorExit::Stopped));
+    assert!(exit.mirror_stopped);
+    Ok(())
+}
+
+#[tokio::test]
 async fn secret_text_insert_retries_forward_observation_revision_before_dispatch()
 -> Result<(), Box<dyn Error>> {
     const SECRET: &str = "phase5-forward-revision-secret";
@@ -1403,7 +1713,7 @@ async fn unknown_protection_text_insert_fails_closed_and_keeps_errors_secret_fre
         SemanticTextInsertOptions {
             insertion_point: SemanticTextInsertionPoint::Caret,
             selection: EditableTextSelectionPolicy::CollapseAfter,
-            verify_length_only: true,
+            verify_length_only: false,
             postcondition: None,
         },
         tokio::time::Instant::now() + Duration::from_secs(2),

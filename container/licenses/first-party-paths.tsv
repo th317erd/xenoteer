@@ -39,9 +39,6 @@ schemas/*	Apache-2.0	schemas/LICENSE
 scripts/api/*	Apache-2.0	docs/api/LICENSE|docs/api/NOTICE
 scripts/conformance/*	Apache-2.0	conformance/LICENSE|conformance/NOTICE
 scripts/packages/*	Apache-2.0	crates/xenoteer-protocol/LICENSE|crates/xenoteer-protocol/NOTICE|crates/xenoteer-sdk/LICENSE|crates/xenoteer-sdk/NOTICE
-scripts/sdk/quickstarts/rust/*	Apache-2.0	crates/xenoteer-sdk/LICENSE|crates/xenoteer-sdk/NOTICE
-scripts/sdk/quickstarts/typescript/*	Apache-2.0	packages/typescript/LICENSE|packages/typescript/NOTICE
-scripts/sdk/quickstarts/python/*	Apache-2.0	packages/python/LICENSE|packages/python/NOTICE
 scripts/*	BUSL-1.1	LICENSE
 tests/*	BUSL-1.1	LICENSE
 xenoteer.example.toml	BUSL-1.1	LICENSE

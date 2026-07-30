@@ -107,8 +107,28 @@ Plan: `plans/15-phased-implementation.md`
 - [ ] Run every public quick-start against one immutable release-candidate image
       and record the exact image IDs
   - [x] Add the staged crate/npm/wheel/sdist installation gate, exact
-        source-tree/image identity fence, no-override admission, per-variant
-        typed-auth failure proof, and bounded cleanup contracts
+      source-tree/image identity fence, no-override admission, per-variant
+      typed-auth failure proof, and bounded cleanup contracts
+    - [x] Prove the derived fixture did not shadow the production daemon or
+        first-party runtime/config by copying and hashing inherited files from
+        stopped base/fixture containers; labels and a layer prefix alone are
+        insufficient
+  - [x] Ship one canonical ten-behavior executable in each public package and
+        require artifact-only execution, fresh per-variant fixture state,
+        derived-to-production image ancestry, explicit view-only origin policy,
+        real failed-postcondition screenshot evidence, and cleanup
+  - [x] Add content-private exact semantic Unicode verification for unprotected
+      text targets, retain length-only protected-field behavior, and require
+      all three package examples to prove the exact-verification evidence
+    - [x] Bound hostile AT-SPI `Text.GetText` replies at the earliest zbus
+        boundary before typed decoding or a second content allocation; retain
+        and document zbus's unavoidable upstream 128 MiB raw-message cap
+  - [x] Correct Python application-argument and nested text-target SDK wire
+      serialization with focused regressions
+  - [x] Close adversarial package-example findings: bounded Rust scoped-control
+      cleanup after renewal failure, honest cancellation semantics, complete
+      viewer-ticket metadata proof, and cleanup that preserves independent
+      artifact/process failures
   - [ ] Build the final coherent Phase 6 image, run the gate against its exact
         immutable ID, and record only that successful image/package identity
 - [ ] Complete Phase 6 closure review, update implementation details, and commit

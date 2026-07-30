@@ -28,7 +28,7 @@ from typing import Literal, NoReturn
 
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 10
 PACKAGE_COMMAND_TIMEOUT_SECONDS = 120
-QUICKSTART_COMMAND_TIMEOUT_SECONDS = 10
+QUICKSTART_COMMAND_TIMEOUT_SECONDS = 120
 READINESS_TIMEOUT_SECONDS = 90
 HEAVY_BUILD_LOCK = "/tmp/codex/xenoteer-heavy-build.lock"
 IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -36,6 +36,61 @@ LOOPBACK_PORT = re.compile(r"127\.0\.0\.1:([0-9]{1,5})\Z")
 DAEMON_OVERRIDE_ENVIRONMENTS = (
     "XENOTEERD_BINARY_OVERRIDE",
     "XENOTEER_TEST_DAEMON_BINARY",
+)
+REQUIRED_BEHAVIORS = (
+    "status-capabilities",
+    "scoped-lease-fixture-launch",
+    "exact-window-element",
+    "semantic-invoke",
+    "smooth-physical-click-postcondition",
+    "unicode-text-strategy",
+    "screenshot-on-failure",
+    "reconnect-known-command",
+    "stale-reference-restart",
+    "view-only-browser-ticket",
+)
+FIRST_PARTY_MANIFEST_PATH = "/usr/share/doc/xenoteer/first-party-files.tsv"
+RUNTIME_EVIDENCE_PATHS = (
+    "/etc/s6-overlay/s6-rc.d",
+    "/etc/xenoteer",
+    "/usr/local/libexec/xenoteer",
+    "/usr/share/doc/xenoteer",
+    "/usr/share/novnc/mandatory.json",
+    "/usr/share/xenoteer",
+    "/etc/at-spi2/accessibility.conf",
+    "/etc/dbus-1/session-local.conf",
+    "/usr/local/bin/xenoteerd",
+    "/usr/local/bin/xenoteer-processd",
+)
+CRITICAL_RUNTIME_PATHS = (
+    "/etc/s6-overlay/s6-rc.d",
+    "/etc/xenoteer",
+    "/usr/local/libexec/xenoteer",
+    "/usr/share/novnc/mandatory.json",
+    "/usr/share/xenoteer",
+    "/etc/at-spi2/accessibility.conf",
+    "/etc/dbus-1/session-local.conf",
+    "/usr/local/bin/xenoteerd",
+    "/usr/local/bin/xenoteer-processd",
+)
+FIXTURE_IMAGE_PATH = "/usr/share/xenoteer/fixtures/desktop-apps"
+FIXTURE_REPOSITORY_PATH = "container/rootfs/usr/share/xenoteer/fixtures/desktop-apps"
+FIXTURE_ARTIFACT_LOCK_IMAGE_PATH = (
+    "/usr/share/doc/xenoteer/desktop-app-artifacts.lock"
+)
+FIXTURE_ARTIFACT_LOCK_REPOSITORY_PATH = (
+    "container/fixtures/desktop-apps/artifacts.lock"
+)
+FIXTURE_DEBIAN_SNAPSHOT = "20260719T000000Z"
+FIXTURE_ONLY_LABELS = frozenset(
+    {
+        "com.aeor.xenoteer.distribution-scope",
+        "com.aeor.xenoteer.fixture",
+        "com.aeor.xenoteer.fixture.debian-snapshot",
+        "com.aeor.xenoteer.fixture.base-image-id",
+        "com.aeor.xenoteer.fixture.electron-version",
+        "com.aeor.xenoteer.fixture.electron-linux-x64-sha256",
+    }
 )
 
 
@@ -98,6 +153,18 @@ class BuildIdentity:
         if not self.use_sudo:
             return low_priority
         return ["sudo", "-H", "-u", f"#{self.uid}", "--", *low_priority]
+
+
+@dataclasses.dataclass(frozen=True)
+class ExactFixtureImage:
+    """Derived fixture plus the exact production image/source it extends."""
+
+    fixture_id: str
+    production_id: str
+    source_tree_sha256: str
+    fixture_debian_snapshot: str = ""
+    electron_version: str = ""
+    electron_linux_x64_sha256: str = ""
 
 
 class CommandExecutor:
@@ -283,6 +350,39 @@ def safe_diagnostic(value: str) -> str:
     return redacted[:512] + "\n... diagnostic truncated ...\n" + redacted[-1_500:]
 
 
+def validate_quickstart_output(
+    output: str,
+    *,
+    language: str,
+    expect_auth_failure: bool,
+) -> None:
+    """Require exact, non-label-derived completion evidence from one variant."""
+
+    if not language or re.fullmatch(r"[a-z-]+", language) is None:
+        raise GateError("quick-start language label is invalid")
+    lines = output.splitlines()
+    terminal = (
+        f"quickstart-ok language={language} "
+        f"mode={'auth-failure' if expect_auth_failure else 'success'}"
+    )
+    if expect_auth_failure:
+        if lines != [terminal]:
+            raise GateError(
+                f"{language} authentication probe emitted unexpected completion evidence"
+            )
+        return
+    expected = [
+        f"quickstart-ok language={language} behavior={behavior}"
+        for behavior in REQUIRED_BEHAVIORS
+    ]
+    expected.append(terminal)
+    if lines != expected:
+        raise GateError(
+            f"{language} did not execute every required behavior exactly once "
+            "in canonical order"
+        )
+
+
 def reject_daemon_overrides(environment: Mapping[str, str]) -> None:
     """Forbid diagnostic binary substitution in release qualification."""
 
@@ -406,6 +506,362 @@ def file_sha256(path: Path) -> str:
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _image_path(value: str, *, description: str) -> PurePosixPath:
+    """Parse one canonical absolute image path without host-path ambiguity."""
+
+    if "\0" in value or "\\" in value:
+        raise GateError(f"{description} contains an unsafe image path")
+    path = PurePosixPath(value)
+    if (
+        not path.is_absolute()
+        or path.as_posix() != value
+        or any(part in ("", ".", "..") for part in path.parts[1:])
+    ):
+        raise GateError(f"{description} contains a noncanonical image path")
+    return path
+
+
+def _copied_image_path(root: Path, absolute_path: str) -> Path:
+    path = _image_path(absolute_path, description="runtime evidence")
+    return root.joinpath(*path.parts[1:])
+
+
+def _is_image_path_within(path: PurePosixPath, scope: PurePosixPath) -> bool:
+    return path.parts[: len(scope.parts)] == scope.parts
+
+
+def _parse_first_party_manifest(raw: bytes) -> dict[str, str]:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise GateError("first-party manifest is not UTF-8") from error
+    if not text.endswith("\n"):
+        raise GateError("first-party manifest is not newline terminated")
+    lines = text.splitlines()
+    if not lines or lines[0] != (
+        "path\tsha256\tlicense_expression\tlicense_evidence"
+    ):
+        raise GateError("first-party manifest has an invalid header")
+    entries: dict[str, str] = {}
+    ordered_paths: list[str] = []
+    evidence_scopes = tuple(
+        _image_path(path, description="runtime evidence scope")
+        for path in RUNTIME_EVIDENCE_PATHS
+    )
+    for line in lines[1:]:
+        fields = line.split("\t")
+        if len(fields) != 4:
+            raise GateError("first-party manifest has a malformed record")
+        path_text, digest, license_expression, evidence_text = fields
+        path = _image_path(path_text, description="first-party manifest")
+        evidence = _image_path(
+            evidence_text,
+            description="first-party license evidence",
+        )
+        del evidence
+        if (
+            re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or not license_expression
+            or path_text in entries
+            or not any(
+                _is_image_path_within(path, scope) for scope in evidence_scopes
+            )
+        ):
+            raise GateError("first-party manifest has an invalid record")
+        entries[path_text] = digest
+        ordered_paths.append(path_text)
+    if not entries or ordered_paths != sorted(ordered_paths):
+        raise GateError("first-party manifest is empty or nondeterministically ordered")
+    return entries
+
+
+def _validate_symlink_target(path: PurePosixPath, target: str) -> None:
+    if "\0" in target or "\\" in target or target == "":
+        raise GateError(f"critical runtime symlink has an unsafe target: {path}")
+    target_path = PurePosixPath(target)
+    if target_path.is_absolute():
+        _image_path(target, description="critical runtime symlink")
+        return
+
+    resolved = list(path.parent.parts[1:])
+    for part in target_path.parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not resolved:
+                raise GateError(
+                    f"critical runtime symlink escapes the image root: {path}"
+                )
+            resolved.pop()
+        else:
+            resolved.append(part)
+
+
+def _critical_tree_inventory(
+    root: Path,
+    absolute_path: str,
+    *,
+    excluded_paths: Sequence[str] = (),
+) -> dict[str, tuple[str, int, str]]:
+    """Fingerprint one copied image tree without following symlinks."""
+
+    start_image_path = _image_path(
+        absolute_path,
+        description="critical runtime path",
+    )
+    start = _copied_image_path(root, absolute_path)
+    excluded = tuple(
+        _image_path(path, description="critical runtime exclusion")
+        for path in excluded_paths
+    )
+    if not start.exists() and not start.is_symlink():
+        raise GateError(f"copied critical runtime path is missing: {absolute_path}")
+
+    inventory: dict[str, tuple[str, int, str]] = {}
+    pending = [(start_image_path, start)]
+    while pending:
+        image_path, host_path = pending.pop()
+        if any(_is_image_path_within(image_path, prefix) for prefix in excluded):
+            continue
+        metadata = host_path.lstat()
+        mode = stat.S_IMODE(metadata.st_mode)
+        key = image_path.as_posix()
+        if stat.S_ISLNK(metadata.st_mode):
+            target = os.readlink(host_path)
+            _validate_symlink_target(image_path, target)
+            inventory[key] = ("symlink", mode, target)
+        elif stat.S_ISREG(metadata.st_mode):
+            inventory[key] = ("file", mode, file_sha256(host_path))
+        elif stat.S_ISDIR(metadata.st_mode):
+            inventory[key] = ("directory", mode, "")
+            for child in sorted(host_path.iterdir(), reverse=True):
+                pending.append((image_path / child.name, child))
+        else:
+            raise GateError(f"critical runtime tree contains a special file: {key}")
+    return inventory
+
+
+def validate_copied_runtime_parity(
+    production_root: Path,
+    fixture_root: Path,
+    *,
+    critical_paths: Sequence[str] = CRITICAL_RUNTIME_PATHS,
+) -> None:
+    """Validate manifest truth and exact inherited runtime parity host-side."""
+
+    production_manifest = _copied_image_path(
+        production_root,
+        FIRST_PARTY_MANIFEST_PATH,
+    )
+    fixture_manifest = _copied_image_path(
+        fixture_root,
+        FIRST_PARTY_MANIFEST_PATH,
+    )
+    if (
+        production_manifest.is_symlink()
+        or fixture_manifest.is_symlink()
+        or not production_manifest.is_file()
+        or not fixture_manifest.is_file()
+    ):
+        raise GateError("first-party manifest is missing or not a regular file")
+    production_raw = production_manifest.read_bytes()
+    fixture_raw = fixture_manifest.read_bytes()
+    if production_raw != fixture_raw:
+        raise GateError("fixture first-party manifest differs from production")
+    entries = _parse_first_party_manifest(production_raw)
+    for path, expected_digest in entries.items():
+        for label, root in (
+            ("production", production_root),
+            ("fixture", fixture_root),
+        ):
+            copied = _copied_image_path(root, path)
+            try:
+                actual_digest = file_sha256(copied)
+            except GateError as error:
+                raise GateError(
+                    f"{label} first-party manifest path is not a regular file: {path}"
+                ) from error
+            if actual_digest != expected_digest:
+                raise GateError(
+                    f"{label} first-party manifest hash mismatch: {path}"
+                )
+
+    for path in critical_paths:
+        exclusions = (FIXTURE_IMAGE_PATH,) if path == "/usr/share/xenoteer" else ()
+        production_inventory = _critical_tree_inventory(
+            production_root,
+            path,
+            excluded_paths=exclusions,
+        )
+        fixture_inventory = _critical_tree_inventory(
+            fixture_root,
+            path,
+            excluded_paths=exclusions,
+        )
+        if production_inventory != fixture_inventory:
+            raise GateError(f"fixture changed the critical runtime tree: {path}")
+
+
+def _repository_fixture_inventory(
+    root: Path,
+) -> dict[str, tuple[str, int, str]]:
+    if root.is_symlink() or not root.is_dir():
+        raise GateError("desktop fixture source tree is missing or unsafe")
+    inventory: dict[str, tuple[str, int, str]] = {}
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        relative_directory = current.relative_to(root).as_posix()
+        inventory[relative_directory] = (
+            "directory",
+            stat.S_IMODE(current.lstat().st_mode),
+            "",
+        )
+        for child in sorted(current.iterdir(), reverse=True):
+            metadata = child.lstat()
+            relative = child.relative_to(root).as_posix()
+            if stat.S_ISDIR(metadata.st_mode):
+                pending.append(child)
+            elif stat.S_ISREG(metadata.st_mode):
+                inventory[relative] = (
+                    "file",
+                    stat.S_IMODE(metadata.st_mode),
+                    file_sha256(child),
+                )
+            else:
+                raise GateError(
+                    f"desktop fixture source contains a symlink or special file: "
+                    f"{relative}"
+                )
+    if not inventory:
+        raise GateError("desktop fixture source tree is empty")
+    return inventory
+
+
+def validate_fixture_repository_inputs(
+    fixture_root: Path,
+    repository_root: Path,
+    image: ExactFixtureImage | None = None,
+) -> None:
+    """Bind fixture-only image inputs to the source tree used for packaging."""
+
+    copied_fixtures = _copied_image_path(fixture_root, FIXTURE_IMAGE_PATH)
+    repository_fixtures = repository_root / FIXTURE_REPOSITORY_PATH
+    if _repository_fixture_inventory(
+        copied_fixtures
+    ) != _repository_fixture_inventory(repository_fixtures):
+        raise GateError("desktop fixture image sources differ from the repository")
+
+    copied_lock = _copied_image_path(
+        fixture_root,
+        FIXTURE_ARTIFACT_LOCK_IMAGE_PATH,
+    )
+    repository_lock = repository_root / FIXTURE_ARTIFACT_LOCK_REPOSITORY_PATH
+    if (
+        file_sha256(copied_lock) != file_sha256(repository_lock)
+        or copied_lock.read_bytes() != repository_lock.read_bytes()
+    ):
+        raise GateError("desktop fixture artifact lock differs from the repository")
+    if image is not None:
+        values: dict[str, str] = {}
+        for line in repository_lock.read_text(encoding="utf-8").splitlines():
+            if not line or line.startswith("#"):
+                continue
+            key, separator, value = line.partition("=")
+            if not separator or not key or not value or key in values:
+                raise GateError("desktop fixture artifact lock is malformed")
+            values[key] = value
+        if (
+            set(values)
+            != {
+                "ELECTRON_VERSION",
+                "ELECTRON_LINUX_X64_URL",
+                "ELECTRON_LINUX_X64_SHA256",
+            }
+            or values["ELECTRON_VERSION"] != image.electron_version
+            or values["ELECTRON_LINUX_X64_SHA256"]
+            != image.electron_linux_x64_sha256
+        ):
+            raise GateError("desktop fixture labels differ from the artifact lock")
+
+
+def _copy_stopped_image_runtime(
+    executor: CommandExecutor,
+    image_id: str,
+    destination: Path,
+) -> None:
+    """Copy audited paths from a newly created container without executing it."""
+
+    image_id = validate_image_id(image_id)
+    destination.mkdir(parents=True, exist_ok=False)
+    container_name = f"xenoteer-runtime-parity-{secrets.token_hex(12)}"
+    with ContainerGuard(executor, container_name) as guard:
+        created = executor.run(
+            ["docker", "create", "--name", container_name, image_id],
+            timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if created.returncode != 0:
+            raise GateError("could not create stopped runtime-evidence container")
+        guard.mark_created()
+        copied_image_id = _docker_inspect(
+            executor,
+            ["inspect", container_name, "--format", "{{.Image}}"],
+        )
+        running = _docker_inspect(
+            executor,
+            ["inspect", container_name, "--format", "{{.State.Running}}"],
+        )
+        if copied_image_id != image_id or running != "false":
+            raise GateError("runtime-evidence container identity or state changed")
+        for absolute_path in RUNTIME_EVIDENCE_PATHS:
+            target = _copied_image_path(destination, absolute_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            copied = executor.run(
+                [
+                    "docker",
+                    "cp",
+                    f"{container_name}:{absolute_path}",
+                    str(target),
+                ],
+                timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS,
+                check=False,
+            )
+            if copied.returncode != 0:
+                raise GateError(
+                    f"could not copy required runtime evidence: {absolute_path}"
+                )
+        final_image_id = _docker_inspect(
+            executor,
+            ["inspect", container_name, "--format", "{{.Image}}"],
+        )
+        final_running = _docker_inspect(
+            executor,
+            ["inspect", container_name, "--format", "{{.State.Running}}"],
+        )
+        if final_image_id != image_id or final_running != "false":
+            raise GateError(
+                "runtime-evidence container changed identity or ran during collection"
+            )
+
+
+def validate_fixture_runtime_parity(
+    executor: CommandExecutor,
+    image: ExactFixtureImage,
+    destination: Path,
+    repository_root: Path,
+) -> None:
+    """Copy stopped rootfs evidence and prove production/fixture parity."""
+
+    destination.mkdir(parents=True, exist_ok=False)
+    production_root = destination / "production"
+    fixture_root = destination / "fixture"
+    _copy_stopped_image_runtime(executor, image.production_id, production_root)
+    _copy_stopped_image_runtime(executor, image.fixture_id, fixture_root)
+    validate_copied_runtime_parity(production_root, fixture_root)
+    validate_fixture_repository_inputs(fixture_root, repository_root, image)
 
 
 def _safe_archive_relative(member_name: str, expected_prefix: str) -> PurePosixPath:
@@ -750,15 +1206,19 @@ def prepare_installed_quickstarts(
         "publish = false\n\n"
         "[dependencies]\n"
         f"xenoteer-sdk = {{ path = {json.dumps(str(sdk_root))} }}\n"
+        'serde_json = "=1.0.151"\n'
         'tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "time"] }\n\n'
         "[patch.crates-io]\n"
         f"xenoteer-protocol = {{ path = {json.dumps(str(protocol_root))} }}\n\n"
         "[workspace]\n",
     )
     (rust_consumer / "src").mkdir()
-    shutil.copyfile(
-        repository_root / "scripts" / "sdk" / "quickstarts" / "rust" / "main.rs",
+    rust_example = sdk_root / "examples" / "phase6_behaviors.rs"
+    if not rust_example.is_file():
+        raise GateError("staged Rust crate omitted examples/phase6_behaviors.rs")
+    _write_text(
         rust_consumer / "src" / "main.rs",
+        rust_example.read_text(encoding="utf-8"),
     )
 
     typescript_root = installs / "typescript"
@@ -766,24 +1226,11 @@ def prepare_installed_quickstarts(
         typescript_root / "package.json",
         '{"name":"xenoteer-public-quickstart","private":true,"type":"module"}\n',
     )
-    shutil.copyfile(
-        repository_root
-        / "scripts"
-        / "sdk"
-        / "quickstarts"
-        / "typescript"
-        / "quickstart.mjs",
-        typescript_root / "quickstart.mjs",
-    )
 
-    python_source = (
-        repository_root / "scripts" / "sdk" / "quickstarts" / "python" / "quickstart.py"
-    )
     wheel_root = installs / "python-wheel"
     sdist_root = installs / "python-sdist"
     for root in (wheel_root, sdist_root):
         root.mkdir()
-        shutil.copyfile(python_source, root / "quickstart.py")
     chown_tree(workspace, identity)
 
     cargo_binary = identity.home / ".cargo" / "bin" / "cargo"
@@ -896,16 +1343,28 @@ def prepare_installed_quickstarts(
             timeout=PACKAGE_COMMAND_TIMEOUT_SECONDS,
             cwd=root,
         )
-        python_commands.append((sys.executable, str(root / "quickstart.py")))
+        python_commands.append(
+            (sys.executable, "-m", "xenoteer.examples.phase6_behaviors")
+        )
         python_roots.append(site)
 
     rust_binary = rust_target / "debug" / "xenoteer-public-quickstart"
     if not rust_binary.is_file():
         raise GateError("staged Rust quick-start build omitted its binary")
+    typescript_example = (
+        typescript_root
+        / "node_modules"
+        / "@xenoteer"
+        / "sdk"
+        / "examples"
+        / "phase6-behaviors.mjs"
+    )
+    if not typescript_example.is_file():
+        raise GateError("staged npm tarball omitted examples/phase6-behaviors.mjs")
     return InstalledQuickstarts(
         (str(rust_binary),),
         rust_artifacts,
-        ("node", str(typescript_root / "quickstart.mjs")),
+        ("node", str(typescript_example)),
         typescript_root / "node_modules" / "@xenoteer" / "sdk",
         python_commands[0],
         python_roots[0],
@@ -924,31 +1383,172 @@ def _docker_inspect(
     ).stdout.strip()
 
 
+def validate_fixture_image_metadata(
+    fixture_id: str,
+    production_id: str,
+    inspected_json: str,
+) -> ExactFixtureImage:
+    """Require the exact desktop fixture to extend one exact production image."""
+
+    fixture_id = validate_image_id(fixture_id)
+    production_id = validate_image_id(production_id)
+    try:
+        values = json.loads(inspected_json)
+    except json.JSONDecodeError as error:
+        raise GateError("Docker returned malformed fixture image metadata") from error
+    if (
+        not isinstance(values, list)
+        or len(values) != 2
+        or not all(isinstance(value, dict) for value in values)
+    ):
+        raise GateError("Docker omitted exact production/fixture image metadata")
+    production, fixture = values
+    if production.get("Id") != production_id or fixture.get("Id") != fixture_id:
+        raise GateError("fixture or production image identity changed during inspection")
+    production_config = production.get("Config")
+    fixture_config = fixture.get("Config")
+    production_rootfs = production.get("RootFS")
+    fixture_rootfs = fixture.get("RootFS")
+    if not isinstance(production_config, dict) or not isinstance(
+        fixture_config,
+        dict,
+    ):
+        raise GateError("Docker omitted production or fixture runtime configuration")
+    production_labels = production_config.get("Labels", {})
+    fixture_labels = fixture_config.get("Labels", {})
+    if (
+        not isinstance(production_labels, dict)
+        or not isinstance(fixture_labels, dict)
+        or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in production_labels.items()
+        )
+        or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in fixture_labels.items()
+        )
+    ):
+        raise GateError("Docker returned malformed production or fixture labels")
+    if (
+        set(fixture_labels) - set(production_labels) != FIXTURE_ONLY_LABELS
+        or any(
+            fixture_labels.get(key) != value
+            for key, value in production_labels.items()
+        )
+    ):
+        raise GateError("fixture changed inherited labels or added unknown labels")
+    fixture_debian_snapshot = fixture_labels.get(
+        "com.aeor.xenoteer.fixture.debian-snapshot"
+    )
+    electron_version = fixture_labels.get(
+        "com.aeor.xenoteer.fixture.electron-version"
+    )
+    electron_linux_x64_sha256 = fixture_labels.get(
+        "com.aeor.xenoteer.fixture.electron-linux-x64-sha256"
+    )
+    if (
+        fixture_labels.get("com.aeor.xenoteer.distribution-scope")
+        != "test-only-non-distributable"
+        or fixture_labels.get("com.aeor.xenoteer.fixture")
+        != "phase-2-desktop-apps"
+        or fixture_labels.get("com.aeor.xenoteer.fixture.base-image-id")
+        != production_id
+        or fixture_debian_snapshot != FIXTURE_DEBIAN_SNAPSHOT
+        or not isinstance(electron_version, str)
+        or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", electron_version) is None
+        or not isinstance(electron_linux_x64_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", electron_linux_x64_sha256) is None
+    ):
+        raise GateError("image is not the exact recorded desktop fixture derivation")
+    inherited_production_config = dict(production_config)
+    inherited_fixture_config = dict(fixture_config)
+    inherited_production_config.pop("Labels", None)
+    inherited_fixture_config.pop("Labels", None)
+    if inherited_fixture_config != inherited_production_config:
+        raise GateError("fixture changed inherited Docker runtime configuration")
+    source_tree_sha256 = production_labels.get(
+        "com.aeor.xenoteer.source-tree.sha256"
+    )
+    if (
+        not isinstance(source_tree_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", source_tree_sha256) is None
+    ):
+        raise GateError("production image omitted its exact source-tree hash label")
+    if (
+        fixture_labels.get("com.aeor.xenoteer.source-tree.sha256")
+        != source_tree_sha256
+    ):
+        raise GateError("fixture image did not retain the production source identity")
+    production_layers = (
+        production_rootfs.get("Layers")
+        if isinstance(production_rootfs, dict)
+        else None
+    )
+    fixture_layers = (
+        fixture_rootfs.get("Layers")
+        if isinstance(fixture_rootfs, dict)
+        else None
+    )
+    if (
+        not isinstance(production_layers, list)
+        or not production_layers
+        or not all(isinstance(layer, str) and layer for layer in production_layers)
+        or not isinstance(fixture_layers, list)
+        or len(fixture_layers) <= len(production_layers)
+        or fixture_layers[: len(production_layers)] != production_layers
+    ):
+        raise GateError("fixture image does not preserve its exact production layer prefix")
+    return ExactFixtureImage(
+        fixture_id,
+        production_id,
+        source_tree_sha256,
+        fixture_debian_snapshot,
+        electron_version,
+        electron_linux_x64_sha256,
+    )
+
+
 def resolve_exact_image(
     executor: CommandExecutor,
     image_reference: str,
-) -> tuple[str, str]:
-    """Resolve one image once and read its recorded source identity."""
+) -> ExactFixtureImage:
+    """Resolve one derived fixture and its production base exactly once."""
 
-    image_id = validate_image_id(
+    fixture_id = validate_image_id(
         _docker_inspect(
             executor,
             ["image", "inspect", image_reference, "--format", "{{.Id}}"],
         )
     )
-    source_tree_sha256 = _docker_inspect(
+    fixture_kind = _docker_inspect(
         executor,
         [
             "image",
             "inspect",
-            image_id,
+            fixture_id,
             "--format",
-            '{{index .Config.Labels "com.aeor.xenoteer.source-tree.sha256"}}',
+            '{{index .Config.Labels "com.aeor.xenoteer.fixture"}}',
         ],
     )
-    if re.fullmatch(r"[0-9a-f]{64}", source_tree_sha256) is None:
-        raise GateError("release-candidate image omitted its exact source-tree hash label")
-    return image_id, source_tree_sha256
+    if fixture_kind != "phase-2-desktop-apps":
+        raise GateError("release candidate is not the desktop-app fixture image")
+    production_id = validate_image_id(
+        _docker_inspect(
+            executor,
+            [
+                "image",
+                "inspect",
+                fixture_id,
+                "--format",
+                '{{index .Config.Labels "com.aeor.xenoteer.fixture.base-image-id"}}',
+            ],
+        )
+    )
+    inspected = executor.run(
+        ["docker", "image", "inspect", production_id, fixture_id],
+        timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    ).stdout
+    return validate_fixture_image_metadata(fixture_id, production_id, inspected)
 
 
 def _root_owned_token_supported(executor: CommandExecutor) -> bool:
@@ -1026,12 +1626,16 @@ def run_one_quickstart(
     if any(secret in combined for secret in forbidden_tokens):
         raise GateError(f"{name} quick-start exposed a bearer canary")
     mode = "auth-failure" if expect_auth_failure else "success"
-    marker = f"quickstart-ok language={name} mode={mode}"
-    if result.returncode != 0 or marker not in result.stdout:
+    if result.returncode != 0:
         raise GateError(
             f"{name} {mode} quick-start failed: "
             f"{safe_diagnostic(combined) or 'no safe diagnostic'}"
         )
+    validate_quickstart_output(
+        result.stdout,
+        language=name,
+        expect_auth_failure=expect_auth_failure,
+    )
 
 
 def assert_container_logs_safe(
@@ -1057,10 +1661,10 @@ def run_live_gate(
     workspace: Path,
     artifacts: PublicArtifacts,
     installed: InstalledQuickstarts,
-    image_id: str,
+    image: ExactFixtureImage,
     executor: CommandExecutor,
 ) -> None:
-    """Exercise every archive variant against one exact running image."""
+    """Exercise every archive variant in fresh exact-fixture state."""
 
     token = "PHASE6_PUBLIC_QUICKSTART_TOKEN_" + secrets.token_hex(24)
     wrong_token = "PHASE6_PUBLIC_QUICKSTART_WRONG_" + secrets.token_hex(24)
@@ -1072,55 +1676,90 @@ def run_live_gate(
             "run as root or use rootless Docker so the token maps to container UID 0"
         )
 
-    container_name = f"xenoteer-phase6-quickstart-{os.getpid()}-{secrets.token_hex(4)}"
-    with ContainerGuard(executor, container_name) as guard:
-        # Arm cleanup before Docker can create the named container and then lose
-        # its response or exceed the subprocess deadline.
-        guard.mark_created()
-        executor.run(
-            [
-                "docker",
-                "run",
-                "--detach",
-                "--name",
-                container_name,
-                "--cpus",
-                "2",
-                "--memory",
-                "6g",
-                "--pids-limit",
-                "512",
-                "--shm-size",
-                "4g",
-                "--log-driver",
-                "json-file",
-                "--log-opt",
-                "max-size=2m",
-                "--log-opt",
-                "max-file=1",
-                "--publish",
-                "127.0.0.1::8080",
-                "--volume",
-                f"{token_file}:/run/secrets/xenoteer_api_token:ro",
-                image_id,
-            ],
-            timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    for name, command, installed_root in installed.variants():
+        container_name = (
+            f"xenoteer-phase6-{name}-{os.getpid()}-{secrets.token_hex(4)}"
         )
-        running_image = validate_image_id(
-            _docker_inspect(
-                executor,
-                ["inspect", container_name, "--format", "{{.Image}}"],
+        with ContainerGuard(executor, container_name) as guard:
+            # Arm cleanup before Docker can create the named container and then
+            # lose its response or exceed the subprocess deadline.
+            guard.mark_created()
+            executor.run(
+                [
+                    "docker",
+                    "run",
+                    "--detach",
+                    "--name",
+                    container_name,
+                    "--cpus",
+                    "2",
+                    "--memory",
+                    "6g",
+                    "--pids-limit",
+                    "512",
+                    "--shm-size",
+                    "4g",
+                    "--tmpfs",
+                    "/run/xenoteer/artifacts:rw,noexec,nosuid,nodev,"
+                    "size=512m,mode=0700,uid=1001,gid=1001",
+                    "--log-driver",
+                    "json-file",
+                    "--log-opt",
+                    "max-size=2m",
+                    "--log-opt",
+                    "max-file=1",
+                    "--publish",
+                    "127.0.0.1::8080",
+                    "--env",
+                    "DESKTOP_PROFILE=bare",
+                    "--env",
+                    "XENOTEER__VIEWER__ENABLED=true",
+                    "--env",
+                    'XENOTEER__VIEWER__ALLOWED_ORIGINS=["https://viewer.example"]',
+                    "--volume",
+                    f"{token_file}:/run/secrets/xenoteer_api_token:ro",
+                    image.fixture_id,
+                ],
+                timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS,
             )
-        )
-        if running_image != image_id:
-            raise GateError("Docker container did not retain the resolved immutable image ID")
-        port = parse_loopback_port(
-            _docker_inspect(executor, ["port", container_name, "8080/tcp"])
-        )
-        api_base = f"http://127.0.0.1:{port}"
-        wait_until_ready(executor, container_name, api_base)
-
-        for name, command, installed_root in installed.variants():
+            running_image = validate_image_id(
+                _docker_inspect(
+                    executor,
+                    ["inspect", container_name, "--format", "{{.Image}}"],
+                )
+            )
+            if running_image != image.fixture_id:
+                raise GateError(
+                    "Docker container did not retain the resolved fixture image ID"
+                )
+            port = parse_loopback_port(
+                _docker_inspect(executor, ["port", container_name, "8080/tcp"])
+            )
+            api_base = f"http://127.0.0.1:{port}"
+            wait_until_ready(executor, container_name, api_base)
+            fixture_path = (
+                "/usr/share/xenoteer/fixtures/desktop-apps/gtk3-fixture.py"
+            )
+            executor.run(
+                ["docker", "exec", container_name, "test", "-x", fixture_path],
+                timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS,
+            )
+            executor.run(
+                [
+                    "docker",
+                    "exec",
+                    "--detach",
+                    "--user",
+                    "1000",
+                    container_name,
+                    "/command/s6-envdir",
+                    "-f",
+                    "-L",
+                    "/run/xenoteer/env",
+                    fixture_path,
+                ],
+                timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS,
+            )
             run_one_quickstart(
                 executor,
                 name=name,
@@ -1142,32 +1781,35 @@ def run_live_gate(
                 forbidden_tokens=(token, wrong_token),
             )
 
-        assert_container_logs_safe(
-            executor,
-            container_name,
-            (token, wrong_token),
-        )
-
-        stop = executor.run(
-            ["docker", "stop", "--time", "8", container_name],
-            timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS,
-            check=False,
-        )
-        if stop.returncode != 0:
-            raise GateError("release-candidate container did not stop within the cleanup bound")
-        exit_code = _docker_inspect(
-            executor,
-            ["inspect", container_name, "--format", "{{.State.ExitCode}}"],
-        )
-        if exit_code != "0":
-            raise GateError(
-                f"release-candidate container returned nonzero after quick-starts: {exit_code}"
+            assert_container_logs_safe(
+                executor,
+                container_name,
+                (token, wrong_token),
             )
-        assert_container_logs_safe(
-            executor,
-            container_name,
-            (token, wrong_token),
-        )
+
+            stop = executor.run(
+                ["docker", "stop", "--time", "8", container_name],
+                timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS,
+                check=False,
+            )
+            if stop.returncode != 0:
+                raise GateError(
+                    f"{name} fixture container did not stop within the cleanup bound"
+                )
+            exit_code = _docker_inspect(
+                executor,
+                ["inspect", container_name, "--format", "{{.State.ExitCode}}"],
+            )
+            if exit_code != "0":
+                raise GateError(
+                    f"{name} fixture container returned nonzero after examples: "
+                    f"{exit_code}"
+                )
+            assert_container_logs_safe(
+                executor,
+                container_name,
+                (token, wrong_token),
+            )
 
     final_source_tree_sha256 = current_source_tree_hash(repository_root, executor)
     if final_source_tree_sha256 != artifacts.source_tree_sha256:
@@ -1181,11 +1823,11 @@ def qualify(image_reference: str) -> dict[str, str]:
     repository_root = Path(__file__).resolve().parents[2]
     executor = CommandExecutor()
     identity = BuildIdentity.current()
-    image_id, image_source_tree_sha256 = resolve_exact_image(executor, image_reference)
+    image = resolve_exact_image(executor, image_reference)
     current_hash = current_source_tree_hash(repository_root, executor)
-    if current_hash != image_source_tree_sha256:
+    if current_hash != image.source_tree_sha256:
         raise GateError(
-            "release-candidate image source identity differs from the current package tree"
+            "production image source identity differs from the current package tree"
         )
 
     with tempfile.TemporaryDirectory(
@@ -1193,6 +1835,12 @@ def qualify(image_reference: str) -> dict[str, str]:
     ) as temporary:
         workspace = Path(temporary)
         chown_tree(workspace, identity)
+        validate_fixture_runtime_parity(
+            executor,
+            image,
+            workspace / "runtime-parity",
+            repository_root,
+        )
         artifacts = stage_public_artifacts(
             repository_root,
             workspace,
@@ -1201,7 +1849,7 @@ def qualify(image_reference: str) -> dict[str, str]:
             identity,
         )
         after_staging_hash = current_source_tree_hash(repository_root, executor)
-        if after_staging_hash != image_source_tree_sha256:
+        if after_staging_hash != image.source_tree_sha256:
             raise GateError(
                 "source tree changed after the release-candidate image or during packaging"
             )
@@ -1213,7 +1861,7 @@ def qualify(image_reference: str) -> dict[str, str]:
             identity,
         )
         before_live_hash = current_source_tree_hash(repository_root, executor)
-        if before_live_hash != image_source_tree_sha256:
+        if before_live_hash != image.source_tree_sha256:
             raise GateError(
                 "source tree changed while installed quick-start consumers were prepared"
             )
@@ -1222,12 +1870,13 @@ def qualify(image_reference: str) -> dict[str, str]:
             workspace,
             artifacts,
             installed,
-            image_id,
+            image,
             executor,
         )
         return {
-            "image": image_id,
-            "source_tree": image_source_tree_sha256,
+            "fixture_image": image.fixture_id,
+            "production_image": image.production_id,
+            "source_tree": image.source_tree_sha256,
             **{
                 name: f"sha256:{digest}"
                 for name, digest in artifacts.digests().items()

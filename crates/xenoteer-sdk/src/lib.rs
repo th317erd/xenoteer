@@ -17,7 +17,11 @@ mod transport;
 
 pub use client::{Desktop, XenoteerClient};
 pub use command::{CommandHandle, CommandSubmission};
-pub use control_lease::ControlLease;
+pub use control_lease::{
+    ControlLease, ControlScopeCallbackAbort, ControlScopeCleanupError, ControlScopeError,
+    ControlScopeFuture, MAX_CONTROL_SCOPE_RENEWAL_FAILURE_GRACE, ScopedCommandSubmission,
+    ScopedControl,
+};
 pub use domains::{
     Accessibility, Applications, Artifacts, Capture, Clipboard, ElementHandle, Keyboard, Mouse,
     Viewer, WindowHandle, Windows,
