@@ -80,7 +80,7 @@ class FakeSocket implements WebSocketLike {
     this.emit("close", { code, reason });
   }
 
-  forceClose(code = 1006): void {
+  forceClose(code?: number): void {
     this.readyState = 3;
     this.emit("close", { code, reason: "" });
   }
@@ -1067,6 +1067,7 @@ test("artifact transfer is bounded, digest-checked, and redacted", { timeout: 10
           headers: {
             "content-type": "application/octet-stream",
             "content-length": String(bytes.byteLength),
+            "x-content-sha256": digest,
           },
         });
       }
@@ -1542,6 +1543,7 @@ test("artifact midstream failures become typed redacted SDK errors", { timeout: 
         headers: {
           "content-type": "application/octet-stream",
           "content-length": "2",
+          "x-content-sha256": "a".repeat(64),
         },
       });
     },

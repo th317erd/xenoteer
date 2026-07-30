@@ -5,6 +5,7 @@ from .artifacts import (
     MAX_ARTIFACT_BYTES,
     MAX_CLIPBOARD_ARTIFACT_BYTES,
     ArtifactRef,
+    ArtifactSink,
     Artifacts,
 )
 from .client import (
@@ -22,6 +23,14 @@ from .command import (
     TerminalEffect,
     classify_terminal_effect,
     validate_client_command_envelope,
+)
+from .connection import (
+    ReconnectPolicy,
+    SafeLogEvent,
+    SafeLogHook,
+    WebSocketFactory,
+    WebSocketLike,
+    classify_safe_route,
 )
 from .desktop import (
     Accessibility,
@@ -86,6 +95,7 @@ __all__ = [
     "Accessibility",
     "Applications",
     "ArtifactRef",
+    "ArtifactSink",
     "Artifacts",
     "AsyncDeadlineTransport",
     "AsyncTransport",
@@ -118,11 +128,14 @@ __all__ = [
     "ProtocolRange",
     "ProtocolVersion",
     "RecoveryDecision",
+    "ReconnectPolicy",
     "ReferenceLifecycle",
     "ReplayComplete",
     "ResyncRequired",
     "ServerDraining",
     "ServerError",
+    "SafeLogEvent",
+    "SafeLogHook",
     "Status",
     "SubscriptionAck",
     "TokenProvider",
@@ -133,6 +146,8 @@ __all__ = [
     "UnknownServerMessage",
     "Viewer",
     "ViewerTicket",
+    "WebSocketFactory",
+    "WebSocketLike",
     "Window",
     "Windows",
     "XenoteerClient",
@@ -141,6 +156,7 @@ __all__ = [
     "as_uint64_string",
     "admit_request_version",
     "classify_terminal_effect",
+    "classify_safe_route",
     "decode_event_message",
     "decode_server_message",
     "decode_uint64",

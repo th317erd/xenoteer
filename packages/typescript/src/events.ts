@@ -2,6 +2,10 @@
 
 import { XenoteerError } from "./errors.js";
 import type {
+  SafeLogEvent,
+  SafeLogHook,
+} from "./options.js";
+import type {
   CanonicalUInt64,
   EventMessageWire,
   EventWire,
@@ -41,6 +45,17 @@ const EVENT_RESYNC_REASONS = new Set([
 ]);
 const MAX_U32 = 0xffff_ffff;
 const RESERVED_EVENT_CAPACITY = 4;
+
+class TerminalHandshakeCloseError extends XenoteerError {
+  constructor(code: number, opened: boolean) {
+    super(
+      "transport",
+      opened
+        ? `WebSocket closed with terminal code ${code} before welcome`
+        : `WebSocket transport failed with terminal close code ${code}`,
+    );
+  }
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -218,6 +233,10 @@ export interface AuthenticatedWebSocketOptions {
   readonly url: string;
   /** Sensitive. Implementations must set this as the HTTP Authorization header. */
   readonly authorization: string;
+  /** Adapter-enforced inbound frame/message ceiling for this attempt. */
+  readonly maxMessageBytes: number;
+  /** Absolute Unix-epoch millisecond deadline for completing the upgrade. */
+  readonly handshakeDeadlineMs: number;
 }
 
 export type WebSocketFactory = (
@@ -240,6 +259,8 @@ export interface EventSessionOptions {
   readonly reconnect?: ReconnectPolicy;
   /** @internal Populated by XenoteerClient for explicit resynchronization. */
   readonly refreshAuthoritative?: () => Promise<Readonly<Record<string, unknown>>>;
+  /** @internal Populated by XenoteerClient with its fail-closed safe logger. */
+  readonly safeLog?: SafeLogHook;
 }
 
 export interface EventSubscription {
@@ -273,8 +294,13 @@ interface Welcome {
   readonly raw: Readonly<Record<string, unknown>>;
 }
 
+interface WebSocketCredentials {
+  readonly url: string;
+  readonly authorization: string;
+}
+
 type SocketOptionsProvider =
-  () => Promise<AuthenticatedWebSocketOptions>;
+  () => Promise<WebSocketCredentials>;
 
 interface PendingResponse {
   readonly expectedType: string;
@@ -332,11 +358,14 @@ export class EventSession implements AsyncDisposable, AsyncIterable<XenoteerEven
   readonly #queue: XenoteerEvent[] = [];
   readonly #waiters: Array<(value: IteratorResult<XenoteerEvent>) => void> = [];
   readonly #pending = new Map<string, PendingResponse>();
+  readonly #failedCandidatesClosed = new WeakSet<object>();
+  readonly #cancellation = new AbortController();
   readonly #unregisterStateClose: () => void;
+  readonly #safeLog: SafeLogHook | undefined;
   readonly #refreshAuthoritative:
     | (() => Promise<Readonly<Record<string, unknown>>>)
     | undefined;
-  #socket?: WebSocketLike;
+  #socket: WebSocketLike | undefined;
   #welcome?: Welcome;
   #subscription: EventSubscription | undefined;
   #subscriptionRequestId: string | undefined;
@@ -348,6 +377,7 @@ export class EventSession implements AsyncDisposable, AsyncIterable<XenoteerEven
   #reconnecting = false;
   #heartbeatTimer?: ReturnType<typeof setInterval>;
   #terminal?: EventSessionTerminalReason;
+  #handshakeAttempt = 0;
 
   private constructor(
     factory: WebSocketFactory,
@@ -411,6 +441,7 @@ export class EventSession implements AsyncDisposable, AsyncIterable<XenoteerEven
     if (this.#initialReconnectDelayMs > this.#maxReconnectDelayMs) {
       throw new XenoteerError("invalid_request", "reconnect delays are reversed");
     }
+    this.#safeLog = options.safeLog;
     this.#unregisterStateClose = state.register(async () => {
       await this.#terminate("client_closed", "owning Xenoteer client closed", 1000);
     });
@@ -419,7 +450,7 @@ export class EventSession implements AsyncDisposable, AsyncIterable<XenoteerEven
   static async connect(
     factory: WebSocketFactory,
     socketOptions:
-      | AuthenticatedWebSocketOptions
+      | WebSocketCredentials
       | SocketOptionsProvider,
     hello: JsonObject,
     state: ClientConnectionState,
@@ -561,107 +592,222 @@ export class EventSession implements AsyncDisposable, AsyncIterable<XenoteerEven
 
   async #establish(hello: JsonObject): Promise<void> {
     this.#state.assertOpen();
-    const socketOptions = await this.#socketOptions();
-    this.#validateSocketOptions(socketOptions);
-    const socket = this.#factory(socketOptions);
-    this.#socket = socket;
-    const welcomePromise = new Promise<Welcome>((resolve, reject) => {
-      let opened = false;
-      const timer = setTimeout(() => {
-        reject(new XenoteerError("websocket_timeout", "timed out waiting for WebSocket welcome"));
-      }, this.#handshakeTimeoutMs);
-      socket.addEventListener("open", () => {
-        opened = true;
-        try {
-          socket.send(JSON.stringify(hello));
-        } catch (cause) {
-          clearTimeout(timer);
-          reject(new XenoteerError("transport", "failed to send WebSocket hello", { cause }));
-        }
-      }, { once: true });
-      socket.addEventListener("message", (event) => {
-        void this.#decodeMessage(socket, event.data).then((message) => {
-          if (message?.["type"] === "error") {
-            clearTimeout(timer);
-            reject(this.#errorFromServerMessage(message));
-            return;
-          }
-          if (message?.["type"] !== "server.welcome") return;
+    const handshakeDeadlineMs = Date.now() + this.#handshakeTimeoutMs;
+    this.#handshakeAttempt += 1;
+    const attempt = this.#handshakeAttempt;
+    this.#logHandshake({
+      operation: "websocket.handshake",
+      outcome: "started",
+      attempt,
+      route: "/v1/ws",
+    });
+    let socket: WebSocketLike | undefined;
+    try {
+      const encodedHello = this.#encodeOutbound(hello);
+      const credentials = await this.#handshakeStep(
+        this.#socketOptions(),
+        handshakeDeadlineMs,
+      );
+      this.#validateSocketOptions(credentials);
+      const socketOptions: AuthenticatedWebSocketOptions = Object.freeze({
+        ...credentials,
+        maxMessageBytes: this.#configuredMaxMessageBytes,
+        handshakeDeadlineMs,
+      });
+      if (Date.now() >= handshakeDeadlineMs) {
+        throw new XenoteerError(
+          "websocket_timeout",
+          "timed out before opening WebSocket transport",
+        );
+      }
+      socket = this.#factory(socketOptions);
+      this.#socket = socket;
+      const welcomePromise = new Promise<Welcome>((resolve, reject) => {
+        let opened = false;
+        socket?.addEventListener("open", () => {
+          opened = true;
           try {
-            const welcome = this.#validateWelcome(message, hello);
-            clearTimeout(timer);
-            resolve(welcome);
-          } catch (error) {
-            clearTimeout(timer);
-            reject(error);
+            socket?.send(encodedHello);
+          } catch (cause) {
+            reject(new XenoteerError(
+              "transport",
+              "failed to send WebSocket hello",
+              { cause },
+            ));
           }
-        }).catch((error: unknown) => {
-          clearTimeout(timer);
-          reject(error);
+        }, { once: true });
+        socket?.addEventListener("message", (event) => {
+          void this.#decodeMessage(socket as WebSocketLike, event.data).then((message) => {
+            if (message?.["type"] === "error") {
+              reject(this.#errorFromServerMessage(message));
+              return;
+            }
+            if (message?.["type"] !== "server.welcome") return;
+            try {
+              const welcome = this.#validateWelcome(message, hello);
+              resolve(welcome);
+            } catch (error) {
+              reject(error);
+            }
+          }).catch((error: unknown) => {
+            reject(error);
+          });
         });
+        socket?.addEventListener("error", () => {
+          reject(new XenoteerError("transport", "WebSocket connection failed"));
+        }, { once: true });
+        socket?.addEventListener("close", (event) => {
+          const code = event?.code;
+          reject(
+            code === 4401
+              ? new XenoteerError(
+                  "authentication",
+                  "WebSocket authentication failed before welcome",
+                )
+              : code === 4403 || code === 1008
+                ? new XenoteerError(
+                    "permission",
+                    "WebSocket policy rejected the connection before welcome",
+                  )
+                : this.#reconnectableClose(code)
+                  ? new XenoteerError(
+                      "transport",
+                      opened
+                        ? "WebSocket closed before welcome"
+                        : "WebSocket transport did not open",
+                    )
+                  : new TerminalHandshakeCloseError(code as number, opened),
+          );
+        }, { once: true });
+      });
+      const welcome = await this.#handshakeStep(
+        welcomePromise,
+        handshakeDeadlineMs,
+      );
+      socket.addEventListener("message", (event) => {
+        void this.#onMessage(socket as WebSocketLike, event.data);
       });
       socket.addEventListener("error", () => {
-        clearTimeout(timer);
-        reject(new XenoteerError("transport", "WebSocket connection failed"));
-      }, { once: true });
-      socket.addEventListener("close", () => {
-        if (!opened || this.#welcome === undefined) {
-          clearTimeout(timer);
-          reject(new XenoteerError("transport", "WebSocket closed before welcome"));
+        if (socket === this.#socket && !this.#closed && !this.#intentionalClose) {
+          void this.#handleTransportLoss("WebSocket transport error");
         }
       }, { once: true });
-    });
-    socket.addEventListener("message", (event) => {
-      void this.#onMessage(socket, event.data);
-    });
-    socket.addEventListener("close", (event) => {
-      void this.#onSocketClose(socket, event);
-    }, { once: true });
-    const welcome = await welcomePromise;
-    const previous = this.#welcome;
-    if (
-      previous !== undefined
-      && (
-        previous.desktopId !== welcome.desktopId
-        || previous.desktopGeneration !== welcome.desktopGeneration
-      )
-    ) {
-      this.#state.observeDesktop(
+      socket.addEventListener("close", (event) => {
+        void this.#onSocketClose(socket as WebSocketLike, event);
+      }, { once: true });
+      const previous = this.#welcome;
+      if (
+        previous !== undefined
+        && (
+          previous.desktopId !== welcome.desktopId
+          || previous.desktopGeneration !== welcome.desktopGeneration
+        )
+      ) {
+        this.#state.observeDesktop(
+          welcome.desktopId,
+          welcome.desktopGeneration,
+        );
+        this.#enqueueResync("generation_changed", undefined, undefined, welcome.raw);
+        throw new XenoteerError(
+          "outcome_unknown_after_restart",
+          "desktop generation changed while reconnecting",
+        );
+      }
+      this.#welcome = welcome;
+      const generationChanged = this.#state.observeDesktop(
         welcome.desktopId,
         welcome.desktopGeneration,
       );
-      this.#enqueueResync("generation_changed", undefined, undefined, welcome.raw);
-      await this.#terminate(
-        "generation_changed",
-        "desktop generation changed while reconnecting",
-        1008,
-      );
+      if (generationChanged && previous === undefined) {
+        throw new XenoteerError(
+          "outcome_unknown_after_restart",
+          "desktop generation changed before event session establishment",
+        );
+      }
+      if (welcome.resumeStatus === "resync_required") {
+        this.#enqueueResync("resume_rejected", undefined, undefined, welcome.raw);
+        await this.#terminate(
+          "resync_required",
+          "server rejected the event resume cursor; refresh authoritative snapshots",
+          1008,
+        );
+      } else {
+        this.#startHeartbeat(welcome.heartbeatMs);
+      }
+      this.#logHandshake({
+        operation: "websocket.handshake",
+        outcome: "succeeded",
+        attempt,
+        route: "/v1/ws",
+      });
+    } catch (cause) {
+      await this.#closeFailedCandidate(socket);
+      const failure = cause instanceof XenoteerError
+        ? cause
+        : new XenoteerError("transport", "WebSocket session establishment failed", {
+            cause,
+          });
+      this.#logHandshake({
+        operation: "websocket.handshake",
+        outcome: "failed",
+        attempt,
+        route: "/v1/ws",
+        errorCode: failure.code,
+        ...(failure.status === undefined ? {} : { status: failure.status }),
+      });
+      throw failure;
+    }
+  }
+
+  async #handshakeStep<T>(
+    operation: Promise<T>,
+    deadlineMs: number,
+  ): Promise<T> {
+    const remainingMs = deadlineMs - Date.now();
+    if (remainingMs <= 0) {
       throw new XenoteerError(
-        "outcome_unknown_after_restart",
-        "desktop generation changed while reconnecting",
+        "websocket_timeout",
+        "WebSocket handshake deadline expired",
       );
     }
-    this.#welcome = welcome;
-    const generationChanged = this.#state.observeDesktop(
-      welcome.desktopId,
-      welcome.desktopGeneration,
-    );
-    if (generationChanged && previous === undefined) {
-      throw new XenoteerError(
-        "outcome_unknown_after_restart",
-        "desktop generation changed before event session establishment",
+    return await new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const signals = [this.#cancellation.signal, this.#state.signal];
+      const listeners = new Map<AbortSignal, () => void>();
+      const timer = setTimeout(() => {
+        finish(() => reject(new XenoteerError(
+          "websocket_timeout",
+          "WebSocket handshake deadline expired",
+        )));
+      }, remainingMs);
+      const finish = (callback: () => void): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        for (const [signal, listener] of listeners) {
+          signal.removeEventListener("abort", listener);
+        }
+        callback();
+      };
+      for (const signal of signals) {
+        const listener = (): void => {
+          const reason = signal.reason instanceof XenoteerError
+            ? signal.reason
+            : new XenoteerError("session_closed", "WebSocket session cancelled");
+          finish(() => reject(reason));
+        };
+        listeners.set(signal, listener);
+        if (signal.aborted) {
+          listener();
+          return;
+        }
+        signal.addEventListener("abort", listener, { once: true });
+      }
+      void operation.then(
+        (value) => finish(() => resolve(value)),
+        (error: unknown) => finish(() => reject(error)),
       );
-    }
-    if (welcome.resumeStatus === "resync_required") {
-      this.#enqueueResync("resume_rejected", undefined, undefined, welcome.raw);
-      await this.#terminate(
-        "resync_required",
-        "server rejected the event resume cursor; refresh authoritative snapshots",
-        1008,
-      );
-      return;
-    }
-    this.#startHeartbeat(welcome.heartbeatMs);
+    });
   }
 
   async #decodeMessage(
@@ -968,11 +1114,15 @@ export class EventSession implements AsyncDisposable, AsyncIterable<XenoteerEven
 
   #send(message: JsonObject): void {
     this.#ensureOpen();
+    this.#socket?.send(this.#encodeOutbound(message));
+  }
+
+  #encodeOutbound(message: JsonObject): string {
     const encoded = JSON.stringify(message);
     if (utf8Length(encoded, this.#configuredMaxMessageBytes) > this.#configuredMaxMessageBytes) {
       throw new XenoteerError("request_too_large", "WebSocket request exceeds configured bound");
     }
-    this.#socket?.send(encoded);
+    return encoded;
   }
 
   #startHeartbeat(intervalMs: number): void {
@@ -1008,11 +1158,20 @@ export class EventSession implements AsyncDisposable, AsyncIterable<XenoteerEven
     socket: WebSocketLike,
     event?: { readonly code?: number; readonly reason?: string },
   ): Promise<void> {
-    if (socket !== this.#socket || this.#closed || this.#intentionalClose) return;
-    if (this.#permanentClose(event?.code)) {
+    if (
+      socket !== this.#socket
+      || this.#closed
+      || this.#intentionalClose
+      || this.#failedCandidatesClosed.has(socket)
+    ) {
+      return;
+    }
+    if (!this.#reconnectableClose(event?.code)) {
       await this.#terminate(
         "transport",
-        "WebSocket closed with a permanent authorization or policy failure",
+        event?.code === undefined
+          ? "WebSocket closed without a reconnectable close disposition"
+          : `WebSocket closed with terminal code ${event.code}`,
         1008,
       );
       return;
@@ -1030,6 +1189,11 @@ export class EventSession implements AsyncDisposable, AsyncIterable<XenoteerEven
     this.#reconnecting = true;
     if (this.#heartbeatTimer !== undefined) clearInterval(this.#heartbeatTimer);
     this.#rejectPending(new XenoteerError("transport", "WebSocket transport was interrupted"));
+    const failedSocket = this.#socket;
+    if (failedSocket !== undefined) {
+      this.#socket = undefined;
+      await this.#closeFailedCandidate(failedSocket, 1011, "transport_lost");
+    }
     for (let attempt = 0; attempt < this.#maxReconnectAttempts; attempt += 1) {
       if (this.#closed || this.#state.closed) return;
       const baseDelay = Math.min(
@@ -1041,7 +1205,7 @@ export class EventSession implements AsyncDisposable, AsyncIterable<XenoteerEven
         this.#maxReconnectDelayMs,
         baseDelay + Math.floor(Math.random() * jitterBound),
       );
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      if (!await this.#waitForReconnectDelay(delay)) return;
       const welcome = this.#welcome;
       const hello = structuredClone(this.#baseHello) as Record<string, JsonValue>;
       if (welcome !== undefined && this.#lastSequence !== undefined) {
@@ -1055,7 +1219,6 @@ export class EventSession implements AsyncDisposable, AsyncIterable<XenoteerEven
         await this.#establish(hello);
         if (this.#closed) return;
         const subscription = this.#subscription;
-        this.#reconnecting = false;
         if (subscription !== undefined) {
           await this.subscribe(
             subscription.topics,
@@ -1065,13 +1228,60 @@ export class EventSession implements AsyncDisposable, AsyncIterable<XenoteerEven
           );
         }
         await this.#state.notifyReconnect();
+        this.#reconnecting = false;
         return;
-      } catch {
-        // Continue bounded reconnect attempts; command mutations are never replayed.
+      } catch (error) {
+        if (this.#closed) return;
+        if (this.#permanentEstablishError(error)) {
+          this.#reconnecting = false;
+          await this.#terminate(
+            error instanceof XenoteerError
+              && (
+                error.code === "outcome_unknown_after_restart"
+                || error.code === "generation_changed"
+                || error.code === "stale_reference"
+              )
+              ? "generation_changed"
+              : "transport",
+            "WebSocket reconnect encountered a permanent handshake failure",
+            1008,
+          );
+          return;
+        }
+        await this.#closeFailedCandidate(this.#socket);
+        // Continue bounded transient reconnect attempts; mutations are never replayed.
       }
     }
     this.#reconnecting = false;
     await this.#terminate(terminalCode, detail, 1011);
+  }
+
+  async #waitForReconnectDelay(delayMs: number): Promise<boolean> {
+    if (this.#closed || this.#state.closed) return false;
+    return await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const signals = [this.#cancellation.signal, this.#state.signal];
+      const listeners = new Map<AbortSignal, () => void>();
+      const finish = (value: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        for (const [signal, listener] of listeners) {
+          signal.removeEventListener("abort", listener);
+        }
+        resolve(value);
+      };
+      const timer = setTimeout(() => finish(true), delayMs);
+      for (const signal of signals) {
+        const listener = (): void => finish(false);
+        listeners.set(signal, listener);
+        if (signal.aborted) {
+          listener();
+          return;
+        }
+        signal.addEventListener("abort", listener, { once: true });
+      }
+    });
   }
 
   #enqueue(event: XenoteerEvent): boolean {
@@ -1149,6 +1359,44 @@ export class EventSession implements AsyncDisposable, AsyncIterable<XenoteerEven
     });
   }
 
+  #logHandshake(event: SafeLogEvent): void {
+    if (this.#safeLog === undefined) return;
+    try {
+      this.#safeLog(Object.freeze({
+        operation: event.operation,
+        outcome: event.outcome,
+        ...(event.attempt === undefined ? {} : { attempt: event.attempt }),
+        route: "/v1/ws",
+        ...(event.status === undefined ? {} : { status: event.status }),
+        ...(event.errorCode === undefined ? {} : { errorCode: event.errorCode }),
+      }));
+    } catch {
+      // A diagnostic hook cannot alter connection or retry behavior.
+    }
+  }
+
+  async #closeFailedCandidate(
+    socket: WebSocketLike | undefined,
+    code = 1002,
+    reason = "handshake_failed",
+  ): Promise<void> {
+    if (
+      socket === undefined
+      || socket === null
+      || typeof socket !== "object"
+      || this.#failedCandidatesClosed.has(socket)
+    ) {
+      return;
+    }
+    this.#failedCandidatesClosed.add(socket);
+    try {
+      socket.close(code, reason);
+    } catch {
+      // Candidate ownership still ends even if the adapter's close throws.
+    }
+    await Promise.resolve();
+  }
+
   async #terminate(
     code: EventSessionTerminalReason["code"],
     detail: string,
@@ -1156,6 +1404,9 @@ export class EventSession implements AsyncDisposable, AsyncIterable<XenoteerEven
   ): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    this.#cancellation.abort(
+      new XenoteerError("session_closed", detail),
+    );
     this.#intentionalClose = true;
     this.#terminal = Object.freeze({ code, detail });
     if (this.#heartbeatTimer !== undefined) clearInterval(this.#heartbeatTimer);
@@ -1163,7 +1414,11 @@ export class EventSession implements AsyncDisposable, AsyncIterable<XenoteerEven
     this.#unregisterStateClose();
     const socket = this.#socket;
     try {
-      if (socket !== undefined && socket.readyState !== 3) {
+      if (
+        socket !== undefined
+        && socket.readyState !== 3
+        && !this.#failedCandidatesClosed.has(socket)
+      ) {
         const closed = new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, this.#closeTimeoutMs);
           socket.addEventListener("close", () => {
@@ -1197,7 +1452,7 @@ export class EventSession implements AsyncDisposable, AsyncIterable<XenoteerEven
     }
   }
 
-  #validateSocketOptions(options: AuthenticatedWebSocketOptions): void {
+  #validateSocketOptions(options: WebSocketCredentials): void {
     if (!options.url.startsWith("ws://") && !options.url.startsWith("wss://")) {
       throw new XenoteerError("invalid_request", "WebSocket URL must use ws or wss");
     }
@@ -1218,8 +1473,8 @@ export class EventSession implements AsyncDisposable, AsyncIterable<XenoteerEven
     }
   }
 
-  #permanentClose(code: number | undefined): boolean {
-    return code === 1008 || code === 4401 || code === 4403;
+  #reconnectableClose(code: number | undefined): boolean {
+    return code === undefined || code === 1001 || code === 1012 || code === 1013;
   }
 
   #permanentServerError(message: Record<string, unknown>): boolean {
@@ -1227,6 +1482,24 @@ export class EventSession implements AsyncDisposable, AsyncIterable<XenoteerEven
       || message["status"] === 403
       || message["code"] === "authentication_required"
       || message["code"] === "permission_denied";
+  }
+
+  #permanentEstablishError(error: unknown): boolean {
+    return error instanceof TerminalHandshakeCloseError
+      || (
+        error instanceof XenoteerError
+        && [
+          "authentication",
+          "permission",
+          "unsupported_protocol",
+          "unsupported_major",
+          "no_shared_minor",
+          "unsupported_version",
+          "generation_changed",
+          "stale_reference",
+          "outcome_unknown_after_restart",
+        ].includes(error.code)
+      );
   }
 
   #errorFromServerMessage(
@@ -1243,6 +1516,19 @@ export class EventSession implements AsyncDisposable, AsyncIterable<XenoteerEven
       ? "authentication"
       : status === 403 || code === "permission_denied"
         ? "permission"
+        : [
+            "unsupported_protocol",
+            "unsupported_version",
+            "unsupported_major",
+            "no_shared_minor",
+          ].includes(code ?? "")
+          ? "unsupported_protocol"
+          : [
+              "generation_changed",
+              "generation_mismatch",
+              "stale_reference",
+            ].includes(code ?? "")
+            ? "generation_changed"
         : "unexpected_http_status";
     return new XenoteerError(
       sdkCode,

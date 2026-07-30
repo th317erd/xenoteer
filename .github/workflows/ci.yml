@@ -25,31 +25,30 @@ jobs:
           toolchain: 1.97.1
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Refresh native package metadata
+        run: sudo apt-get update
       - name: Install native build headers
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes libxkbcommon-dev libxkbcommon-x11-dev libxcb-xkb-dev
+        run: sudo apt-get install --yes libxkbcommon-dev libxkbcommon-x11-dev libxcb-xkb-dev
       - run: cargo fmt --all --check
       - name: Check standalone X11 fixture formatting
         run: cargo fmt --manifest-path fixtures/x11/Cargo.toml --all --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Lint standalone X11 fixtures
         run: cargo clippy --manifest-path fixtures/x11/Cargo.toml --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --all-targets --locked
+      - run: cargo test --workspace --all-targets --locked --exclude xenoteer-sdk --exclude xenoteerctl
       - name: Test standalone X11 fixtures
         run: cargo test --manifest-path fixtures/x11/Cargo.toml --all-targets --locked
       - run: cargo test --workspace --doc --locked
       - run: cargo doc --workspace --no-deps --locked
       - run: cargo run --locked -p xenoteer-protocol --bin generate-schemas -- --check
 
-  sdk-conformance:
-    name: Frozen v1 SDK, CLI, and package boundaries
+  sdk-rust:
+    name: Frozen v1 Rust SDK, CLI, and package boundaries
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: 2
       RUST_TEST_THREADS: 2
-      PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
@@ -57,67 +56,91 @@ jobs:
           toolchain: 1.97.1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: sdk-conformance
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: packages/typescript/package-lock.json
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.11'
+          shared-key: sdk-rust
       - name: Validate the frozen language-neutral corpus
         timeout-minutes: 1
         run: timeout 10s python3 scripts/conformance/validate.py
-      - name: Exercise the Rust adapter and CLI process boundary
+      - name: Exercise the Rust SDK adapter
         timeout-minutes: 10
-        run: |
-          timeout 8m cargo test --locked --jobs 2 -p xenoteer-sdk --test conformance_adapter -- --test-threads=2
-          timeout 8m cargo test --locked --jobs 2 -p xenoteerctl --test cli_boundary -- --test-threads=2
+        run: timeout 8m cargo test --locked --jobs 2 -p xenoteer-sdk --all-targets -- --test-threads=2
+      - name: Exercise the Rust CLI process boundary
+        timeout-minutes: 10
+        run: timeout 8m cargo test --locked --jobs 2 -p xenoteerctl --all-targets -- --test-threads=2
       - name: Inspect deterministic Rust package archives
         timeout-minutes: 10
         run: timeout 8m python3 scripts/packages/verify-boundaries.py
+
+  sdk-typescript:
+    name: TypeScript SDK on Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: packages/typescript/package-lock.json
       - name: Install exact TypeScript development dependencies
         working-directory: packages/typescript
         timeout-minutes: 5
         run: timeout 4m npm ci --ignore-scripts --no-audit --no-fund
-      - name: Exercise TypeScript SDK, conformance, and package boundary
+      - name: Exercise the TypeScript SDK
         working-directory: packages/typescript
         timeout-minutes: 10
-        run: |
-          timeout 3m npm test
-          timeout 3m npm run conformance
-          timeout 3m npm run verify-pack
+        run: timeout 3m npm test
+      - name: Exercise TypeScript shared conformance
+        working-directory: packages/typescript
+        timeout-minutes: 10
+        run: timeout 3m npm run conformance
+      - name: Inspect the TypeScript package boundary
+        working-directory: packages/typescript
+        timeout-minutes: 10
+        run: timeout 3m npm run verify-pack
+
+  sdk-python:
+    name: Python SDK on Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12', '3.13', '3.14']
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python }}
       - name: Install exact Python development dependencies
         timeout-minutes: 5
-        run: |
-          for build_dependency in setuptools wheel; do
-            grep -Eq "^${build_dependency}==[^<>=[:space:]]+$" \
-              packages/python/requirements-test.lock
-          done
-          timeout 4m python3 -m pip install --disable-pip-version-check \
-            --no-deps --requirement packages/python/requirements-test.lock
-          timeout 1m python3 -m pip install --disable-pip-version-check \
-            --no-build-isolation --no-deps --editable packages/python
-      - name: Exercise Python SDK, typing, and shared conformance
-        timeout-minutes: 10
-        run: |
-          timeout 3m python3 -m unittest discover -s packages/python/tests -v
-          timeout 2m python3 scripts/conformance/run.py --adapter \
-            python3 packages/python/scripts/run_conformance.py
-          timeout 2m python3 -m mypy --cache-dir "$RUNNER_TEMP/xenoteer-mypy-cache" \
-            packages/python/src packages/python/scripts
-          timeout 2m python3 -m ruff check --no-cache \
-            packages/python/src packages/python/tests packages/python/scripts
-      - name: Inspect exact Python wheel and source distribution
+        run: timeout 4m python3 -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: --no-deps --requirement packages/python/requirements-test.lock
+      - name: Install the Python SDK without dependency resolution
         timeout-minutes: 5
-        run: |
-          python_dist="$RUNNER_TEMP/xenoteer-python-dist"
-          timeout 3m python3 -m build --no-isolation \
-            --outdir "$python_dist" packages/python
-          timeout 1m python3 packages/python/scripts/verify_dist.py \
-            "$python_dist/xenoteer-0.1.0-py3-none-any.whl" \
-            "$python_dist/xenoteer-0.1.0.tar.gz"
+        run: timeout 1m python3 -m pip install --disable-pip-version-check --no-build-isolation --no-deps --editable packages/python
+      - name: Exercise the Python SDK
+        timeout-minutes: 10
+        run: timeout 3m python3 -m unittest discover -s packages/python/tests -v
+      - name: Exercise Python shared conformance
+        timeout-minutes: 10
+        run: timeout 2m python3 scripts/conformance/run.py --adapter python3 packages/python/scripts/run_conformance.py
+      - name: Type-check the Python SDK
+        timeout-minutes: 10
+        run: timeout 2m python3 -m mypy --cache-dir "$RUNNER_TEMP/xenoteer-mypy-cache" packages/python/src packages/python/scripts
+      - name: Lint the Python SDK
+        timeout-minutes: 10
+        run: timeout 2m python3 -m ruff check --no-cache packages/python/src packages/python/tests packages/python/scripts
+      - name: Build the exact Python wheel and source distribution
+        timeout-minutes: 5
+        run: timeout 3m python3 -m build --no-isolation --outdir "$RUNNER_TEMP/xenoteer-python-dist" packages/python
+      - name: Inspect the exact Python wheel and source distribution
+        timeout-minutes: 5
+        run: timeout 1m python3 packages/python/scripts/verify_dist.py "$RUNNER_TEMP/xenoteer-python-dist/xenoteer-0.1.0-py3-none-any.whl" "$RUNNER_TEMP/xenoteer-python-dist/xenoteer-0.1.0.tar.gz"
 
   dependencies:
     runs-on: ubuntu-latest

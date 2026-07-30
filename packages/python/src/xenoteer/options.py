@@ -6,16 +6,22 @@ from __future__ import annotations
 import inspect
 import ipaddress
 import re
+import unicodedata
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TypeAlias
 from urllib.parse import urlsplit
 
+from .connection import (
+    ReconnectPolicy,
+    SafeLogHook,
+    validate_safe_log_hook,
+)
 from .errors import XenoteerError
 
 
-TokenProvider: TypeAlias = Callable[[], str | Awaitable[str]]
+TokenProvider: TypeAlias = Callable[[], Awaitable[str]]
 TokenSource: TypeAlias = str | TokenProvider
 _TOKEN68 = re.compile(r"[A-Za-z0-9._~+/-]+={0,}\Z")
 
@@ -83,7 +89,9 @@ class ClientOptions:
     protocol_range: ProtocolRange = field(default_factory=ProtocolRange)
     heartbeat_interval: float = 15.0
     read_stale_timeout: float | None = None
-    max_reconnect_attempts: int = 5
+    connect_timeout: float = 10.0
+    reconnect_policy: ReconnectPolicy = field(default_factory=ReconnectPolicy)
+    safe_log_hook: SafeLogHook | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         try:
@@ -106,6 +114,11 @@ class ClientOptions:
                 "invalid_base_url",
                 "base URL must be an HTTP(S) origin without credentials, path, query, or fragment",
             )
+        if callable(self.token) and not _is_async_token_provider(self.token):
+            raise XenoteerError(
+                "invalid_request",
+                "token provider must be an async callable",
+            )
         if parsed.scheme == "http":
             try:
                 address = ipaddress.ip_address(parsed.hostname)
@@ -119,6 +132,14 @@ class ClientOptions:
                     "invalid_base_url",
                     "plaintext HTTP is permitted only for a numeric loopback address",
                 )
+        if (
+            isinstance(self.connect_timeout, bool)
+            or not isinstance(self.connect_timeout, (int, float))
+            or not 0 < self.connect_timeout <= 60
+        ):
+            raise XenoteerError(
+                "invalid_request", "connect timeout must be in (0, 60] seconds"
+            )
         if (
             isinstance(self.request_timeout, bool)
             or not isinstance(self.request_timeout, (int, float))
@@ -135,7 +156,15 @@ class ClientOptions:
             ("client name", self.client_name),
             ("client version", self.client_version),
         ):
-            if not isinstance(value, str) or not value or len(value.encode()) > 128:
+            if (
+                not isinstance(value, str)
+                or not value
+                or len(value.encode()) > 128
+                or any(
+                    unicodedata.category(character) == "Cc"
+                    for character in value
+                )
+            ):
                 raise XenoteerError("invalid_request", f"{label} is invalid")
         if (
             isinstance(self.heartbeat_interval, bool)
@@ -154,14 +183,11 @@ class ClientOptions:
                 "invalid_request",
                 "read stale timeout must exceed heartbeat and be at most 600 seconds",
             )
-        if (
-            isinstance(self.max_reconnect_attempts, bool)
-            or not isinstance(self.max_reconnect_attempts, int)
-            or not 0 <= self.max_reconnect_attempts <= 20
-        ):
+        if not isinstance(self.reconnect_policy, ReconnectPolicy):
             raise XenoteerError(
-                "invalid_request", "max reconnect attempts must be in 0..20"
+                "invalid_request", "reconnect policy is invalid"
             )
+        validate_safe_log_hook(self.safe_log_hook)
 
     def safe_dict(self) -> MappingProxyType[str, object]:
         """Return the only supported diagnostics projection."""
@@ -170,6 +196,7 @@ class ClientOptions:
             {
                 "base_url": self.base_url,
                 "token": "<redacted>",
+                "connect_timeout": self.connect_timeout,
                 "request_timeout": self.request_timeout,
                 "max_response_bytes": self.max_response_bytes,
                 "client_name": self.client_name,
@@ -177,7 +204,10 @@ class ClientOptions:
                 "protocol_range": self.protocol_range,
                 "heartbeat_interval": self.heartbeat_interval,
                 "read_stale_timeout": self.read_stale_timeout,
-                "max_reconnect_attempts": self.max_reconnect_attempts,
+                "reconnect_policy": self.reconnect_policy,
+                "safe_log_hook": "<configured>"
+                if self.safe_log_hook is not None
+                else None,
             }
         )
 
@@ -186,10 +216,18 @@ class ClientOptions:
 
 
 async def resolve_token(source: TokenSource) -> BearerToken:
-    """Resolve a sync/async provider without retaining provider failures."""
+    """Resolve a static token or cancellation-cooperative async provider."""
 
+    if callable(source) and not _is_async_token_provider(source):
+        raise XenoteerError(
+            "invalid_request", "token provider must be an async callable"
+        )
+    value: object
     try:
-        value = source() if callable(source) else source
+        if callable(source):
+            value = source()
+        else:
+            value = source
         if inspect.isawaitable(value):
             value = await value
     except Exception:
@@ -197,3 +235,9 @@ async def resolve_token(source: TokenSource) -> BearerToken:
     if not isinstance(value, str):
         raise XenoteerError("invalid_token", "Xenoteer token provider returned a non-string")
     return BearerToken(value)
+
+
+def _is_async_token_provider(source: object) -> bool:
+    return inspect.iscoroutinefunction(source) or inspect.iscoroutinefunction(
+        getattr(source, "__call__", None)
+    )

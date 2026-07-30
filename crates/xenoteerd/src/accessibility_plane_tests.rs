@@ -1679,6 +1679,54 @@ async fn cursor_expires_and_mutation_invalidates_revision() {
 }
 
 #[tokio::test]
+async fn element_query_cursor_is_invalidated_by_a_cache_mutation() {
+    let fixture = Fixture::new(AccessibilityPlaneConfig::default());
+    fixture.bootstrap(basic_nodes()).await;
+    let query = ElementQueryRequest {
+        desktop_id: fixture.desktop_id,
+        desktop_generation: fixture.desktop_generation,
+        selector: fixture.selector(Vec::new()),
+        limit: 1,
+        cursor: None,
+        expansion: ElementSnapshotExpansion::default(),
+        limits: AccessibilityQueryLimits::default(),
+    };
+    let cursor = fixture
+        .plane
+        .query_for("alice", query.clone())
+        .await
+        .expect("first query page")
+        .next_cursor
+        .expect("query continuation");
+    fixture
+        .plane
+        .ingest_mutation(
+            1,
+            1,
+            CacheMutation {
+                revision: 2,
+                kind: CacheMutationKind::Upserted,
+                detail: CacheMutationDetail::Upserted(Box::new(cached(
+                    "/org/example/App/Ready",
+                    Some(APP_PATH),
+                    "Ready after query pagination",
+                    43,
+                    2,
+                ))),
+            },
+        )
+        .await
+        .expect("mutation");
+
+    let mut continuation = query;
+    continuation.cursor = Some(cursor);
+    assert!(matches!(
+        fixture.plane.query_for("alice", continuation).await,
+        Err(AccessibilityPlaneError::StaleReference { .. })
+    ));
+}
+
+#[tokio::test]
 async fn cursor_cap_is_enforced_per_principal() {
     assert!(matches!(
         DaemonAccessibilityPlane::new(

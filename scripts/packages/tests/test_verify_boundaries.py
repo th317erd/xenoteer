@@ -10,6 +10,7 @@ import pathlib
 import sys
 import tarfile
 import tempfile
+import tomllib
 import unittest
 
 
@@ -28,6 +29,31 @@ SERVER_ID = "path+file:///workspace/crates/xenoteer-server#0.1.0"
 SERDE_ID = (
     "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.229"
 )
+REPOSITORY_ROOT = SCRIPT_PATH.parents[2]
+CANONICAL_SDK_EXAMPLES = ("examples/phase6_behaviors.rs",)
+
+
+def repository_published_sdk_examples() -> tuple[str, ...]:
+    """Model the crate's literal example exclusions without invoking Cargo."""
+
+    package_root = REPOSITORY_ROOT / "crates" / "xenoteer-sdk"
+    manifest = tomllib.loads(
+        (package_root / "Cargo.toml").read_text(encoding="utf-8")
+    )
+    package = manifest.get("package")
+    if not isinstance(package, dict):
+        raise AssertionError("xenoteer-sdk manifest omitted [package]")
+    excluded = package.get("exclude", [])
+    if not isinstance(excluded, list) or not all(
+        isinstance(entry, str) for entry in excluded
+    ):
+        raise AssertionError("xenoteer-sdk package exclusions must be literal strings")
+    candidates = (
+        path.relative_to(package_root).as_posix()
+        for path in (package_root / "examples").rglob("*")
+        if path.is_file()
+    )
+    return tuple(sorted(candidate for candidate in candidates if candidate not in excluded))
 
 
 def package(
@@ -159,6 +185,52 @@ class PackageBoundaryTests(unittest.TestCase):
             metadata,
             verify_boundaries.boundary_specs(self.root),
         )
+
+    def test_published_sdk_has_one_artifact_qualified_example(self) -> None:
+        self.assertEqual(
+            repository_published_sdk_examples(),
+            CANONICAL_SDK_EXAMPLES,
+            "every public Cargo example must be qualified by the staged artifact gate",
+        )
+
+    def test_package_listing_rejects_an_unqualified_public_example(self) -> None:
+        sdk = verify_boundaries.boundary_specs(self.root)[1]
+        examples = sdk.package_root / "examples"
+        examples.mkdir()
+        canonical = examples / "phase6_behaviors.rs"
+        canonical.write_text(
+            "// SPDX-License-Identifier: Apache-2.0\nfn main() {}\n",
+            encoding="utf-8",
+        )
+        listing = "\n".join(
+            sorted(
+                (
+                    ".cargo_vcs_info.json",
+                    "Cargo.lock",
+                    "Cargo.toml",
+                    "Cargo.toml.orig",
+                    "LICENSE",
+                    "NOTICE",
+                    "examples/phase6_behaviors.rs",
+                    "src/lib.rs",
+                )
+            )
+        )
+        verify_boundaries.validate_package_listing(sdk, listing)
+
+        unqualified = examples / "legacy.rs"
+        unqualified.write_text(
+            "// SPDX-License-Identifier: Apache-2.0\nfn main() {}\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            verify_boundaries.BoundaryError,
+            "public examples are not exactly artifact-qualified",
+        ):
+            verify_boundaries.validate_package_listing(
+                sdk,
+                "\n".join(sorted((*listing.splitlines(), "examples/legacy.rs"))),
+            )
 
     def test_public_protocol_must_be_registry_publishable(self) -> None:
         metadata = self.valid_metadata()
@@ -304,8 +376,21 @@ version = "=0.1.0"
     def test_copied_bsl_source_and_non_apache_marker_are_rejected(self) -> None:
         boundary = verify_boundaries.boundary_specs(self.root)[1]
         source = boundary.package_root / "src" / "lib.rs"
+        example = boundary.package_root / "examples" / "phase6_behaviors.rs"
+        example.parent.mkdir()
+        example.write_text(
+            "// SPDX-License-Identifier: Apache-2.0\nfn main() {}\n",
+            encoding="utf-8",
+        )
         listing = "\n".join(
-            ("Cargo.toml", "LICENSE", "NOTICE", "src/lib.rs", "")
+            (
+                "Cargo.toml",
+                "LICENSE",
+                "NOTICE",
+                "examples/phase6_behaviors.rs",
+                "src/lib.rs",
+                "",
+            )
         )
 
         private_source = (

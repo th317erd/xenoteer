@@ -18,8 +18,8 @@ use xenoteer_protocol::{
     ElementSnapshot, ElementSnapshotEntry, ElementSnapshotExpansion, ElementSnapshotRequest,
     ElementSnapshotResult, ElementState, ElementWaitPredicate, ElementWaitQuantifier,
     ElementWaitRequest, ElementWaitResult, ElementWaitStatus, ElementWaitTarget,
-    ElementWindowCorrelation, ErrorCode, Problem, WindowCorrelationConfidence, WindowIdentityHash,
-    WindowRef,
+    ElementWindowCorrelation, ErrorCode, Problem, RetryAdvice, WindowCorrelationConfidence,
+    WindowIdentityHash, WindowRef,
 };
 
 use crate::{
@@ -914,6 +914,76 @@ async fn resync_ambiguous_and_limit_errors_have_stable_safe_mappings()
         let encoded = String::from_utf8(body.to_vec())?;
         assert!(!encoded.contains("canary-secret"));
         assert!(!encoded.contains("Save Password"));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn query_cursor_failures_have_retryable_safe_http_mappings()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (error, status, code, retry, retry_after) in [
+        (
+            AccessibilityPlaneError::StaleReference {
+                current_generation: None,
+            },
+            StatusCode::CONFLICT,
+            ErrorCode::StaleReference,
+            RetryAdvice::AfterResync,
+            None,
+        ),
+        (
+            AccessibilityPlaneError::ResyncRequired {
+                current_generation: None,
+            },
+            StatusCode::CONFLICT,
+            ErrorCode::ToolkitProtocolError,
+            RetryAdvice::AfterResync,
+            None,
+        ),
+        (
+            AccessibilityPlaneError::ResourceExhausted,
+            StatusCode::TOO_MANY_REQUESTS,
+            ErrorCode::ResourceExhausted,
+            RetryAdvice::AfterBackoff,
+            Some("1"),
+        ),
+        (
+            AccessibilityPlaneError::CapabilityUnavailable,
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::CapabilityUnavailable,
+            RetryAdvice::AfterBackoff,
+            Some("1"),
+        ),
+    ] {
+        let desktop_id = DesktopId::new();
+        let generation = DesktopGeneration::new();
+        let plane: Arc<dyn AccessibilityPlane> = Arc::new(FixtureAccessibility {
+            desktop_id,
+            generation,
+            calls: Arc::new(AtomicUsize::new(0)),
+            mode: FixtureMode::Error(error),
+        });
+        let principal = Principal::new("semantic-reader", [Grant::AccessibilityRead])?;
+        let response = application(desktop_id, generation, principal, Some(plane))?
+            .oneshot(post_json(
+                desktop_id,
+                "query",
+                &query_request(desktop_id, generation, ElementRole::Button),
+            )?)
+            .await?;
+        assert_eq!(response.status(), status);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            retry_after
+        );
+        let body = to_bytes(response.into_body(), 16 * 1_024).await?;
+        let problem: Problem = serde_json::from_slice(&body)?;
+        problem.validate()?;
+        assert_eq!(problem.code(), code);
+        assert_eq!(problem.retry(), retry);
     }
     Ok(())
 }

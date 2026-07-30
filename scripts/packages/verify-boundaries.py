@@ -28,6 +28,10 @@ GENERATED_PACKAGE_ENTRIES = frozenset(
     }
 )
 REQUIRED_PACKAGE_ENTRIES = frozenset({"LICENSE", "NOTICE"})
+REVIEWED_PACKAGE_EXAMPLES = {
+    "xenoteer-protocol": frozenset(),
+    "xenoteer-sdk": frozenset({"examples/phase6_behaviors.rs"}),
+}
 RUST_SOURCE_SUFFIX = ".rs"
 SPDX_MARKER = "SPDX-License-Identifier:"
 BUSL_TEXT_MARKERS = (
@@ -518,6 +522,23 @@ def validate_package_listing(boundary: Boundary, output: str) -> tuple[str, ...]
         raise BoundaryError(
             f"{boundary.package_name} is missing required package entries: "
             f"{', '.join(missing)}"
+        )
+
+    expected_examples = REVIEWED_PACKAGE_EXAMPLES.get(boundary.package_name)
+    if expected_examples is None:
+        raise BoundaryError(
+            f"{boundary.package_name} has no reviewed public-example inventory"
+        )
+    actual_examples = {
+        entry
+        for entry in entries
+        if pathlib.PurePosixPath(entry).parts[:1] == ("examples",)
+    }
+    if actual_examples != expected_examples:
+        raise BoundaryError(
+            f"{boundary.package_name} public examples are not exactly artifact-qualified: "
+            f"expected {sorted(expected_examples)!r}, "
+            f"observed {sorted(actual_examples)!r}"
         )
 
     package_root = boundary.package_root.resolve()

@@ -234,6 +234,7 @@ fn close_reason_text(reason: &EventStreamCloseReason) -> String {
         }
         EventStreamCloseReason::ServerDraining => "server_draining".to_owned(),
         EventStreamCloseReason::PeerClosed(code) => format!("peer_closed:{code}"),
+        EventStreamCloseReason::ReconnectExhausted => "reconnect_exhausted".to_owned(),
         EventStreamCloseReason::ProtocolViolation => "protocol_violation".to_owned(),
         EventStreamCloseReason::InvalidMessage { .. } => "invalid_message".to_owned(),
         EventStreamCloseReason::ClientClosed => "client_closed".to_owned(),

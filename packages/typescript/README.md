@@ -170,9 +170,46 @@ exact sequence string and payload.
 
 The control WebSocket requires an HTTP `Authorization` header. The Node built-in
 `WebSocket` cannot set that header, so the SDK does not put the long-lived token
-in a URL or subprotocol. `openEventSession()` accepts a small injected
-header-capable `WebSocketFactory`; the factory must apply the supplied
-`authorization` value only to the upgrade request and must redact it from logs.
+in a URL or subprotocol. Configure one header-capable `webSocketFactory` on the
+root connection policy and then open sessions from that retained policy:
+
+```ts
+const client = await XenoteerClient.connect({
+  baseUrl: "https://127.0.0.1:9443",
+  token: async () => process.env.XENOTEER_TOKEN!,
+  fetch: boundedTlsFetch,
+  webSocketFactory: ({ authorization, url, maxMessageBytes, handshakeDeadlineMs }) =>
+    makeBoundedAuthenticatedSocket({
+      authorization,
+      url,
+      maxMessageBytes,
+      handshakeDeadlineMs,
+    }),
+  reconnect: { maxAttempts: 5, initialDelayMs: 100, maxDelayMs: 5_000 },
+  webSocketMaxMessageBytes: 1_048_576,
+  webSocketHandshakeTimeoutMs: 10_000,
+});
+
+await using events = await client.openEventSession();
+```
+
+The factory must apply `authorization` only to the upgrade request and redact it
+from its own diagnostics. The SDK calls the token provider afresh for every
+HTTP attempt, initial WebSocket attempt, and reconnect candidate. The older
+`openEventSession(factory, options)` form remains as a compatibility overload;
+new code should retain the factory at `connect()`. Opening an event session
+without either explicit form fails before credential lookup.
+
+The root numeric WebSocket/reconnect policy is copied and validated before the
+status request, so later mutation of the caller's option objects cannot change
+live behavior. Per-session options remain available for the compatibility
+surface and are themselves copied by the session. `clientName`,
+`clientVersion`, and the exact negotiated minor are retained in every reconnect
+hello. Reconnect never replays an HTTP effect. Authentication, permission,
+protocol, and desktop-generation welcome failures are permanent; transient
+handshake failures consume only the configured bounded retry budget. Every
+failed candidate socket is closed before another candidate is requested.
+
 The local event queue is bounded and closes with an explicit terminal reason
 on overflow. The session waits for a validated welcome, correlates subscribe
 acknowledgments, supervises application heartbeats, and reconnects with replay
@@ -187,15 +224,31 @@ boundary. `ReplayCompleteEvent` and `ResyncRequiredEvent` use reserved bounded
 queue capacity, so an ordinary-event backlog cannot hide authoritative
 continuity evidence.
 
-The injected WebSocket implementation itself must enforce a frame-size ceiling.
-The SDK additionally checks text/binary byte length before UTF-8/JSON decoding
-and applies the smaller of its configured limit and the server welcome limit.
+The injected WebSocket implementation itself must enforce the supplied
+`maxMessageBytes` ceiling and upgrade deadline. The SDK additionally checks
+text/binary byte length before UTF-8/JSON decoding and applies the smaller of
+its configured limit and the server welcome limit.
 
 ## Transport and artifacts
 
 HTTPS is accepted for ordinary origins. Plaintext HTTP is deliberately limited
 to numeric loopback addresses such as `127.0.0.1` or `[::1]`; `localhost` is not
 accepted because name resolution is mutable.
+
+Injected `fetch` and `webSocketFactory` adapters are one paired connection-policy
+unit. Deriving same-origin `wss://.../v1/ws` from the HTTPS base URL copies only
+the origin. It does **not** copy or infer CA roots, mTLS identities, proxy or
+`no_proxy` policy, certificate pins, DNS policy, socket agents, or any other
+transport setting from `fetch`. Configure equivalent policy explicitly in both
+adapters. The SDK deliberately does not introspect or duplicate secret TLS
+material.
+
+The SDK borrows the token provider, safe-log hook, `fetch`, and WebSocket factory
+callbacks for the client lifetime; callers retain those callback objects and
+must keep their captured resources valid. Each socket returned by the factory
+is SDK-owned. The SDK closes it after a failed handshake and when the event
+session closes. A factory must return a new socket for every invocation and must
+not share or close that socket behind the SDK.
 
 `desktop.artifacts`, `desktop.clipboard`, `desktop.capture`,
 `desktop.applications`, and `desktop.viewer` expose the remaining v1 domains.
@@ -217,6 +270,17 @@ Tokens must be 32–1024 bytes of canonical `token68` text. `BearerToken`,
 `XenoteerClient`, SDK errors, and `redactedClientOptions()` do not expose the
 credential in string, JSON, or Node inspection output. Avoid embedding tokens in
 source, URLs, exception messages, or application telemetry.
+
+The optional `log` hook receives frozen metadata with a closed schema:
+`operation`, `outcome`, and only bounded attempt/method/route-template/status/
+byte-count/stable-error-code fields. It never receives headers, credentials,
+raw URLs or paths, query values, IDs, tickets, bodies, server prose, close
+reasons, callback errors, or transport exception sources. Unknown paths become
+the literal route `unknown`. Each actual HTTP, artifact, or WebSocket attempt
+emits one `started` event and one terminal event. Streamed downloads emit
+`succeeded` only after bounded EOF; early return, cancellation, and stream error
+emit `failed`. Hook exceptions are swallowed and cannot alter, retry, cancel,
+or replace the underlying operation.
 
 ## Development
 

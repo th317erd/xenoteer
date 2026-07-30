@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import io
 import json
 import pathlib
 import tarfile
@@ -13,6 +14,7 @@ import tomllib
 import unittest
 from collections.abc import Callable, Mapping
 from typing import Any
+from zipfile import ZipFile
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
@@ -26,6 +28,7 @@ from xenoteer import (
     ControlLease,
     Desktop,
     ProtocolRange,
+    ReconnectPolicy,
     ResyncRequired,
     UINT64_MAX,
     UnknownEvent,
@@ -331,6 +334,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                 protocol_range=ProtocolRange(1, 0, 2),
             ),
             transport=transport,
+            transport_ownership="client",
         )
         self.assertEqual(client.negotiated_protocol.minor, 2)
         desktop = client.desktop()
@@ -966,6 +970,7 @@ class LeaseAndDomainTests(unittest.IsolatedAsyncioTestCase):
         failing_client = await XenoteerClient.connect(
             ClientOptions("https://xenoteer.test", TOKEN),
             transport=failing_transport,
+            transport_ownership="client",
         )
         caught: RuntimeError | None = None
         try:
@@ -1506,7 +1511,7 @@ class EventSessionTests(unittest.IsolatedAsyncioTestCase):
                 "https://xenoteer.test",
                 TOKEN,
                 heartbeat_interval=300,
-                max_reconnect_attempts=1,
+                reconnect_policy=ReconnectPolicy(max_attempts=1),
             ),
             transport=transport,
         )
@@ -1549,7 +1554,7 @@ class PackageBoundaryTests(unittest.TestCase):
             *configuration["project"]["optional-dependencies"]["dev"],
         ]
         pins = {
-            canonicalize_name(name): Version(version)
+            canonicalize_name(name): Version(version.split()[0])
             for line in (root / "requirements-test.lock").read_text().splitlines()
             if line and not line.startswith("#")
             for name, separator, version in [line.partition("==")]
@@ -1601,9 +1606,12 @@ class PackageBoundaryTests(unittest.TestCase):
         for source in (root / "src").rglob("*.py"):
             text = source.read_text()
             self.assertNotIn("xenoteer_server", text)
-            self.assertIn("SPDX-License-Identifier: Apache-2.0", text)
+            self.assertIn(
+                "SP" + "DX-License-Identifier: Apache-2.0",
+                text,
+            )
 
-    def test_distribution_verifier_rejects_links_and_bsl_sources(self) -> None:
+    def test_distribution_verifier_rejects_links_and_non_apache_sources(self) -> None:
         root = pathlib.Path(__file__).resolve().parents[1]
         spec = importlib.util.spec_from_file_location(
             "xenoteer_verify_dist", root / "scripts" / "verify_dist.py"
@@ -1620,12 +1628,388 @@ class PackageBoundaryTests(unittest.TestCase):
                 archive.addfile(link)
             with self.assertRaisesRegex(RuntimeError, "non-regular"):
                 module.verify_sdist(archive_path)
-        with self.assertRaisesRegex(RuntimeError, "BSL"):
-            module._verify_python_sources(
-                {
-                    "xenoteer/hidden.py": (
-                        b"# SPDX-License-Identifier: Apache-2.0\n"
-                        b"# SPDX-License-Identifier: " + b"BUSL-1.1\n"
-                    )
-                }
+
+        identifier = b"SP" + b"DX-License-Identifier"
+        invalid_sources = (
+            b"# " + identifier + b": GPL-3.0-only\n",
+            (
+                b"# " + identifier + b": Apache-2.0\n"
+                b"# " + identifier + b": GPL-3.0-only\n"
+            ),
+            b"# " + identifier + b": Apache-2.0 AND MIT\n",
+            b"# " + identifier + b": Apache-2.0 OR MIT\n",
+            b"# " + identifier + b": LicenseRef-Proprietary\n",
+            (
+                b"# " + identifier + b": Apache-2.0\n"
+                b"# " + identifier + b": Apache-2.0\n"
+            ),
+            b"# " + (b"sp" + b"dx-license-identifier") + b": Apache-2.0\n",
+            b"# " + identifier + b" : Apache-2.0\n",
+            (
+                b"# " + identifier + b": Apache-2.0\n"
+                b"payload = '" + identifier + b": MIT'\n"
+            ),
+        )
+        for source in invalid_sources:
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(RuntimeError, "SPDX|Apache"):
+                    module._verify_python_sources({"xenoteer/hidden.py": source})
+
+    def test_wheel_and_sdist_reject_every_spdx_expression_smuggling_form(
+        self,
+    ) -> None:
+        root = pathlib.Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "xenoteer_verify_dist_archives", root / "scripts" / "verify_dist.py"
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        identifier = b"SP" + b"DX-License-Identifier"
+        valid_source = (
+            b"# "
+            + identifier
+            + b": Apache-2.0\n"
+            + b'"""Reviewed package fixture."""\n'
+        )
+        invalid_sources = (
+            valid_source + b"# " + identifier + b": BUSL-1.1\n",
+            valid_source + b"# " + identifier + b": GPL-3.0-only\n",
+            valid_source + b"# " + identifier + b": MIT\n",
+            valid_source + b"# " + identifier + b": AGPL-3.0-only\n",
+            valid_source + b"# " + identifier + b": LicenseRef-Private\n",
+            valid_source + b"# " + identifier + b": Apache-2.0 AND MIT\n",
+            valid_source + b"# " + identifier + b": Apache-2.0 OR MIT\n",
+            valid_source + b"# " + identifier + b": Apache-2.0\n",
+            valid_source
+            + b"VALUE = '"
+            + (b"sp" + b"dx-license-identifier")
+            + b": MIT'\n",
+        )
+
+        def wheel_member(normalized: str) -> str:
+            return normalized.replace(
+                "DIST_INFO", "xenoteer-0.1.0.dist-info", 1
             )
+
+        def sdist_member(normalized: str) -> str:
+            if normalized.startswith("EGG_INFO/"):
+                normalized = normalized.replace(
+                    "EGG_INFO/", "src/xenoteer.egg-info/", 1
+                )
+            return f"xenoteer-0.1.0/{normalized}"
+
+        def contents(name: str, source: bytes) -> bytes:
+            if name.endswith(".py"):
+                return source if name.endswith("xenoteer/__init__.py") else valid_source
+            if name.endswith(("METADATA", "PKG-INFO")):
+                return (
+                    b"License-Expression: Apache-2.0\n"
+                    b"Requires-Dist: httpx\n"
+                    b"Requires-Dist: websockets\n"
+                )
+            return b""
+
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            for index, source in enumerate(invalid_sources):
+                wheel_path = temporary / f"invalid-{index}.whl"
+                with ZipFile(wheel_path, "w") as archive:
+                    for normalized in sorted(module._allowlist("WHEEL_ALLOWLIST.txt")):
+                        archive.writestr(
+                            wheel_member(normalized),
+                            contents(normalized, source),
+                        )
+                with self.subTest(kind="wheel", source=source):
+                    with self.assertRaisesRegex(RuntimeError, "SPDX|Apache|BSL"):
+                        module.verify_wheel(wheel_path)
+
+                sdist_path = temporary / f"invalid-{index}.tar.gz"
+                with tarfile.open(sdist_path, "w:gz") as archive:
+                    for normalized in sorted(module._allowlist("SDIST_ALLOWLIST.txt")):
+                        payload = contents(normalized, source)
+                        member = tarfile.TarInfo(sdist_member(normalized))
+                        member.size = len(payload)
+                        archive.addfile(member, io.BytesIO(payload))
+                with self.subTest(kind="sdist", source=source):
+                    with self.assertRaisesRegex(RuntimeError, "SPDX|Apache|BSL"):
+                        module.verify_sdist(sdist_path)
+
+    def test_wheel_and_sdist_reject_duplicate_and_aliased_member_names(
+        self,
+    ) -> None:
+        root = pathlib.Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "xenoteer_verify_dist_duplicates",
+            root / "scripts" / "verify_dist.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        identifier = b"SP" + b"DX-License-Identifier"
+        valid_source = b"# " + identifier + b": Apache-2.0\n"
+        malicious_source = b"# " + identifier + b": GPL-3.0-only\n"
+        metadata = (
+            b"License-Expression: Apache-2.0\n"
+            b"Requires-Dist: httpx\n"
+            b"Requires-Dist: websockets\n"
+        )
+
+        def contents(name: str) -> bytes:
+            if name.endswith(".py"):
+                return valid_source
+            if name.endswith(("METADATA", "PKG-INFO")):
+                return metadata
+            return b"reviewed\n"
+
+        def wheel_member(normalized: str) -> str:
+            return normalized.replace(
+                "DIST_INFO",
+                "xenoteer-0.1.0.dist-info",
+                1,
+            )
+
+        def sdist_member(normalized: str) -> str:
+            if normalized.startswith("EGG_INFO/"):
+                normalized = normalized.replace(
+                    "EGG_INFO/",
+                    "src/xenoteer.egg-info/",
+                    1,
+                )
+            return f"xenoteer-0.1.0/{normalized}"
+
+        duplicate_cases = (
+            (
+                "malicious-first",
+                "xenoteer/__init__.py",
+                (malicious_source, valid_source),
+            ),
+            (
+                "malicious-last",
+                "xenoteer/__init__.py",
+                (valid_source, malicious_source),
+            ),
+            (
+                "same-valid-source",
+                "xenoteer/__init__.py",
+                (valid_source, valid_source),
+            ),
+            (
+                "license",
+                "DIST_INFO/licenses/LICENSE",
+                (b"reviewed\n", b"reviewed\n"),
+            ),
+            (
+                "metadata",
+                "DIST_INFO/METADATA",
+                (metadata, metadata),
+            ),
+        )
+        sdist_duplicate_cases = (
+            (
+                "malicious-first",
+                "src/xenoteer/__init__.py",
+                (malicious_source, valid_source),
+            ),
+            (
+                "malicious-last",
+                "src/xenoteer/__init__.py",
+                (valid_source, malicious_source),
+            ),
+            (
+                "same-valid-source",
+                "src/xenoteer/__init__.py",
+                (valid_source, valid_source),
+            ),
+            ("license", "LICENSE", (b"reviewed\n", b"reviewed\n")),
+            ("metadata", "PKG-INFO", (metadata, metadata)),
+        )
+        aliases = (
+            "xenoteer/./__init__.py",
+            "./xenoteer/__init__.py",
+            "xenoteer//__init__.py",
+            "xenoteer/../xenoteer/__init__.py",
+            "xenoteer\\__init__.py",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            wheel_allowlist = sorted(module._allowlist("WHEEL_ALLOWLIST.txt"))
+            for index, (label, target, payloads) in enumerate(duplicate_cases):
+                wheel_path = temporary / f"duplicate-{index}.whl"
+                with ZipFile(wheel_path, "w") as archive:
+                    for normalized in wheel_allowlist:
+                        actual = wheel_member(normalized)
+                        if normalized == target:
+                            for payload in payloads:
+                                archive.writestr(actual, payload)
+                        else:
+                            archive.writestr(actual, contents(normalized))
+                with self.subTest(kind="wheel", duplicate=label):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "duplicate|unsafe|boundary|SPDX|Apache",
+                    ):
+                        module.verify_wheel(wheel_path)
+
+            for index, alias in enumerate(aliases):
+                wheel_path = temporary / f"alias-{index}.whl"
+                with ZipFile(wheel_path, "w") as archive:
+                    for normalized in wheel_allowlist:
+                        archive.writestr(
+                            wheel_member(normalized),
+                            contents(normalized),
+                        )
+                    archive.writestr(alias, valid_source)
+                with self.subTest(kind="wheel", alias=alias):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "duplicate|unsafe|boundary",
+                    ):
+                        module.verify_wheel(wheel_path)
+
+            sdist_allowlist = sorted(module._allowlist("SDIST_ALLOWLIST.txt"))
+            for index, (label, target, payloads) in enumerate(
+                sdist_duplicate_cases
+            ):
+                sdist_path = temporary / f"duplicate-{index}.tar.gz"
+                with tarfile.open(sdist_path, "w:gz") as archive:
+                    for normalized in sdist_allowlist:
+                        actual = sdist_member(normalized)
+                        selected = (
+                            payloads
+                            if normalized == target
+                            else (contents(normalized),)
+                        )
+                        for payload in selected:
+                            member = tarfile.TarInfo(actual)
+                            member.size = len(payload)
+                            archive.addfile(member, io.BytesIO(payload))
+                with self.subTest(kind="sdist", duplicate=label):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "duplicate|unsafe|boundary|SPDX|Apache",
+                    ):
+                        module.verify_sdist(sdist_path)
+
+            for index, alias in enumerate(aliases):
+                sdist_path = temporary / f"alias-{index}.tar.gz"
+                with tarfile.open(sdist_path, "w:gz") as archive:
+                    for normalized in sdist_allowlist:
+                        payload = contents(normalized)
+                        member = tarfile.TarInfo(sdist_member(normalized))
+                        member.size = len(payload)
+                        archive.addfile(member, io.BytesIO(payload))
+                    payload = valid_source
+                    member = tarfile.TarInfo(f"xenoteer-0.1.0/{alias}")
+                    member.size = len(payload)
+                    archive.addfile(member, io.BytesIO(payload))
+                with self.subTest(kind="sdist", alias=alias):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "duplicate|unsafe|boundary",
+                    ):
+                        module.verify_sdist(sdist_path)
+
+    def test_wheel_and_sdist_reject_alternative_normalized_identities(
+        self,
+    ) -> None:
+        root = pathlib.Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "xenoteer_verify_dist_identities",
+            root / "scripts" / "verify_dist.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        identifier = b"SP" + b"DX-License-Identifier"
+        valid_source = b"# " + identifier + b": Apache-2.0\n"
+        metadata = (
+            b"License-Expression: Apache-2.0\n"
+            b"Requires-Dist: httpx\n"
+            b"Requires-Dist: websockets\n"
+        )
+
+        def contents(name: str) -> bytes:
+            if name.endswith(".py"):
+                return valid_source
+            if name.endswith(("METADATA", "PKG-INFO")):
+                return metadata
+            return b"reviewed\n"
+
+        def wheel_member(normalized: str, version: str) -> str:
+            return normalized.replace(
+                "DIST_INFO",
+                f"xenoteer-{version}.dist-info",
+                1,
+            )
+
+        def sdist_member(normalized: str, version: str) -> str:
+            if normalized.startswith("EGG_INFO/"):
+                normalized = normalized.replace(
+                    "EGG_INFO/",
+                    "src/xenoteer.egg-info/",
+                    1,
+                )
+            return f"xenoteer-{version}/{normalized}"
+
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            wheel_allowlist = sorted(module._allowlist("WHEEL_ALLOWLIST.txt"))
+            for label, alternative_members in (
+                (
+                    "full",
+                    [
+                        normalized
+                        for normalized in wheel_allowlist
+                        if normalized.startswith("DIST_INFO/")
+                    ],
+                ),
+                ("partial", ["DIST_INFO/METADATA"]),
+            ):
+                wheel_path = temporary / f"alternative-{label}.whl"
+                with ZipFile(wheel_path, "w") as archive:
+                    for normalized in wheel_allowlist:
+                        archive.writestr(
+                            wheel_member(normalized, "0.1.0"),
+                            contents(normalized),
+                        )
+                    for normalized in alternative_members:
+                        archive.writestr(
+                            wheel_member(normalized, "9.9.9"),
+                            contents(normalized),
+                        )
+                with self.subTest(kind="wheel", tree=label):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "identity|duplicate|dist-info|boundary",
+                    ):
+                        module.verify_wheel(wheel_path)
+
+            sdist_allowlist = sorted(module._allowlist("SDIST_ALLOWLIST.txt"))
+            for label, alternative_members in (
+                ("full", sdist_allowlist),
+                ("partial", ["README.md"]),
+            ):
+                sdist_path = temporary / f"alternative-{label}.tar.gz"
+                with tarfile.open(sdist_path, "w:gz") as archive:
+                    for normalized in sdist_allowlist:
+                        payload = contents(normalized)
+                        member = tarfile.TarInfo(
+                            sdist_member(normalized, "0.1.0")
+                        )
+                        member.size = len(payload)
+                        archive.addfile(member, io.BytesIO(payload))
+                    for normalized in alternative_members:
+                        payload = contents(normalized)
+                        member = tarfile.TarInfo(
+                            sdist_member(normalized, "9.9.9")
+                        )
+                        member.size = len(payload)
+                        archive.addfile(member, io.BytesIO(payload))
+                with self.subTest(kind="sdist", tree=label):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "identity|duplicate|root|boundary",
+                    ):
+                        module.verify_sdist(sdist_path)

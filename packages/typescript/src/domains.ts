@@ -162,31 +162,50 @@ export class Artifact {
     const result = await this.#transport.downloadStream(
       `/v1/artifacts/${encodeURIComponent(this.ref.artifact_id)}?${query.toString()}`,
       { ...options, maxResponseBytes: maximum },
+      {
+        contentLength: this.ref.content_length,
+        sha256: this.ref.sha256,
+      },
     );
     if (result.contentType !== this.ref.content_type) {
+      await result.abortBeforeRead("invalid_response");
       throw new XenoteerError("invalid_response", "artifact content type did not match its reference");
     }
     const digest = createHash("sha256");
     let length = 0;
+    let verified = false;
     try {
       for await (const chunk of result.bytes) {
         length += chunk.byteLength;
         digest.update(chunk);
         yield chunk;
       }
+      if (length !== this.ref.content_length) {
+        throw new XenoteerError(
+          "invalid_response",
+          "artifact length did not match its reference",
+        );
+      }
+      if (digest.digest("hex") !== this.ref.sha256) {
+        throw new XenoteerError(
+          "invalid_response",
+          "artifact digest did not match its reference",
+        );
+      }
+      result.markVerifiedEof();
+      verified = true;
     } catch (cause) {
-      if (cause instanceof XenoteerError) throw cause;
-      throw new XenoteerError(
-        "transport",
-        "artifact response stream failed",
-        { cause },
-      );
-    }
-    if (length !== this.ref.content_length) {
-      throw new XenoteerError("invalid_response", "artifact length did not match its reference");
-    }
-    if (digest.digest("hex") !== this.ref.sha256) {
-      throw new XenoteerError("invalid_response", "artifact digest did not match its reference");
+      const failure = cause instanceof XenoteerError
+        ? cause
+        : new XenoteerError(
+            "transport",
+            "artifact response stream failed",
+            { cause },
+          );
+      result.markFailed(failure.code);
+      throw failure;
+    } finally {
+      if (!verified) result.markFailed("request_cancelled");
     }
   }
 
@@ -243,25 +262,35 @@ export class Artifacts {
     }
     const bytes = new Uint8Array(input);
     const digest = await sha256Hex(bytes);
-    const response = await this.#transport.upload(
+    const ref = await this.#transport.upload<ArtifactRef>(
       "/v1/artifacts?purpose=clipboard_input",
       bytes,
       contentType,
       {
         ...options,
-        headers: { ...options.headers, "x-content-sha256": digest },
         maxRequestBytes: 1_048_576,
         maxResponseBytes: 64 * 1024,
       },
+      (response) => {
+        const uploaded = validateArtifactRef(
+          response,
+          this.#desktop,
+          "clipboard_input",
+        );
+        if (
+          uploaded.content_length !== bytes.byteLength
+          || uploaded.sha256 !== digest
+          || uploaded.content_type !== contentType
+        ) {
+          throw new XenoteerError(
+            "invalid_response",
+            "artifact upload metadata did not match input",
+          );
+        }
+        return uploaded;
+      },
+      digest,
     );
-    const ref = validateArtifactRef(response, this.#desktop, "clipboard_input");
-    if (
-      ref.content_length !== bytes.byteLength
-      || ref.sha256 !== digest
-      || ref.content_type !== contentType
-    ) {
-      throw new XenoteerError("invalid_response", "artifact upload metadata did not match input");
-    }
     return new Artifact(this.#desktop, this.#transport, ref);
   }
 
@@ -310,35 +339,45 @@ export class Artifacts {
         await iterator.return?.();
       },
     });
-    const response = await this.#transport.uploadStream(
+    const ref = await this.#transport.uploadStream<ArtifactRef>(
       "/v1/artifacts?purpose=clipboard_input",
       stream,
       metadata.contentLength,
       contentType,
       {
         ...options,
-        headers: { ...options.headers, "x-content-sha256": metadata.sha256 },
         maxRequestBytes: 1_048_576,
         maxResponseBytes: 64 * 1024,
       },
+      (response) => {
+        if (
+          transferred !== metadata.contentLength
+          || digest.digest("hex") !== metadata.sha256
+        ) {
+          throw new XenoteerError(
+            "invalid_response",
+            "artifact source did not match its declared length or digest",
+          );
+        }
+        const uploaded = validateArtifactRef(
+          response,
+          this.#desktop,
+          "clipboard_input",
+        );
+        if (
+          uploaded.content_length !== metadata.contentLength
+          || uploaded.sha256 !== metadata.sha256
+          || uploaded.content_type !== contentType
+        ) {
+          throw new XenoteerError(
+            "invalid_response",
+            "artifact upload metadata did not match input",
+          );
+        }
+        return uploaded;
+      },
+      metadata.sha256,
     );
-    if (
-      transferred !== metadata.contentLength
-      || digest.digest("hex") !== metadata.sha256
-    ) {
-      throw new XenoteerError(
-        "invalid_response",
-        "artifact source did not match its declared length or digest",
-      );
-    }
-    const ref = validateArtifactRef(response, this.#desktop, "clipboard_input");
-    if (
-      ref.content_length !== metadata.contentLength
-      || ref.sha256 !== metadata.sha256
-      || ref.content_type !== contentType
-    ) {
-      throw new XenoteerError("invalid_response", "artifact upload metadata did not match input");
-    }
     return new Artifact(this.#desktop, this.#transport, ref);
   }
 

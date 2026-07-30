@@ -5,6 +5,8 @@ import {
   BearerToken,
   type SafeLogEvent,
   type SafeLogHook,
+  type SafeLogOperation,
+  type SafeLogRoute,
   type TokenSource,
 } from "./options.js";
 import type { ApiProblem, JsonValue } from "./protocol.generated.js";
@@ -45,6 +47,17 @@ export interface ByteStreamResponse {
   readonly contentType: string;
   readonly status: number;
   readonly headers: Headers;
+  /** @internal Artifact validation must confirm length and digest after EOF. */
+  readonly markVerifiedEof: () => void;
+  /** @internal Artifact validation reports failures without exposing details. */
+  readonly markFailed: (errorCode: XenoteerError["code"]) => void;
+  /** @internal Rejects metadata before iteration and cancels the response body. */
+  readonly abortBeforeRead: (errorCode: XenoteerError["code"]) => Promise<void>;
+}
+
+export interface ArtifactResponseExpectation {
+  readonly contentLength: number;
+  readonly sha256: string;
 }
 
 export type CloseHandler = () => void | Promise<void>;
@@ -53,6 +66,7 @@ export type ReconnectHandler = () => void | Promise<void>;
 /** One lifecycle fence shared by the root, desktops, handles, leases, and sessions. */
 export class ClientConnectionState {
   #closed = false;
+  readonly #cancellation = new AbortController();
   readonly #handlers = new Set<CloseHandler>();
   readonly #reconnectHandlers = new Set<ReconnectHandler>();
   #desktopId?: string;
@@ -60,6 +74,10 @@ export class ClientConnectionState {
 
   get closed(): boolean {
     return this.#closed;
+  }
+
+  get signal(): AbortSignal {
+    return this.#cancellation.signal;
   }
 
   assertOpen(): void {
@@ -145,11 +163,74 @@ export class ClientConnectionState {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    this.#cancellation.abort(
+      new XenoteerError("client_closed", "Xenoteer client is closed"),
+    );
     const handlers = [...this.#handlers];
     this.#handlers.clear();
     this.#reconnectHandlers.clear();
     await Promise.allSettled(handlers.map(async (handler) => await handler()));
   }
+}
+
+const RESERVED_CALLER_HEADERS = new Set([
+  "accept",
+  "authorization",
+  "content-length",
+  "content-type",
+  "x-content-sha256",
+]);
+
+function mergeRequestHeaders(
+  sdkHeaders: Readonly<Record<string, string>>,
+  callerHeaders: Readonly<Record<string, string>> | undefined,
+): Readonly<Record<string, string>> {
+  if (callerHeaders === undefined) return sdkHeaders;
+  for (const name of Object.keys(callerHeaders)) {
+    if (RESERVED_CALLER_HEADERS.has(name.toLowerCase())) {
+      throw new XenoteerError(
+        "invalid_request",
+        "caller headers cannot override SDK authority or framing",
+      );
+    }
+  }
+  return { ...sdkHeaders, ...callerHeaders };
+}
+
+async function withCancellation<T>(
+  operation: Promise<T>,
+  signals: readonly AbortSignal[],
+): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const listeners = new Map<AbortSignal, () => void>();
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      for (const [signal, listener] of listeners) {
+        signal.removeEventListener("abort", listener);
+      }
+      callback();
+    };
+    for (const signal of signals) {
+      const listener = (): void => {
+        const reason = signal.reason instanceof XenoteerError
+          ? signal.reason
+          : new XenoteerError("request_cancelled", "local SDK operation cancelled");
+        finish(() => reject(reason));
+      };
+      listeners.set(signal, listener);
+      if (signal.aborted) {
+        listener();
+        return;
+      }
+      signal.addEventListener("abort", listener, { once: true });
+    }
+    void operation.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
 }
 
 function validatePositiveInteger(value: number, maximum: number, label: string): number {
@@ -251,6 +332,97 @@ function validatePath(path: string): void {
   }
 }
 
+/** Maps dynamic request targets to a finite metadata-only diagnostic vocabulary. */
+function classifyRoute(path: string): SafeLogRoute {
+  let pathname: string;
+  try {
+    pathname = new URL(path, "https://xenoteer.invalid").pathname;
+  } catch {
+    return "unknown";
+  }
+  if (pathname === "/v1/status") return "/v1/status";
+  if (pathname === "/v1/ws") return "/v1/ws";
+  if (pathname === "/v1/artifacts") return "/v1/artifacts";
+  if (/^\/v1\/artifacts\/[^/]+$/u.test(pathname)) {
+    return "/v1/artifacts/:artifact_id";
+  }
+  const desktop = "^/v1/desktops/[^/]+";
+  const routes: ReadonlyArray<readonly [RegExp, SafeLogRoute]> = [
+    [new RegExp(`${desktop}/commands$`, "u"), "/v1/desktops/:desktop_id/commands"],
+    [
+      new RegExp(`${desktop}/commands/[^/]+$`, "u"),
+      "/v1/desktops/:desktop_id/commands/:command_id",
+    ],
+    [new RegExp(`${desktop}/lease$`, "u"), "/v1/desktops/:desktop_id/lease"],
+    [
+      new RegExp(`${desktop}/lease/[^/]+/renew$`, "u"),
+      "/v1/desktops/:desktop_id/lease/:lease_id/renew",
+    ],
+    [new RegExp(`${desktop}/windows$`, "u"), "/v1/desktops/:desktop_id/windows"],
+    [
+      new RegExp(`${desktop}/windows/query$`, "u"),
+      "/v1/desktops/:desktop_id/windows/query",
+    ],
+    [
+      new RegExp(`${desktop}/windows/resolve$`, "u"),
+      "/v1/desktops/:desktop_id/windows/resolve",
+    ],
+    [
+      new RegExp(`${desktop}/windows/wait$`, "u"),
+      "/v1/desktops/:desktop_id/windows/wait",
+    ],
+    [
+      new RegExp(`${desktop}/windows/[^/]+$`, "u"),
+      "/v1/desktops/:desktop_id/windows/:window_reference",
+    ],
+    [
+      new RegExp(`${desktop}/accessibility/elements/list$`, "u"),
+      "/v1/desktops/:desktop_id/accessibility/elements/list",
+    ],
+    [
+      new RegExp(`${desktop}/accessibility/elements/query$`, "u"),
+      "/v1/desktops/:desktop_id/accessibility/elements/query",
+    ],
+    [
+      new RegExp(`${desktop}/accessibility/elements/resolve$`, "u"),
+      "/v1/desktops/:desktop_id/accessibility/elements/resolve",
+    ],
+    [
+      new RegExp(`${desktop}/accessibility/elements/snapshot$`, "u"),
+      "/v1/desktops/:desktop_id/accessibility/elements/snapshot",
+    ],
+    [
+      new RegExp(`${desktop}/accessibility/elements/wait$`, "u"),
+      "/v1/desktops/:desktop_id/accessibility/elements/wait",
+    ],
+    [
+      new RegExp(`${desktop}/clipboard/read$`, "u"),
+      "/v1/desktops/:desktop_id/clipboard/read",
+    ],
+    [
+      new RegExp(`${desktop}/screenshots$`, "u"),
+      "/v1/desktops/:desktop_id/screenshots",
+    ],
+    [
+      new RegExp(`${desktop}/viewer-tickets$`, "u"),
+      "/v1/desktops/:desktop_id/viewer-tickets",
+    ],
+  ];
+  return routes.find(([pattern]) => pattern.test(pathname))?.[1] ?? "unknown";
+}
+
+type SafeLogInput = {
+  readonly operation: SafeLogOperation;
+  readonly outcome: SafeLogEvent["outcome"];
+  readonly attempt?: number;
+  readonly method?: "GET" | "POST" | "DELETE";
+  readonly route?: SafeLogRoute;
+  readonly status?: number;
+  readonly requestBytes?: number;
+  readonly responseBytes?: number;
+  readonly errorCode?: XenoteerError["code"];
+};
+
 /** Bounded, retry-neutral transport. Every call performs exactly one fetch. */
 export class HttpTransport {
   readonly #baseUrl: string;
@@ -299,21 +471,41 @@ export class HttpTransport {
     await this.state.close();
   }
 
-  async authorizationHeader(): Promise<string> {
+  async authorizationHeader(signal?: AbortSignal): Promise<string> {
     this.state.assertOpen();
     let source: string;
     try {
-      source = typeof this.#token === "function" ? await this.#token() : this.#token;
-    } catch {
+      const resolution = Promise.resolve(
+        typeof this.#token === "function" ? this.#token() : this.#token,
+      );
+      source = await withCancellation(
+        resolution,
+        signal === undefined
+          ? [this.state.signal]
+          : [this.state.signal, signal],
+      );
+    } catch (cause) {
+      if (cause instanceof XenoteerError) throw cause;
       throw new XenoteerError("invalid_token", "Xenoteer token provider failed");
     }
     return new BearerToken(source).authorizationHeader();
   }
 
-  safeLog(event: SafeLogEvent): void {
+  safeLog(event: SafeLogInput): void {
     if (this.#log === undefined) return;
+    const closed: SafeLogEvent = Object.freeze({
+      operation: event.operation,
+      outcome: event.outcome,
+      ...(event.attempt === undefined ? {} : { attempt: event.attempt }),
+      ...(event.method === undefined ? {} : { method: event.method }),
+      ...(event.route === undefined ? {} : { route: event.route }),
+      ...(event.status === undefined ? {} : { status: event.status }),
+      ...(event.requestBytes === undefined ? {} : { requestBytes: event.requestBytes }),
+      ...(event.responseBytes === undefined ? {} : { responseBytes: event.responseBytes }),
+      ...(event.errorCode === undefined ? {} : { errorCode: event.errorCode }),
+    });
     try {
-      this.#log(Object.freeze({ ...event }));
+      this.#log(closed);
     } catch {
       // Diagnostics are observational and can never break SDK behavior.
     }
@@ -340,61 +532,79 @@ export class HttpTransport {
     if (encoded !== undefined && new TextEncoder().encode(encoded).byteLength > maxRequest) {
       throw new XenoteerError("request_too_large", `request exceeds ${maxRequest} bytes`);
     }
-    const headers = {
+    const headers = mergeRequestHeaders({
       accept: "application/json, application/problem+json",
       ...(encoded === undefined ? {} : { "content-type": "application/json" }),
-      ...options.headers,
-    };
-    const response = await this.#perform(
+    }, options.headers);
+    return await this.#perform<T>(
+      "http.request",
       method,
       path,
       encoded,
       headers,
       options,
       options.maxResponseBytes ?? this.#maxResponseBytes,
+      (response, bytes) => {
+        if (contentType(response) !== "application/json") {
+          throw new XenoteerError(
+            "invalid_response",
+            "successful response was not application/json",
+          );
+        }
+        return decodeJson(bytes) as T;
+      },
     );
-    if (contentType(response.response) !== "application/json") {
-      throw new XenoteerError("invalid_response", "successful response was not application/json");
-    }
-    return decodeJson(response.bytes) as T;
   }
 
-  async upload(
+  async upload<T = unknown>(
     path: string,
     bytes: Uint8Array,
     contentTypeValue: string,
     options: RequestOptions = {},
-  ): Promise<unknown> {
+    validate?: (value: unknown) => T,
+    integritySha256?: string,
+  ): Promise<T> {
     const max = options.maxRequestBytes ?? this.#maxArtifactBytes;
     if (bytes.byteLength < 1 || bytes.byteLength > max) {
       throw new XenoteerError("request_too_large", `artifact upload must be 1..${max} bytes`);
     }
-    const response = await this.#perform(
+    return await this.#perform<T>(
+      "artifact.upload",
       "POST",
       path,
       new Uint8Array(bytes).buffer,
-      {
+      mergeRequestHeaders({
         accept: "application/json, application/problem+json",
         "content-type": contentTypeValue,
         "content-length": String(bytes.byteLength),
-        ...options.headers,
-      },
+        ...(integritySha256 === undefined
+          ? {}
+          : { "x-content-sha256": integritySha256 }),
+      }, options.headers),
       options,
       options.maxResponseBytes ?? this.#maxResponseBytes,
+      (response, responseBytes) => {
+        if (contentType(response) !== "application/json") {
+          throw new XenoteerError(
+            "invalid_response",
+            "artifact upload response was not JSON",
+          );
+        }
+        const decoded = decodeJson(responseBytes);
+        return validate === undefined ? decoded as T : validate(decoded);
+      },
     );
-    if (contentType(response.response) !== "application/json") {
-      throw new XenoteerError("invalid_response", "artifact upload response was not JSON");
-    }
-    return decodeJson(response.bytes);
   }
 
-  async uploadStream(
+  async uploadStream<T = unknown>(
     path: string,
     stream: ReadableStream<Uint8Array>,
     contentLength: number,
     contentTypeValue: string,
     options: RequestOptions = {},
-  ): Promise<unknown> {
+    validate?: (value: unknown) => T,
+    integritySha256?: string,
+  ): Promise<T> {
     const max = options.maxRequestBytes ?? this.#maxArtifactBytes;
     if (
       !Number.isSafeInteger(contentLength)
@@ -406,45 +616,59 @@ export class HttpTransport {
         `artifact upload must be 1..${max} bytes`,
       );
     }
-    const response = await this.#perform(
+    return await this.#perform<T>(
+      "artifact.upload",
       "POST",
       path,
       stream,
-      {
+      mergeRequestHeaders({
         accept: "application/json, application/problem+json",
         "content-type": contentTypeValue,
         "content-length": String(contentLength),
-        ...options.headers,
-      },
+        ...(integritySha256 === undefined
+          ? {}
+          : { "x-content-sha256": integritySha256 }),
+      }, options.headers),
       options,
       options.maxResponseBytes ?? this.#maxResponseBytes,
+      (response, responseBytes) => {
+        if (contentType(response) !== "application/json") {
+          throw new XenoteerError(
+            "invalid_response",
+            "artifact upload response was not JSON",
+          );
+        }
+        const decoded = decodeJson(responseBytes);
+        return validate === undefined ? decoded as T : validate(decoded);
+      },
     );
-    if (contentType(response.response) !== "application/json") {
-      throw new XenoteerError("invalid_response", "artifact upload response was not JSON");
-    }
-    return decodeJson(response.bytes);
   }
 
   async download(path: string, options: RequestOptions = {}): Promise<ByteResponse> {
-    const result = await this.#perform(
+    return await this.#perform<ByteResponse>(
+      "artifact.download",
       "GET",
       path,
       undefined,
-      { accept: "application/octet-stream, image/png, image/webp, image/bmp", ...options.headers },
+      mergeRequestHeaders(
+        { accept: "application/octet-stream, image/png, image/webp, image/bmp" },
+        options.headers,
+      ),
       options,
       options.maxResponseBytes ?? this.#maxArtifactBytes,
+      (response, bytes) => ({
+        bytes,
+        contentType: contentType(response),
+        status: response.status,
+        headers: new Headers(response.headers),
+      }),
     );
-    return {
-      bytes: result.bytes,
-      contentType: contentType(result.response),
-      status: result.response.status,
-      headers: new Headers(result.response.headers),
-    };
   }
 
   async downloadStream(
     path: string,
     options: RequestOptions = {},
+    expected?: ArtifactResponseExpectation,
   ): Promise<ByteStreamResponse> {
     this.state.assertOpen();
     validatePath(path);
@@ -455,86 +679,207 @@ export class HttpTransport {
       3_600_000,
       "request timeout",
     );
+    const requestHeaders = mergeRequestHeaders(
+      { accept: "application/octet-stream, image/png, image/webp, image/bmp" },
+      options.headers,
+    );
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const onAbort = (): void => controller.abort(options.signal?.reason);
-    if (options.signal?.aborted === true) controller.abort(options.signal.reason);
+    const timer = setTimeout(() => controller.abort(
+      new XenoteerError("request_timeout", "artifact download timed out"),
+    ), timeoutMs);
+    const onAbort = (): void => controller.abort(
+      new XenoteerError(
+        "request_cancelled",
+        "local artifact download cancelled",
+        { cause: options.signal?.reason },
+      ),
+    );
+    const onStateAbort = (): void => controller.abort(this.state.signal.reason);
+    if (options.signal?.aborted === true) onAbort();
     else options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (this.state.signal.aborted) onStateAbort();
+    else this.state.signal.addEventListener("abort", onStateAbort, { once: true });
+    const route = classifyRoute(path);
+    this.safeLog({
+      operation: "artifact.download",
+      outcome: "started",
+      attempt: 1,
+      method: "GET",
+      route,
+    });
+    let terminalLogged = false;
+    const logTerminal = (
+      outcome: "succeeded" | "failed",
+      metadata: {
+        readonly status?: number;
+        readonly responseBytes?: number;
+        readonly errorCode?: XenoteerError["code"];
+      } = {},
+    ): void => {
+      if (terminalLogged) return;
+      terminalLogged = true;
+      this.safeLog({
+        operation: "artifact.download",
+        outcome,
+        attempt: 1,
+        method: "GET",
+        route,
+        ...metadata,
+      });
+    };
+    const typedFailure = (cause: unknown): XenoteerError => {
+      if (cause instanceof XenoteerError) return cause;
+      if (controller.signal.reason instanceof XenoteerError) {
+        return controller.signal.reason;
+      }
+      if (controller.signal.aborted) {
+        return new XenoteerError(
+          "request_timeout",
+          "artifact download timed out",
+          { cause },
+        );
+      }
+      return new XenoteerError(
+        "transport",
+        "artifact download transport failed",
+        { cause },
+      );
+    };
     let response: Response;
     try {
       response = await this.#fetch(`${this.#baseUrl}${path}`, {
         method: "GET",
         headers: new Headers({
-          authorization: await this.authorizationHeader(),
-          accept: "application/octet-stream, image/png, image/webp, image/bmp",
-          ...options.headers,
+          authorization: await this.authorizationHeader(controller.signal),
+          ...requestHeaders,
         }),
         signal: controller.signal,
       });
     } catch (cause) {
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", onAbort);
-      if (options.signal?.aborted) {
+      this.state.signal.removeEventListener("abort", onStateAbort);
+      const failure = typedFailure(cause);
+      logTerminal("failed", { errorCode: failure.code });
+      throw failure;
+    }
+    try {
+      if (!response.ok) {
+        const bytes = await collectBounded(
+          response,
+          Math.min(this.#maxResponseBytes, 64 * 1024),
+        );
+        if (contentType(response) === "application/problem+json") {
+          const problem = decodeJson(bytes);
+          if (typeof problem === "object" && problem !== null && !Array.isArray(problem)) {
+            throw errorFromProblem(response.status, problem as ApiProblem);
+          }
+        }
         throw new XenoteerError(
-          "request_cancelled",
-          "local artifact download cancelled",
-          { cause },
+          "unexpected_http_status",
+          `Xenoteer request failed with HTTP ${response.status}`,
+          { status: response.status },
         );
       }
-      if (controller.signal.aborted) {
-        throw new XenoteerError("request_timeout", "artifact download timed out", { cause });
-      }
-      throw new XenoteerError("transport", "artifact download transport failed", { cause });
-    }
-    if (!response.ok) {
-      const bytes = await collectBounded(response, Math.min(limit, 64 * 1024));
-      clearTimeout(timer);
-      options.signal?.removeEventListener("abort", onAbort);
-      if (contentType(response) === "application/problem+json") {
-        const problem = decodeJson(bytes);
-        if (typeof problem === "object" && problem !== null && !Array.isArray(problem)) {
-          throw errorFromProblem(response.status, problem as ApiProblem);
+      if (expected !== undefined) {
+        const declaredLength = response.headers.get("content-length");
+        const declaredDigest = response.headers.get("x-content-sha256");
+        if (
+          declaredLength === null
+          || !/^(?:0|[1-9][0-9]*)$/u.test(declaredLength)
+          || Number(declaredLength) !== expected.contentLength
+          || declaredDigest === null
+          || !/^[0-9a-f]{64}$/u.test(declaredDigest)
+          || declaredDigest !== expected.sha256
+        ) {
+          await response.body?.cancel();
+          throw new XenoteerError(
+            "invalid_response",
+            "artifact response integrity headers did not match its reference",
+          );
         }
       }
-      throw new XenoteerError(
-        "unexpected_http_status",
-        `Xenoteer request failed with HTTP ${response.status}`,
-        { status: response.status },
-      );
-    }
-    const declared = response.headers.get("content-length");
-    if (
-      declared !== null
-      && (
-        !Number.isSafeInteger(Number(declared))
-        || Number(declared) < 0
-        || Number(declared) > limit
-      )
-    ) {
+      const declared = response.headers.get("content-length");
+      if (
+        declared !== null
+        && (
+          !Number.isSafeInteger(Number(declared))
+          || Number(declared) < 0
+          || Number(declared) > limit
+        )
+      ) {
+        await response.body?.cancel();
+        throw new XenoteerError("response_too_large", `response exceeds ${limit} bytes`);
+      }
+    } catch (cause) {
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", onAbort);
-      await response.body?.cancel();
-      throw new XenoteerError("response_too_large", `response exceeds ${limit} bytes`);
+      this.state.signal.removeEventListener("abort", onStateAbort);
+      const failure = typedFailure(cause);
+      logTerminal("failed", {
+        status: response.status,
+        errorCode: failure.code,
+      });
+      throw failure;
     }
     const body = response.body;
+    const stateSignal = this.state.signal;
+    let streamBytes = 0;
+    let streamReachedEof = false;
     const bytes = (async function* (): AsyncGenerator<Uint8Array> {
-      let total = 0;
       const reader = body?.getReader();
       try {
-        if (reader === undefined) return;
+        if (reader === undefined) {
+          streamReachedEof = true;
+          return;
+        }
         while (true) {
-          const next = await reader.read();
-          if (next.done) return;
-          total += next.value.byteLength;
-          if (total > limit) {
+          let next: ReadableStreamReadResult<Uint8Array>;
+          try {
+            next = await reader.read();
+          } catch (cause) {
+            const failure = typedFailure(cause);
+            logTerminal("failed", {
+              status: response.status,
+              errorCode: failure.code,
+            });
+            throw failure;
+          }
+          if (next.done) {
+            streamReachedEof = true;
+            return;
+          }
+          streamBytes += next.value.byteLength;
+          if (streamBytes > limit) {
             await reader.cancel();
-            throw new XenoteerError("response_too_large", `response exceeds ${limit} bytes`);
+            const failure = new XenoteerError(
+              "response_too_large",
+              `response exceeds ${limit} bytes`,
+            );
+            logTerminal("failed", {
+              status: response.status,
+              errorCode: failure.code,
+            });
+            throw failure;
           }
           yield next.value;
         }
       } finally {
+        if (!streamReachedEof && !terminalLogged) {
+          try {
+            await reader?.cancel();
+          } catch {
+            // The safe terminal event is authoritative even if cancellation fails.
+          }
+          logTerminal("failed", {
+            status: response.status,
+            responseBytes: streamBytes,
+            errorCode: "request_cancelled",
+          });
+        }
         clearTimeout(timer);
         options.signal?.removeEventListener("abort", onAbort);
+        stateSignal.removeEventListener("abort", onStateAbort);
         reader?.releaseLock();
       }
     })();
@@ -543,31 +888,75 @@ export class HttpTransport {
       contentType: contentType(response),
       status: response.status,
       headers: new Headers(response.headers),
+      markVerifiedEof: () => {
+        if (!streamReachedEof) {
+          logTerminal("failed", {
+            status: response.status,
+            responseBytes: streamBytes,
+            errorCode: "invalid_response",
+          });
+          return;
+        }
+        logTerminal("succeeded", {
+          status: response.status,
+          responseBytes: streamBytes,
+        });
+      },
+      markFailed: (errorCode) => {
+        logTerminal("failed", {
+          status: response.status,
+          responseBytes: streamBytes,
+          errorCode,
+        });
+      },
+      abortBeforeRead: async (errorCode) => {
+        try {
+          await body?.cancel();
+        } catch {
+          // The diagnostic outcome remains stable even if cancellation fails.
+        }
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", onAbort);
+        this.state.signal.removeEventListener("abort", onStateAbort);
+        logTerminal("failed", {
+          status: response.status,
+          responseBytes: 0,
+          errorCode,
+        });
+      },
     };
   }
 
   async deleteEmpty(path: string, options: RequestOptions = {}): Promise<void> {
-    const result = await this.#perform(
+    return await this.#perform<void>(
+      "artifact.delete",
       "DELETE",
       path,
       undefined,
-      { accept: "application/problem+json", ...options.headers },
+      mergeRequestHeaders({ accept: "application/problem+json" }, options.headers),
       options,
       4096,
+      (_response, bytes) => {
+        if (bytes.byteLength !== 0) {
+          throw new XenoteerError(
+            "invalid_response",
+            "delete response unexpectedly contained a body",
+          );
+        }
+      },
     );
-    if (result.bytes.byteLength !== 0) {
-      throw new XenoteerError("invalid_response", "delete response unexpectedly contained a body");
-    }
   }
 
-  async #perform(
+  async #perform<T>(
+    operation: SafeLogOperation,
     method: "GET" | "POST" | "DELETE",
     path: string,
     body: BodyInit | undefined,
     extraHeaders: Readonly<Record<string, string>>,
     options: RequestOptions,
     maxResponseBytes: number,
-  ): Promise<{ readonly response: Response; readonly bytes: Uint8Array }> {
+    decode: (response: Response, bytes: Uint8Array) => T | Promise<T>,
+  ): Promise<T> {
     this.state.assertOpen();
     validatePath(path);
     const timeoutMs = validatePositiveInteger(
@@ -577,10 +966,21 @@ export class HttpTransport {
     );
     validatePositiveInteger(maxResponseBytes, MAX_ARTIFACT_BYTES, "response byte limit");
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const onAbort = (): void => controller.abort(options.signal?.reason);
-    if (options.signal?.aborted === true) controller.abort(options.signal.reason);
+    const timer = setTimeout(() => controller.abort(
+      new XenoteerError("request_timeout", "Xenoteer request timed out"),
+    ), timeoutMs);
+    const onAbort = (): void => controller.abort(
+      new XenoteerError(
+        "request_cancelled",
+        "local request cancelled; server command was not cancelled",
+        { cause: options.signal?.reason },
+      ),
+    );
+    const onStateAbort = (): void => controller.abort(this.state.signal.reason);
+    if (options.signal?.aborted === true) onAbort();
     else options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (this.state.signal.aborted) onStateAbort();
+    else this.state.signal.addEventListener("abort", onStateAbort, { once: true });
     try {
       const requestBytes = body === undefined
         ? undefined
@@ -589,15 +989,17 @@ export class HttpTransport {
           : body instanceof ArrayBuffer
             ? body.byteLength
             : undefined;
+      const route = classifyRoute(path);
       this.safeLog({
-        operation: "http.request",
+        operation,
         outcome: "started",
+        attempt: 1,
         method,
-        path,
+        route,
         ...(requestBytes === undefined ? {} : { requestBytes }),
       });
       const headers = new Headers({
-        authorization: await this.authorizationHeader(),
+        authorization: await this.authorizationHeader(controller.signal),
         ...extraHeaders,
       });
       const init = {
@@ -611,12 +1013,8 @@ export class HttpTransport {
       try {
         response = await this.#fetch(`${this.#baseUrl}${path}`, init);
       } catch (cause) {
-        if (options.signal?.aborted) {
-          throw new XenoteerError(
-            "request_cancelled",
-            "local request cancelled; server command was not cancelled",
-            { cause },
-          );
+        if (controller.signal.reason instanceof XenoteerError) {
+          throw controller.signal.reason;
         }
         if (controller.signal.aborted) {
           throw new XenoteerError("request_timeout", "Xenoteer request timed out", { cause });
@@ -638,32 +1036,38 @@ export class HttpTransport {
           { status: response.status },
         );
       }
+      const decoded = await decode(response, bytes);
       this.safeLog({
-        operation: "http.request",
+        operation,
         outcome: "succeeded",
+        attempt: 1,
         method,
-        path,
+        route,
         status: response.status,
+        ...(requestBytes === undefined ? {} : { requestBytes }),
         responseBytes: bytes.byteLength,
       });
-      return { response, bytes };
+      return decoded;
     } catch (error) {
+      const failure = error instanceof XenoteerError
+        ? error
+        : new XenoteerError("transport", "Xenoteer transport failed", {
+            cause: error,
+          });
       this.safeLog({
-        operation: "http.request",
+        operation,
         outcome: "failed",
+        attempt: 1,
         method,
-        path,
-        ...(error instanceof XenoteerError
-          ? {
-              errorCode: error.code,
-              status: error.status,
-            }
-          : {}),
+        route: classifyRoute(path),
+        errorCode: failure.code,
+        ...(failure.status === undefined ? {} : { status: failure.status }),
       });
-      throw error;
+      throw failure;
     } finally {
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", onAbort);
+      this.state.signal.removeEventListener("abort", onStateAbort);
     }
   }
 }

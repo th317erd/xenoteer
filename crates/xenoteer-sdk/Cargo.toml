@@ -10,6 +10,15 @@ license = "Apache-2.0"
 readme = "README.md"
 publish = true
 
+[features]
+default = ["rustls-tls", "native-roots"]
+rustls-tls = [
+  "dep:hyper-rustls",
+  "dep:rustls",
+  "tokio-tungstenite/__rustls-tls",
+]
+native-roots = ["rustls-tls", "dep:rustls-native-certs"]
+
 [[bin]]
 name = "xenoteer-sdk-conformance"
 path = "src/bin/xenoteer-sdk-conformance.rs"
@@ -20,8 +29,10 @@ futures-util.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
-hyper-rustls.workspace = true
+hyper-rustls = { workspace = true, optional = true }
 hyper-util.workspace = true
+rustls = { workspace = true, optional = true }
+rustls-native-certs = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -29,8 +40,13 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 tokio-util.workspace = true
+tower-service.workspace = true
 tungstenite.workspace = true
 xenoteer-protocol = { version = "=0.1.0", path = "../xenoteer-protocol" }
+
+[dev-dependencies]
+base64.workspace = true
+tokio-rustls.workspace = true
 
 [lints]
 workspace = true

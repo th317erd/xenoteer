@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import asyncio
+import datetime as dt
 import hashlib
 import inspect
 import re
@@ -27,7 +27,7 @@ ArtifactPurpose: TypeAlias = Literal[
     "action_trace",
     "support_bundle",
 ]
-ArtifactSink: TypeAlias = Callable[[bytes], None | Awaitable[None]]
+ArtifactSink: TypeAlias = Callable[[bytes], Awaitable[None]]
 
 _PURPOSE_LIMITS: dict[str, int] = {
     "clipboard_input": MAX_CLIPBOARD_ARTIFACT_BYTES,
@@ -38,6 +38,13 @@ _PURPOSE_LIMITS: dict[str, int] = {
 }
 _MEDIA_TOKEN = re.compile(r"[!#$&^_.+A-Za-z0-9-]+\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def _is_async_sink(value: object) -> bool:
+    return callable(value) and (
+        inspect.iscoroutinefunction(value)
+        or inspect.iscoroutinefunction(getattr(value, "__call__", None))
+    )
 
 
 def _uuid(value: object, label: str) -> str:
@@ -296,8 +303,11 @@ class Artifacts:
         if not isinstance(artifact, ArtifactRef):
             raise XenoteerError("invalid_request", "artifact reference is invalid")
         artifact.require_scope(self._desktop_id, self._desktop_generation)
-        if not callable(sink):
-            raise XenoteerError("invalid_request", "artifact sink must be callable")
+        if not _is_async_sink(sink):
+            raise XenoteerError(
+                "invalid_request",
+                "artifact sink must be an async callable",
+            )
         download = getattr(self._transport, "download_artifact", None)
         if download is None:
             raise XenoteerError(
@@ -306,9 +316,7 @@ class Artifacts:
 
         async def checked_sink(chunk: bytes) -> None:
             try:
-                outcome = sink(chunk)
-                if inspect.isawaitable(outcome):
-                    await outcome
+                await sink(chunk)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -321,7 +329,7 @@ class Artifacts:
     async def download_bytes(self, artifact: ArtifactRef) -> bytes:
         output = bytearray()
 
-        def append(chunk: bytes) -> None:
+        async def append(chunk: bytes) -> None:
             output.extend(chunk)
 
         await self.download_to(artifact, append)

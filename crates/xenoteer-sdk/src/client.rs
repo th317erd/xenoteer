@@ -41,7 +41,8 @@ impl XenoteerClient {
             status.protocol_max.minor(),
         )
         .map_err(|_| SdkError::InvalidResponse)?;
-        let negotiated_protocol = xenoteer_protocol::VersionRange::V1
+        let negotiated_protocol = transport
+            .protocol_range()
             .negotiate(server_range)
             .map_err(|_| SdkError::UnsupportedProtocol)?;
         Ok(Self {

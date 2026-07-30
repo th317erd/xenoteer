@@ -343,6 +343,9 @@ class RuntimeHttpTests(unittest.IsolatedAsyncioTestCase):
         reference = ArtifactRef.from_wire(artifact_wire(body))
         writes: list[bytes] = []
 
+        async def write(chunk: bytes) -> None:
+            writes.append(chunk)
+
         def wrong_header(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 200,
@@ -362,7 +365,7 @@ class RuntimeHttpTests(unittest.IsolatedAsyncioTestCase):
                 ClientOptions("https://xenoteer.test", TOKEN), http_client=http
             )
             with self.assertRaises(XenoteerError):
-                await transport.download_artifact("/v1/artifacts/x", reference, writes.append)
+                await transport.download_artifact("/v1/artifacts/x", reference, write)
         self.assertEqual(writes, [])
 
         def wrong_digest(request: httpx.Request) -> httpx.Response:
@@ -384,7 +387,7 @@ class RuntimeHttpTests(unittest.IsolatedAsyncioTestCase):
                 ClientOptions("https://xenoteer.test", TOKEN), http_client=http
             )
             with self.assertRaisesRegex(XenoteerError, "digest"):
-                await transport.download_artifact("/v1/artifacts/x", reference, writes.append)
+                await transport.download_artifact("/v1/artifacts/x", reference, write)
         self.assertEqual(writes, [b"altered!"])
 
 

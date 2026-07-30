@@ -1,7 +1,10 @@
 //! Bounded, retry-neutral HTTP transport for the v1 control API.
 
 use std::{
-    fmt, io,
+    fmt,
+    future::Future,
+    io,
+    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -22,16 +25,25 @@ use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
     rt::TokioExecutor,
 };
+use rustls::{
+    ClientConfig, RootCertStore,
+    pki_types::{CertificateDer, PrivateKeyDer},
+};
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::Notify;
+use tokio::{sync::Notify, time::Instant};
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
+use tower_service::Service;
 use xenoteer_protocol::{
     ArtifactContentType, ArtifactRef, CapabilityReport, CommandEnvelope, CommandId, CommandResult,
     DesktopGeneration, DesktopId, LeaseAcquireRequest, LeaseReleaseRequest, LeaseRenewRequest,
     LeaseStateView, Problem, Sha256Digest, StatusResponse, VersionRange,
+};
+
+use crate::{
+    ClientOptions, SafeLogEvent, SafeLogOperation, SafeLogOutcome, SafeLogTransport, TlsPolicy,
 };
 
 /// Maximum response-body size accepted by the SDK.
@@ -43,7 +55,7 @@ pub const MAX_ACCESSIBILITY_RESPONSE_BYTES: usize =
 /// Maximum long-poll duration accepted by [`Client::wait_command`].
 pub const MAX_WAIT_TIMEOUT_MS: u32 = 30_000;
 
-/// Default end-to-end deadline for one HTTP exchange, including response body.
+/// Default end-to-end deadline for credential resolution plus one complete HTTP exchange.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
 /// Bounded time for a completed semantic wait response to arrive and decode.
 pub const LONG_POLL_RESPONSE_HEADROOM: Duration = Duration::from_secs(5);
@@ -55,7 +67,49 @@ const MAX_BEARER_TOKEN_BYTES: usize = 1024;
 const ARTIFACT_SHA256_HEADER: &str = "x-content-sha256";
 
 type RequestBody = UnsyncBoxBody<Bytes, io::Error>;
-type HttpClient = HyperClient<HttpsConnector<HttpConnector>, RequestBody>;
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+type HttpClient = HyperClient<ConnectTimeout<HttpsConnector<HttpConnector>>, RequestBody>;
+
+#[derive(Clone)]
+struct ConnectTimeout<C> {
+    connector: C,
+    timeout: Duration,
+}
+
+impl<C> Service<Uri> for ConnectTimeout<C>
+where
+    C: Service<Uri> + Clone + Send + 'static,
+    C::Response: Send + 'static,
+    C::Error: Into<BoxError>,
+    C::Future: Send + 'static,
+{
+    type Response = C::Response;
+    type Error = BoxError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.connector.poll_ready(context).map_err(Into::into)
+    }
+
+    fn call(&mut self, uri: Uri) -> Self::Future {
+        let future = self.connector.call(uri);
+        let timeout = self.timeout;
+        Box::pin(async move {
+            tokio::time::timeout(timeout, future)
+                .await
+                .map_err(|_| {
+                    Box::<dyn std::error::Error + Send + Sync>::from(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "connect timeout",
+                    ))
+                })?
+                .map_err(Into::into)
+        })
+    }
+}
 
 /// An origin-only HTTPS or loopback HTTP base URI.
 #[derive(Clone, PartialEq, Eq)]
@@ -176,6 +230,9 @@ pub enum SdkError {
     /// The bearer token is outside its bounds or contains invalid bytes.
     #[error("invalid bearer token")]
     InvalidBearerToken,
+    /// A caller token provider failed or panicked without exposing its error.
+    #[error("SDK token provider failed")]
+    TokenProvider,
     /// A typed request failed protocol validation.
     #[error("invalid SDK request")]
     InvalidRequest,
@@ -276,8 +333,9 @@ impl SdkError {
 #[derive(Clone)]
 pub struct Client {
     base: BaseUri,
-    token: BearerToken,
     http: HttpClient,
+    tls_config: Arc<ClientConfig>,
+    options: Arc<ClientOptions>,
     request_timeout: Duration,
     state: Arc<ClientState>,
 }
@@ -299,6 +357,43 @@ pub(crate) struct EventTaskGuard {
     state: Arc<ClientState>,
 }
 
+struct OperationLogGuard {
+    client: Client,
+    transport: SafeLogTransport,
+    operation: SafeLogOperation,
+    succeeded: bool,
+}
+
+impl OperationLogGuard {
+    fn new(client: &Client, transport: SafeLogTransport, operation: SafeLogOperation) -> Self {
+        client.safe_log(transport, operation, SafeLogOutcome::Started);
+        Self {
+            client: client.clone(),
+            transport,
+            operation,
+            succeeded: false,
+        }
+    }
+
+    fn succeed(&mut self) {
+        self.succeeded = true;
+    }
+}
+
+impl Drop for OperationLogGuard {
+    fn drop(&mut self) {
+        self.client.safe_log(
+            self.transport,
+            self.operation,
+            if self.succeeded {
+                SafeLogOutcome::Succeeded
+            } else {
+                SafeLogOutcome::Failed
+            },
+        );
+    }
+}
+
 impl Drop for EventTaskGuard {
     fn drop(&mut self) {
         if self.state.active_event_tasks.fetch_sub(1, Ordering::AcqRel) == 1 {
@@ -313,22 +408,35 @@ impl Client {
         base_uri: impl AsRef<str>,
         bearer_token: impl AsRef<[u8]>,
     ) -> Result<Self, SdkError> {
-        let base = BaseUri::parse(base_uri.as_ref())?;
-        let token = BearerToken::new(bearer_token)?;
+        Self::from_options(ClientOptions::builder(base_uri, bearer_token).build()?)
+    }
+
+    /// Creates a retry-neutral client from validated immutable options.
+    pub fn from_options(options: ClientOptions) -> Result<Self, SdkError> {
+        let tls_config = options.tls_config.clone();
+        let mut http_connector = HttpConnector::new();
+        http_connector.enforce_http(false);
+        http_connector.set_connect_timeout(Some(options.connect_timeout));
         let connector = HttpsConnectorBuilder::new()
-            .with_native_roots()
-            .map_err(|_| SdkError::TlsConfiguration)?
+            .with_tls_config(tls_config.as_ref().clone())
             .https_or_http()
             .enable_http1()
-            .build();
+            .wrap_connector(http_connector);
+        let connector = ConnectTimeout {
+            connector,
+            timeout: options.connect_timeout,
+        };
         let mut builder = HyperClient::builder(TokioExecutor::new());
         builder.retry_canceled_requests(false);
         let http = builder.build::<_, RequestBody>(connector);
+        let base = options.base.clone();
+        let request_timeout = options.request_timeout;
         Ok(Self {
             base,
-            token,
             http,
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            tls_config,
+            options: Arc::new(options),
+            request_timeout,
             state: Arc::new(ClientState {
                 closed: AtomicBool::new(false),
                 cancellation: CancellationToken::new(),
@@ -338,9 +446,9 @@ impl Client {
         })
     }
 
-    /// Replaces the end-to-end exchange deadline with a non-zero bounded value.
+    /// Replaces the credential-through-response deadline with a non-zero bounded value.
     pub fn with_request_timeout(mut self, timeout: Duration) -> Result<Self, SdkError> {
-        if timeout.is_zero() || timeout > Duration::from_secs(300) {
+        if timeout.is_zero() || timeout > crate::MAX_REQUEST_TIMEOUT {
             return Err(SdkError::InvalidRequest);
         }
         self.request_timeout = timeout;
@@ -406,7 +514,8 @@ impl Client {
             response.protocol_max.minor(),
         )
         .map_err(|_| SdkError::InvalidResponse)?;
-        VersionRange::V1
+        self.options
+            .protocol_range
             .negotiate(server)
             .map_err(|_| SdkError::UnsupportedProtocol)?;
         Ok(response)
@@ -611,8 +720,108 @@ impl Client {
         self.base.websocket_url()
     }
 
-    pub(crate) fn authorization_header(&self) -> HeaderValue {
-        self.token.authorization.clone()
+    pub(crate) async fn websocket_authorization_header(&self) -> Result<HeaderValue, SdkError> {
+        let mut log = OperationLogGuard::new(
+            self,
+            SafeLogTransport::WebSocket,
+            SafeLogOperation::TokenResolution,
+        );
+        let token =
+            tokio::time::timeout(self.options.connect_timeout, self.options.token.resolve())
+                .await
+                .map_err(|_| SdkError::TokenProvider)
+                .and_then(std::convert::identity);
+        if token.is_ok() {
+            log.succeed();
+        }
+        token.map(|token| token.authorization)
+    }
+
+    async fn http_authorization_until(&self, deadline: Instant) -> Result<HeaderValue, SdkError> {
+        let mut log = OperationLogGuard::new(
+            self,
+            SafeLogTransport::Http,
+            SafeLogOperation::TokenResolution,
+        );
+        let token = self
+            .until_http_deadline(deadline, self.options.token.resolve())
+            .await;
+        if token.is_ok() {
+            log.succeed();
+        }
+        token.map(|token| token.authorization)
+    }
+
+    pub(crate) fn tls_config(&self) -> Arc<ClientConfig> {
+        self.tls_config.clone()
+    }
+
+    pub(crate) fn connect_timeout(&self) -> Duration {
+        self.options.connect_timeout
+    }
+
+    pub(crate) fn reconnect_policy(&self) -> crate::ReconnectPolicy {
+        self.options.reconnect_policy
+    }
+
+    pub(crate) fn client_metadata(&self) -> (&str, &str) {
+        (&self.options.client_name, &self.options.client_version)
+    }
+
+    pub(crate) fn protocol_range(&self) -> VersionRange {
+        self.options.protocol_range
+    }
+
+    pub(crate) fn safe_log(
+        &self,
+        transport: SafeLogTransport,
+        operation: SafeLogOperation,
+        outcome: SafeLogOutcome,
+    ) {
+        self.options.safe_log(SafeLogEvent {
+            transport,
+            operation,
+            outcome,
+        });
+    }
+
+    async fn perform_http_attempt(
+        &self,
+        request: Request<RequestBody>,
+    ) -> Result<Response<Incoming>, SdkError> {
+        self.http
+            .request(request)
+            .await
+            .map_err(|_| SdkError::Transport)
+    }
+
+    async fn until_http_deadline<F, T>(&self, deadline: Instant, future: F) -> Result<T, SdkError>
+    where
+        F: Future<Output = Result<T, SdkError>>,
+    {
+        tokio::select! {
+            result = tokio::time::timeout_at(deadline, future) => {
+                result.map_err(|_| SdkError::RequestTimeout)?
+            }
+            () = self.state.cancellation.cancelled() => Err(SdkError::ClientClosed),
+        }
+    }
+
+    async fn complete_http_exchange_until<F, T>(
+        &self,
+        deadline: Instant,
+        exchange: F,
+    ) -> Result<T, SdkError>
+    where
+        F: Future<Output = Result<T, SdkError>>,
+    {
+        let mut log =
+            OperationLogGuard::new(self, SafeLogTransport::Http, SafeLogOperation::HttpExchange);
+        let result = self.until_http_deadline(deadline, exchange).await;
+        if result.is_ok() {
+            log.succeed();
+        }
+        result
     }
 
     pub(crate) async fn upload_artifact(
@@ -622,6 +831,7 @@ impl Client {
         body: Bytes,
     ) -> Result<ArtifactRef, SdkError> {
         self.ensure_open()?;
+        let deadline = Instant::now() + self.request_timeout;
         if body.is_empty() {
             return Err(SdkError::InvalidRequest);
         }
@@ -634,10 +844,11 @@ impl Client {
         }
         let body_length = body.len();
         let digest = sha256_digest(&body)?;
+        let authorization = self.http_authorization_until(deadline).await?;
         let request = Request::builder()
             .method(Method::POST)
             .uri(self.base.endpoint(path)?)
-            .header(AUTHORIZATION, self.token.authorization.clone())
+            .header(AUTHORIZATION, authorization)
             .header(ACCEPT, "application/json, application/problem+json")
             .header(CONTENT_TYPE, content_type.as_str())
             .header(CONTENT_LENGTH, body_length)
@@ -645,11 +856,7 @@ impl Client {
             .body(full_body(body))
             .map_err(|_| SdkError::BuildRequest)?;
         let exchange = async {
-            let response = self
-                .http
-                .request(request)
-                .await
-                .map_err(|_| SdkError::Transport)?;
+            let response = self.perform_http_attempt(request).await?;
             let artifact: ArtifactRef = decode_response(response, MAX_RESPONSE_BYTES).await?;
             artifact.validate().map_err(|_| SdkError::InvalidResponse)?;
             if artifact.content_type != *content_type
@@ -660,9 +867,7 @@ impl Client {
             }
             Ok(artifact)
         };
-        tokio::time::timeout(self.request_timeout, exchange)
-            .await
-            .map_err(|_| SdkError::RequestTimeout)?
+        self.complete_http_exchange_until(deadline, exchange).await
     }
 
     pub(crate) async fn upload_artifact_from<R>(
@@ -676,6 +881,7 @@ impl Client {
         R: AsyncRead + Unpin + Send + 'static,
     {
         self.ensure_open()?;
+        let deadline = Instant::now() + self.request_timeout;
         if content_length == 0 || content_length > xenoteer_protocol::MAX_CLIPBOARD_ARTIFACT_BYTES {
             return Err(SdkError::RequestTooLarge {
                 limit: xenoteer_protocol::MAX_CLIPBOARD_ARTIFACT_BYTES as usize,
@@ -698,21 +904,18 @@ impl Client {
                 Ok::<Frame<Bytes>, io::Error>(Frame::data(bytes))
             });
         let body = StreamBody::new(stream).boxed_unsync();
+        let authorization = self.http_authorization_until(deadline).await?;
         let request = Request::builder()
             .method(Method::POST)
             .uri(self.base.endpoint(path)?)
-            .header(AUTHORIZATION, self.token.authorization.clone())
+            .header(AUTHORIZATION, authorization)
             .header(ACCEPT, "application/json, application/problem+json")
             .header(CONTENT_TYPE, content_type.as_str())
             .header(CONTENT_LENGTH, content_length)
             .body(body)
             .map_err(|_| SdkError::BuildRequest)?;
         let exchange = async {
-            let response = self
-                .http
-                .request(request)
-                .await
-                .map_err(|_| SdkError::Transport)?;
+            let response = self.perform_http_attempt(request).await?;
             let artifact: ArtifactRef = decode_response(response, MAX_RESPONSE_BYTES).await?;
             artifact.validate().map_err(|_| SdkError::InvalidResponse)?;
             let state = digest_state.lock().map_err(|_| SdkError::InvalidResponse)?;
@@ -729,12 +932,7 @@ impl Client {
             }
             Ok(artifact)
         };
-        tokio::select! {
-            result = tokio::time::timeout(self.request_timeout, exchange) => {
-                result.map_err(|_| SdkError::RequestTimeout)?
-            }
-            () = self.state.cancellation.cancelled() => Err(SdkError::ClientClosed),
-        }
+        self.complete_http_exchange_until(deadline, exchange).await
     }
 
     pub(crate) async fn download_artifact_to<W>(
@@ -747,20 +945,18 @@ impl Client {
         W: AsyncWrite + Unpin,
     {
         self.ensure_open()?;
+        let deadline = Instant::now() + self.request_timeout;
         artifact.validate().map_err(|_| SdkError::InvalidRequest)?;
+        let authorization = self.http_authorization_until(deadline).await?;
         let request = Request::builder()
             .method(Method::GET)
             .uri(self.base.endpoint(path)?)
-            .header(AUTHORIZATION, self.token.authorization.clone())
+            .header(AUTHORIZATION, authorization)
             .header(ACCEPT, artifact.content_type.as_str())
             .body(full_body(Bytes::new()))
             .map_err(|_| SdkError::BuildRequest)?;
         let exchange = async {
-            let mut response = self
-                .http
-                .request(request)
-                .await
-                .map_err(|_| SdkError::Transport)?;
+            let mut response = self.perform_http_attempt(request).await?;
             if response.status() != StatusCode::OK {
                 return Err(decode_error_response(response).await);
             }
@@ -815,26 +1011,22 @@ impl Client {
             output.flush().await.map_err(|_| SdkError::ArtifactOutput)?;
             Ok(())
         };
-        tokio::time::timeout(self.request_timeout, exchange)
-            .await
-            .map_err(|_| SdkError::RequestTimeout)?
+        self.complete_http_exchange_until(deadline, exchange).await
     }
 
     pub(crate) async fn delete_artifact(&self, path: &str) -> Result<(), SdkError> {
         self.ensure_open()?;
+        let deadline = Instant::now() + self.request_timeout;
+        let authorization = self.http_authorization_until(deadline).await?;
         let request = Request::builder()
             .method(Method::DELETE)
             .uri(self.base.endpoint(path)?)
-            .header(AUTHORIZATION, self.token.authorization.clone())
+            .header(AUTHORIZATION, authorization)
             .header(ACCEPT, "application/problem+json")
             .body(full_body(Bytes::new()))
             .map_err(|_| SdkError::BuildRequest)?;
         let exchange = async {
-            let response = self
-                .http
-                .request(request)
-                .await
-                .map_err(|_| SdkError::Transport)?;
+            let response = self.perform_http_attempt(request).await?;
             if response.status() != StatusCode::NO_CONTENT {
                 return Err(decode_error_response(response).await);
             }
@@ -845,9 +1037,7 @@ impl Client {
             }
             Ok(())
         };
-        tokio::time::timeout(self.request_timeout, exchange)
-            .await
-            .map_err(|_| SdkError::RequestTimeout)?
+        self.complete_http_exchange_until(deadline, exchange).await
     }
 
     async fn send_json<T, R>(
@@ -989,10 +1179,12 @@ impl Client {
         R: DeserializeOwned,
     {
         self.ensure_open()?;
+        let deadline = Instant::now() + limits.timeout;
+        let authorization = self.http_authorization_until(deadline).await?;
         let mut builder = Request::builder()
             .method(method)
             .uri(self.base.endpoint(path)?)
-            .header(AUTHORIZATION, self.token.authorization.clone())
+            .header(AUTHORIZATION, authorization)
             .header(ACCEPT, "application/json, application/problem+json");
         if has_json_body {
             builder = builder.header(CONTENT_TYPE, "application/json");
@@ -1006,20 +1198,55 @@ impl Client {
 
         // This is intentionally the only network attempt made for the request.
         let exchange = async {
-            let response = self
-                .http
-                .request(request)
-                .await
-                .map_err(|_| SdkError::Transport)?;
+            let response = self.perform_http_attempt(request).await?;
             decode_response(response, limits.response_bytes).await
         };
-        tokio::select! {
-            result = tokio::time::timeout(limits.timeout, exchange) => {
-                result.map_err(|_| SdkError::RequestTimeout)?
+        self.complete_http_exchange_until(deadline, exchange).await
+    }
+}
+
+pub(crate) fn build_tls_config(policy: &TlsPolicy) -> Result<ClientConfig, SdkError> {
+    policy.validate()?;
+    let mut roots = RootCertStore::empty();
+    if policy.use_native_roots {
+        #[cfg(feature = "native-roots")]
+        {
+            let native = rustls_native_certs::load_native_certs();
+            if native.certs.is_empty() {
+                return Err(SdkError::TlsConfiguration);
             }
-            () = self.state.cancellation.cancelled() => Err(SdkError::ClientClosed),
+            for certificate in native.certs {
+                roots
+                    .add(certificate)
+                    .map_err(|_| SdkError::TlsConfiguration)?;
+            }
+        }
+        #[cfg(not(feature = "native-roots"))]
+        {
+            return Err(SdkError::TlsConfiguration);
         }
     }
+    for certificate in &policy.root_certificates_der {
+        roots
+            .add(CertificateDer::from(certificate.clone()))
+            .map_err(|_| SdkError::TlsConfiguration)?;
+    }
+    if roots.is_empty() {
+        return Err(SdkError::TlsConfiguration);
+    }
+
+    let builder = ClientConfig::builder().with_root_certificates(roots);
+    let configuration = if let Some((chain, key)) = policy.client_identity() {
+        let certificates = chain.iter().cloned().map(CertificateDer::from).collect();
+        let private_key =
+            PrivateKeyDer::try_from(key.to_vec()).map_err(|_| SdkError::TlsConfiguration)?;
+        builder
+            .with_client_auth_cert(certificates, private_key)
+            .map_err(|_| SdkError::TlsConfiguration)?
+    } else {
+        builder.with_no_client_auth()
+    };
+    Ok(configuration)
 }
 
 pub(crate) fn long_poll_request_timeout(
@@ -1039,7 +1266,8 @@ impl fmt::Debug for Client {
         formatter
             .debug_struct("Client")
             .field("base", &self.base)
-            .field("token", &self.token)
+            .field("token", &"<redacted>")
+            .field("tls_policy", &self.options.tls_policy)
             .field("request_timeout", &self.request_timeout)
             .finish_non_exhaustive()
     }
@@ -1390,6 +1618,346 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_absolute_http_deadline_covers_token_and_every_exchange_path()
+    -> Result<(), TestError> {
+        for mode in [
+            "json",
+            "buffered-upload",
+            "streaming-upload",
+            "download",
+            "delete",
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let base = format!("http://{}", listener.local_addr()?);
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await?;
+                let _request = read_request(&mut stream).await?;
+                std::future::pending::<io::Result<()>>().await
+            });
+            let (started_sender, mut started_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let release = Arc::new(tokio::sync::Notify::new());
+            let provider_release = release.clone();
+            let events = Arc::new(Mutex::new(Vec::<SafeLogEvent>::new()));
+            let captured = events.clone();
+            let options = ClientOptions::builder_with_token_provider(base, move || {
+                let started_sender = started_sender.clone();
+                let provider_release = provider_release.clone();
+                async move {
+                    let _started = started_sender.send(());
+                    provider_release.notified().await;
+                    Ok::<_, ()>(test_token().to_owned())
+                }
+            })
+            .request_timeout(Duration::from_millis(200))
+            .safe_log(move |event| {
+                captured
+                    .lock()
+                    .map_err(|_| crate::SafeLogHookError)?
+                    .push(event);
+                Ok(())
+            })
+            .build()?;
+            let client = Client::from_options(options)?;
+            let request_client = client.clone();
+            let content_type = ArtifactContentType::new("application/octet-stream")?;
+            let artifact = artifact_ref(ArtifactPurpose::Screenshot, b"x")?;
+            let mut request = tokio::spawn(async move {
+                match mode {
+                    "json" => request_client.status().await.map(|_| ()),
+                    "buffered-upload" => request_client
+                        .upload_artifact(
+                            "/v1/artifacts?purpose=clipboard_input",
+                            &content_type,
+                            Bytes::from_static(b"x"),
+                        )
+                        .await
+                        .map(|_| ()),
+                    "streaming-upload" => request_client
+                        .upload_artifact_from(
+                            "/v1/artifacts?purpose=clipboard_input",
+                            &content_type,
+                            1,
+                            std::io::Cursor::new(vec![b'x']),
+                        )
+                        .await
+                        .map(|_| ()),
+                    "download" => {
+                        request_client
+                            .download_artifact_to(
+                                "/v1/artifacts/test",
+                                &artifact,
+                                &mut tokio::io::sink(),
+                            )
+                            .await
+                    }
+                    "delete" => request_client.delete_artifact("/v1/artifacts/test").await,
+                    _ => Err(SdkError::InvalidRequest),
+                }
+            });
+            timeout(Duration::from_secs(1), started_receiver.recv())
+                .await?
+                .ok_or("token provider did not start")?;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            release.notify_one();
+            let result = match timeout(Duration::from_millis(100), &mut request).await {
+                Ok(joined) => joined?,
+                Err(_) => {
+                    request.abort();
+                    let _cancelled = request.await;
+                    client.close().await;
+                    server.abort();
+                    let _aborted = server.await;
+                    return Err(format!(
+                        "{mode}: HTTP exchange received a fresh timeout after token resolution"
+                    )
+                    .into());
+                }
+            };
+            assert!(matches!(result, Err(SdkError::RequestTimeout)), "{mode}");
+            let outcomes = events
+                .lock()
+                .map_err(|_| -> TestError { "event log lock poisoned".into() })?
+                .iter()
+                .map(|event| (event.operation, event.outcome))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                outcomes,
+                [
+                    (SafeLogOperation::TokenResolution, SafeLogOutcome::Started),
+                    (SafeLogOperation::TokenResolution, SafeLogOutcome::Succeeded),
+                    (SafeLogOperation::HttpExchange, SafeLogOutcome::Started),
+                    (SafeLogOperation::HttpExchange, SafeLogOutcome::Failed),
+                ],
+                "{mode}"
+            );
+            client.close().await;
+            server.abort();
+            let _aborted = server.await;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hanging_token_provider_obeys_close_and_caller_abort_without_retained_work()
+    -> Result<(), TestError> {
+        struct ProviderDrop(Arc<AtomicUsize>);
+
+        impl Drop for ProviderDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        for mode in ["client-close", "caller-abort"] {
+            for repetition in 0..3 {
+                let (started_sender, mut started_receiver) = tokio::sync::mpsc::unbounded_channel();
+                let dropped = Arc::new(AtomicUsize::new(0));
+                let provider_dropped = dropped.clone();
+                let events = Arc::new(Mutex::new(Vec::<SafeLogEvent>::new()));
+                let captured = events.clone();
+                let options =
+                    ClientOptions::builder_with_token_provider("http://127.0.0.1:9", move || {
+                        let started_sender = started_sender.clone();
+                        let provider_dropped = provider_dropped.clone();
+                        async move {
+                            let _guard = ProviderDrop(provider_dropped);
+                            let _started = started_sender.send(());
+                            std::future::pending::<Result<String, ()>>().await
+                        }
+                    })
+                    .request_timeout(Duration::from_secs(2))
+                    .safe_log(move |event| {
+                        captured
+                            .lock()
+                            .map_err(|_| crate::SafeLogHookError)?
+                            .push(event);
+                        Ok(())
+                    })
+                    .build()?;
+                let client = Client::from_options(options)?;
+                let request_client = client.clone();
+                let mut request = tokio::spawn(async move { request_client.status().await });
+                timeout(Duration::from_secs(1), started_receiver.recv())
+                    .await?
+                    .ok_or("token provider did not start")?;
+                let result = match mode {
+                    "client-close" => {
+                        client.close().await;
+                        match timeout(Duration::from_millis(100), &mut request).await {
+                            Ok(joined) => Some(joined?),
+                            Err(_) => {
+                                request.abort();
+                                let _cancelled = request.await;
+                                None
+                            }
+                        }
+                    }
+                    "caller-abort" => {
+                        request.abort();
+                        assert!(
+                            timeout(Duration::from_millis(100), request)
+                                .await?
+                                .is_err_and(|error| error.is_cancelled()),
+                            "{mode} repetition {repetition}"
+                        );
+                        None
+                    }
+                    _ => return Err("unknown cancellation mode".into()),
+                };
+                if mode == "client-close" {
+                    assert!(
+                        matches!(result, Some(Err(SdkError::ClientClosed))),
+                        "{mode} repetition {repetition}"
+                    );
+                }
+                assert_eq!(
+                    dropped.load(Ordering::SeqCst),
+                    1,
+                    "{mode} repetition {repetition}"
+                );
+                let outcomes = events
+                    .lock()
+                    .map_err(|_| -> TestError { "event log lock poisoned".into() })?
+                    .iter()
+                    .map(|event| (event.operation, event.outcome))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    outcomes,
+                    [
+                        (SafeLogOperation::TokenResolution, SafeLogOutcome::Started),
+                        (SafeLogOperation::TokenResolution, SafeLogOutcome::Failed),
+                    ],
+                    "{mode} repetition {repetition}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_head_timeout_and_close_log_the_complete_exchange_as_failed()
+    -> Result<(), TestError> {
+        for mode in ["timeout", "client-close"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let base = format!("http://{}", listener.local_addr()?);
+            let (head_sender, mut head_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await?;
+                let _request = read_request(&mut stream).await?;
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 64\r\nConnection: close\r\n\r\n",
+                    )
+                    .await?;
+                let _head_arrived = head_sender.send(());
+                std::future::pending::<io::Result<()>>().await
+            });
+            let events = Arc::new(Mutex::new(Vec::<SafeLogEvent>::new()));
+            let captured = events.clone();
+            let options = ClientOptions::builder(base, test_token())
+                .request_timeout(if mode == "timeout" {
+                    Duration::from_millis(30)
+                } else {
+                    Duration::from_secs(2)
+                })
+                .safe_log(move |event| {
+                    captured
+                        .lock()
+                        .map_err(|_| crate::SafeLogHookError)?
+                        .push(event);
+                    Ok(())
+                })
+                .build()?;
+            let client = Client::from_options(options)?;
+            let request_client = client.clone();
+            let request = tokio::spawn(async move { request_client.status().await });
+            timeout(Duration::from_secs(1), head_receiver.recv())
+                .await?
+                .ok_or("server did not write response head")?;
+            let result = if mode == "client-close" {
+                client.close().await;
+                timeout(Duration::from_millis(100), request).await??
+            } else {
+                request.await?
+            };
+            assert!(
+                matches!(
+                    result,
+                    Err(SdkError::RequestTimeout | SdkError::ClientClosed)
+                ),
+                "{mode}"
+            );
+            let outcomes = events
+                .lock()
+                .map_err(|_| -> TestError { "event log lock poisoned".into() })?
+                .iter()
+                .filter(|event| event.operation == SafeLogOperation::HttpExchange)
+                .map(|event| event.outcome)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                outcomes,
+                [SafeLogOutcome::Started, SafeLogOutcome::Failed],
+                "{mode}"
+            );
+            server.abort();
+            let _aborted = server.await;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn malformed_truncated_and_oversized_bodies_log_failed_not_succeeded()
+    -> Result<(), TestError> {
+        for (mode, response) in [
+            (
+                "malformed",
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1\r\nConnection: close\r\n\r\n{".to_vec(),
+            ),
+            (
+                "truncated",
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 8\r\nConnection: close\r\n\r\n{}".to_vec(),
+            ),
+            (
+                "oversized",
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    MAX_RESPONSE_BYTES + 1
+                )
+                .into_bytes(),
+            ),
+        ] {
+            let (base, server) = serve_once(response).await?;
+            let events = Arc::new(Mutex::new(Vec::<SafeLogEvent>::new()));
+            let captured = events.clone();
+            let options = ClientOptions::builder(base, test_token())
+                .safe_log(move |event| {
+                    captured
+                        .lock()
+                        .map_err(|_| crate::SafeLogHookError)?
+                        .push(event);
+                    Ok(())
+                })
+                .build()?;
+            let client = Client::from_options(options)?;
+            assert!(client.status().await.is_err(), "{mode}");
+            server.await??;
+            let outcomes = events
+                .lock()
+                .map_err(|_| -> TestError { "event log lock poisoned".into() })?
+                .iter()
+                .filter(|event| event.operation == SafeLogOperation::HttpExchange)
+                .map(|event| event.outcome)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                outcomes,
+                [SafeLogOutcome::Started, SafeLogOutcome::Failed],
+                "{mode}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn close_is_shared_and_rejects_every_derived_transport_call() -> Result<(), TestError> {
         let client = Client::new("http://127.0.0.1:9", test_token())?;
         let derived = client.clone();
@@ -1439,6 +2007,84 @@ mod tests {
         ));
         server.abort();
         let _aborted = server.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn every_started_http_exchange_logs_one_terminal_outcome_when_its_future_ends()
+    -> Result<(), TestError> {
+        for mode in ["timeout", "client-close", "caller-abort"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let base = format!("http://{}", listener.local_addr()?);
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await?;
+                let _request = read_request(&mut stream).await?;
+                std::future::pending::<io::Result<()>>().await
+            });
+            let events = Arc::new(Mutex::new(Vec::<SafeLogEvent>::new()));
+            let captured = events.clone();
+            let options = ClientOptions::builder(base, test_token())
+                .request_timeout(if mode == "timeout" {
+                    Duration::from_millis(20)
+                } else {
+                    Duration::from_secs(2)
+                })
+                .safe_log(move |event| {
+                    captured
+                        .lock()
+                        .map_err(|_| crate::SafeLogHookError)?
+                        .push(event);
+                    Ok(())
+                })
+                .build()?;
+            let client = Client::from_options(options)?;
+            let request_client = client.clone();
+            let request = tokio::spawn(async move { request_client.status().await });
+            timeout(Duration::from_secs(1), async {
+                loop {
+                    let started = events.lock().is_ok_and(|events| {
+                        events.iter().any(|event| {
+                            event.operation == SafeLogOperation::HttpExchange
+                                && event.outcome == SafeLogOutcome::Started
+                        })
+                    });
+                    if started {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await?;
+            match mode {
+                "timeout" => {
+                    assert!(matches!(request.await?, Err(SdkError::RequestTimeout)));
+                }
+                "client-close" => {
+                    client.close().await;
+                    assert!(matches!(request.await?, Err(SdkError::ClientClosed)));
+                }
+                "caller-abort" => {
+                    request.abort();
+                    assert!(request.await.is_err_and(|error| error.is_cancelled()));
+                    tokio::task::yield_now().await;
+                }
+                _ => return Err("unknown test mode".into()),
+            }
+            let outcomes = events
+                .lock()
+                .map_err(|_| -> TestError { "event log lock poisoned".into() })?
+                .iter()
+                .filter(|event| event.operation == SafeLogOperation::HttpExchange)
+                .map(|event| event.outcome)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                outcomes,
+                [SafeLogOutcome::Started, SafeLogOutcome::Failed],
+                "{mode}"
+            );
+            server.abort();
+            let _aborted = server.await;
+        }
         Ok(())
     }
 

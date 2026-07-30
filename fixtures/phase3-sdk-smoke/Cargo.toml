@@ -1,0 +1,25 @@
+[package]
+name = "xenoteer-phase3-sdk-smoke"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "BUSL-1.1"
+description = "Internal Phase 3 black-box SDK acceptance probe"
+publish = false
+
+[dependencies]
+serde_json = "=1.0.151"
+tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread"] }
+xenoteer-sdk = { path = "../../crates/xenoteer-sdk" }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unwrap_used = "deny"
+
+[workspace]

@@ -43,6 +43,7 @@ export {
   type EventSessionTerminalReason,
   type EventSubscription,
   type KnownEvent,
+  type ReconnectPolicy,
   type ReplayCompleteEvent,
   type UnknownEvent,
   type UnknownServerMessage,
@@ -54,10 +55,19 @@ export {
 export {
   BearerToken,
   redactedClientOptions,
+  type SafeLogEvent,
+  type SafeLogHook,
+  type SafeLogOperation,
+  type SafeLogOutcome,
+  type SafeLogRoute,
   type TokenProvider,
   type TokenSource,
   type XenoteerClientOptions,
 } from "./options.js";
+export type {
+  RequestOptions,
+  TransportOptions,
+} from "./transport.js";
 export {
   XenoteerError,
   type SdkErrorCode,

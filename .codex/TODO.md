@@ -198,8 +198,99 @@ Plan: `plans/15-phased-implementation.md`
             map sibling Cargo/Rust host runners, and fix the failure class
       - [x] Run focused/static source gates and independent security/portability
             review, including the actual root-to-UID-1000 secure-`PATH` boundary
-      - [ ] Commit and push the repair, build a new coherent pair, and restart
+      - [x] Commit and push the repair, build a new coherent pair, and restart
             qualification from lane 1
+    - [ ] Diagnose and close the first-run Phase-5 cursor-bound accessibility
+          query failure on source `47b5dbf`; reject production `e8b60118` /
+          fixture `a29e8d8b` and do not rerun or accept either image
+      - [x] Reproduce the exact failure deterministically before editing
+      - [x] Map cursor issuance/validation, snapshot revision and AT-SPI rebuild
+            consumers; fix the failure class rather than weakening the live gate
+      - [x] Fix and execute-check the packaged Python README's obsolete selector
+            examples against the frozen v1 wire contract
+      - [x] Fulfill the promised Node and Python support-version CI/package
+            matrix, including Node 24 and Python 3.14 if official support
+            verification confirms the independent audit
+      - [x] Cryptographically hash-lock Python CI dependencies across every
+            supported runtime and reject missing/altered/unhashed artifacts
+      - [x] Make Python wheel/sdist source verification fail closed on every
+            non-Apache or multiple SPDX identifier, not only BUSL
+      - [x] Reject duplicate or normalization-alias members in Python wheel/
+            sdist archives before allowlist, metadata, or SPDX verification
+      - [x] Reject logical package-member collisions after wheel dist-info and
+            sdist root/egg-info normalization
+      - [x] Make CI contracts inspect executable run blocks, remove duplicate
+            Rust SDK/CLI test execution, and correct selector additivity prose
+      - [x] Reject CI gate prefix impostors, background execution, and
+            shell-masked failures in every required executable run command
+      - [x] Require each CI gate as an exact simple run step; reject heredoc,
+            uncalled-function, and false-conditional text as evidence
+      - [x] Reject YAML plain-scalar continuation lines after every required
+            one-line CI `run` command
+      - [x] Resolve the Rust/TypeScript/Python client-option drift against the
+            normative Phase-6 plan with executable public-API evidence
+        - [x] Replace the TypeScript logger's raw identifier-bearing paths with
+              closed route templates and cover every HTTP/artifact/WebSocket
+              attempt, including streaming completion and failure
+        - [x] Give TypeScript and Python one retained, documented HTTP/WebSocket
+              adapter policy with bounded reconnect, explicit ownership, failed
+              socket cleanup, public exports, and same-policy TLS/proxy guidance
+        - [x] Bound failed-connect cleanup of client-owned Python transports
+              without replacing the original negotiation/connect failure
+        - [x] Add Python's missing safe metadata hook and prove hook/provider/
+              transport failures cannot leak secrets or alter SDK outcomes
+        - [x] Bound Python HTTP token resolution and the complete initial/
+              reconnect WebSocket handshake by one deadline and cancellation;
+              reject control-character/oversized hello metadata before I/O
+        - [x] Ensure timed-out Python credential providers cannot accumulate
+              unkillable worker threads/tasks or stall client/process shutdown
+        - [x] Give every Python HTTP/artifact request one client-cancellable
+              absolute deadline from token resolution through body/output
+        - [x] Reject synchronous Python artifact sinks before I/O so blocking
+              callbacks cannot bypass the absolute download deadline
+        - [x] Bound Python WebSocket cleanup, established writes, resubscribe,
+              heartbeat, and old-socket retirement against blocking adapters
+        - [x] Make Python close-once socket ownership identity-safe across ID
+              reuse and multiple reconnect generations, with bounded tracking
+        - [x] Preserve Python close-once when a factory returns the same live
+              physical socket in a later reconnect generation
+        - [x] Enforce the async-only provider contract at exported
+              `EventSession.connect`, before invocation or socket I/O
+        - [x] Use the exact cross-SDK transient WebSocket close allowlist in
+              Python and make every other peer disposition terminal
+        - [x] Bound TypeScript rotating-token providers by the same absolute
+              HTTP/WebSocket operation deadline and cancellation authority
+        - [x] Close established TypeScript sockets before reconnect, and make
+              reconnect backoff promptly cancellable without double-close
+        - [x] Validate TypeScript protocol range and bounded client metadata
+              before any HTTP/WebSocket I/O; bound the initial hello frame
+        - [x] Make TypeScript WebSocket close classification terminal for
+              normal/protocol/data/size codes and transient only for the exact
+              reconnectable close set
+        - [x] Reject missing/duplicate/malformed/mismatched artifact integrity
+              headers before TypeScript yields the first streamed byte
+        - [x] Reject case-insensitive caller collisions with SDK-owned
+              authorization, framing, acceptance, and digest headers
+        - [x] Preserve exact Rust safe-log terminal pairs across timeout,
+              client close, and caller cancellation
+        - [x] Give Rust HTTP/artifact requests one client-cancellable absolute
+              deadline spanning token resolution through response completion
+        - [x] Keep Rust HTTP safe-log terminal state pending through bounded
+              body collection and decode; fail post-header errors truthfully
+        - [x] Bound Rust WebSocket hello/subscription sends by the absolute
+              connect deadline and client cancellation
+        - [x] Classify Rust pre-welcome 4401/4403/1008 policy closes as exact
+              terminal auth/permission errors without reconnect
+        - [x] Bound and client-cancel every established-session Rust WebSocket
+              heartbeat/pong write
+        - [x] Close/drop Rust's failed established WebSocket before reconnect
+              backoff or replacement attempts
+        - [x] Remove Rust's false callback-panic secrecy promise and prove the
+              exact panic-hook versus SDK-error/log isolation boundary
+      - [x] Execute, update, or remove the packaged Rust
+            `phase3-control-smoke` example so every shipped example is proven
+      - [x] Run focused, workspace, static, native, and independent review gates
+            before building another coherent image pair
     - [x] Reject source `e63f52d` production `61a92b02` / fixture `79ef2dfe`
           after the first public quick-start lane failed before package
           acceptance because its nested unprivileged build lost the

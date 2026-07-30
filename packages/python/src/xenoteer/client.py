@@ -11,16 +11,17 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import TracebackType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 
+from .connection import WebSocketFactory
 from .desktop import Desktop
 from .errors import XenoteerError
-from .events import EventSession, WebSocketFactory
+from .events import EventSession
 from .options import ClientOptions, ProtocolRange
 from .protocol_generated import JsonObject
 from .state import GenerationRegistry
-from .transport import AsyncTransport, HttpTransport
+from .transport import AsyncTransport, HttpTransport, with_safe_logging
 from .wire import as_uint64_string, encode_uint64
 
 
@@ -268,6 +269,7 @@ class XenoteerClient:
         "_closed",
         "_negotiated",
         "_options",
+        "_owns_transport",
         "_owned_leases",
         "_registry",
         "_received_monotonic",
@@ -275,6 +277,8 @@ class XenoteerClient:
         "_sessions",
         "_status",
         "_transport",
+        "_websocket_factory",
+        "_requires_paired_websocket_factory",
         "_close_task",
     )
 
@@ -287,9 +291,17 @@ class XenoteerClient:
         *,
         received_monotonic: float,
         round_trip: float,
+        owns_transport: bool,
+        websocket_factory: WebSocketFactory | None,
+        requires_paired_websocket_factory: bool,
     ) -> None:
         self._options = options
         self._transport = transport
+        self._owns_transport = owns_transport
+        self._websocket_factory = websocket_factory
+        self._requires_paired_websocket_factory = (
+            requires_paired_websocket_factory
+        )
         self._status = status
         self._negotiated = negotiated
         self._received_monotonic = received_monotonic
@@ -309,23 +321,64 @@ class XenoteerClient:
         cls,
         options: ClientOptions,
         *,
+        http_client: Any | None = None,
         transport: AsyncTransport | None = None,
+        websocket_factory: WebSocketFactory | None = None,
+        transport_ownership: Literal["borrowed", "client"] = "borrowed",
     ) -> "XenoteerClient":
         """Authenticate status and negotiate v1 without acquiring control."""
 
-        selected_transport = HttpTransport(options) if transport is None else transport
+        if http_client is not None and transport is not None:
+            raise XenoteerError(
+                "invalid_request",
+                "http_client and transport cannot be supplied simultaneously",
+            )
+        if transport_ownership not in {"borrowed", "client"}:
+            raise XenoteerError(
+                "invalid_request",
+                "transport ownership must be 'borrowed' or 'client'",
+            )
+        if http_client is not None and transport_ownership != "borrowed":
+            raise XenoteerError(
+                "invalid_request", "an injected httpx client is always borrowed"
+            )
+        selected_transport: AsyncTransport
+        if transport is None:
+            selected_transport = HttpTransport(options, http_client=http_client)
+            owns_transport = True
+        else:
+            selected_transport = transport
+            owns_transport = transport_ownership == "client"
+        selected_transport = with_safe_logging(
+            selected_transport, options.safe_log_hook
+        )
+        requires_paired_websocket_factory = (
+            http_client is not None or transport is not None
+        )
         started = time.monotonic()
         try:
-            status = validate_status(
-                await selected_transport.request("GET", "/v1/status")
-            )
+            async with asyncio.timeout(float(options.connect_timeout)):
+                status = validate_status(
+                    await selected_transport.request("GET", "/v1/status")
+                )
             received = time.monotonic()
             negotiated = negotiate_protocol(
                 options.protocol_range, status.protocol_min, status.protocol_max
             )
-        except Exception:
-            if transport is None:
-                await selected_transport.close()
+        except BaseException as error:
+            if owns_transport:
+                await _close_failed_connect_transport(
+                    selected_transport,
+                    timeout=min(
+                        5.0,
+                        float(options.connect_timeout),
+                        float(options.request_timeout),
+                    ),
+                )
+            if isinstance(error, TimeoutError):
+                raise XenoteerError(
+                    "request_timeout", "Xenoteer connect timed out"
+                ) from None
             raise
         return cls(
             options,
@@ -334,6 +387,9 @@ class XenoteerClient:
             negotiated,
             received_monotonic=received,
             round_trip=received - started,
+            owns_transport=owns_transport,
+            websocket_factory=websocket_factory,
+            requires_paired_websocket_factory=requires_paired_websocket_factory,
         )
 
     @property
@@ -422,12 +478,25 @@ class XenoteerClient:
         websocket_url = (
             f"{'wss' if parsed.scheme == 'https' else 'ws'}://{parsed.netloc}/v1/ws"
         )
+        selected_websocket_factory = (
+            websocket_factory
+            if websocket_factory is not None
+            else self._websocket_factory
+        )
+        if (
+            self._requires_paired_websocket_factory
+            and selected_websocket_factory is None
+        ):
+            raise XenoteerError(
+                "invalid_request",
+                "a custom HTTP adapter requires an explicit paired WebSocket factory",
+            )
         session = await EventSession.connect(
             websocket_url,
             self._transport.authorization_header,
             hello,
             capacity=capacity,
-            websocket_factory=websocket_factory,
+            websocket_factory=selected_websocket_factory,
             heartbeat_interval=self._options.heartbeat_interval,
             read_stale_timeout=(
                 self._options.read_stale_timeout
@@ -440,7 +509,9 @@ class XenoteerClient:
                     ),
                 )
             ),
-            max_reconnect_attempts=self._options.max_reconnect_attempts,
+            reconnect_policy=self._options.reconnect_policy,
+            connect_timeout=self._options.connect_timeout,
+            safe_log_hook=self._options.safe_log_hook,
             registry=self._registry,
         )
         if (
@@ -505,15 +576,16 @@ class XenoteerClient:
                     result, asyncio.CancelledError
                 ):
                     failures.append(result)
-        try:
-            await asyncio.wait_for(
-                self._transport.close(),
-                timeout=min(5.0, float(self._options.request_timeout)),
-            )
-        except BaseException as error:
-            if isinstance(error, asyncio.CancelledError):
-                raise
-            failures.append(error)
+        if self._owns_transport:
+            try:
+                await asyncio.wait_for(
+                    self._transport.close(),
+                    timeout=min(5.0, float(self._options.request_timeout)),
+                )
+            except BaseException as error:
+                if isinstance(error, asyncio.CancelledError):
+                    raise
+                failures.append(error)
         if failures:
             raise XenoteerError(
                 "cleanup_failed",
@@ -552,6 +624,33 @@ class XenoteerClient:
 def _consume_close_failure(task: asyncio.Task[None]) -> None:
     if not task.cancelled():
         task.exception()
+
+
+async def _close_failed_connect_transport(
+    transport: AsyncTransport,
+    *,
+    timeout: float,
+) -> None:
+    """Bound failed-connect cleanup without replacing the connection failure."""
+
+    cleanup = asyncio.create_task(
+        transport.close(),
+        name="xenoteer-failed-connect-close",
+    )
+    try:
+        done, pending = await asyncio.wait({cleanup}, timeout=timeout)
+    except asyncio.CancelledError:
+        cleanup.cancel()
+        cleanup.add_done_callback(_consume_close_failure)
+        await asyncio.sleep(0)
+        raise
+    if done:
+        _consume_close_failure(cleanup)
+        return
+    if pending:
+        cleanup.cancel()
+        cleanup.add_done_callback(_consume_close_failure)
+        await asyncio.sleep(0)
 
 
 if TYPE_CHECKING:

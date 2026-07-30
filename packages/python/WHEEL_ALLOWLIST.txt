@@ -3,6 +3,7 @@ xenoteer/__init__.py
 xenoteer/artifacts.py
 xenoteer/client.py
 xenoteer/command.py
+xenoteer/connection.py
 xenoteer/conformance.py
 xenoteer/desktop.py
 xenoteer/errors.py

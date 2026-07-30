@@ -73,9 +73,13 @@ required=(
   scripts/container/assert-idle-runtime.sh
   scripts/container/test-phase3-control-plane.sh
   scripts/container/test-phase3-websocket.py
+  fixtures/phase3-sdk-smoke/Cargo.lock
+  fixtures/phase3-sdk-smoke/Cargo.toml
+  fixtures/phase3-sdk-smoke/src/main.rs
   scripts/container/test-phase4-event-flood.py
   scripts/container/test-phase4-event-flood.sh
   scripts/container/tests/test_host_rust_toolchain.py
+  scripts/container/tests/test_phase5_atspi_live.py
   scripts/container/test-phase4-live-fixtures.py
   scripts/container/test-phase5-atspi-live.py
   scripts/conformance/validate.py
@@ -112,6 +116,22 @@ done
 bash -n scripts/container/test-phase3-control-plane.sh
 grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
   scripts/container/test-phase3-control-plane.sh
+grep -Fxq '// SPDX-License-Identifier: BUSL-1.1' \
+  fixtures/phase3-sdk-smoke/src/main.rs
+python3 - <<'PY'
+import pathlib
+import tomllib
+
+manifest_path = pathlib.Path("fixtures/phase3-sdk-smoke/Cargo.toml")
+manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+package = manifest["package"]
+assert package["license"] == "BUSL-1.1"
+assert package["publish"] is False
+assert manifest["dependencies"]["xenoteer-sdk"]["path"] == "../../crates/xenoteer-sdk"
+PY
+timeout 20s env CARGO_BUILD_JOBS=2 CARGO_NET_OFFLINE=true \
+  cargo metadata --locked --offline --no-deps --format-version 1 \
+  --manifest-path fixtures/phase3-sdk-smoke/Cargo.toml >/dev/null
 python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/container/test-phase3-websocket.py").read_text())'
 grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
   scripts/container/test-phase3-websocket.py
@@ -197,11 +217,15 @@ timeout 10s env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
 bash -n scripts/container/test-phase4-event-flood.sh
 grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
   scripts/container/test-phase4-event-flood.sh
-python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/container/tests/test_host_rust_toolchain.py").read_text())'
-grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
-  scripts/container/tests/test_host_rust_toolchain.py
-timeout 20s env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
-  scripts/container/tests/test_host_rust_toolchain.py
+for container_python_test in \
+  scripts/container/tests/test_host_rust_toolchain.py \
+  scripts/container/tests/test_phase5_atspi_live.py; do
+  python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \
+    "$container_python_test"
+  grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' "$container_python_test"
+done
+timeout 20s env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+  -s scripts/container/tests -p 'test_*.py'
 sh -n tests/platform/run-x11-spikes.sh
 grep -Fq -- '-nolisten tcp -noreset -auth' tests/platform/run-x11-spikes.sh
 bash -n scripts/container/test-viewer-denial.sh

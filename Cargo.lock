@@ -951,7 +951,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustls",
- "rustls-native-certs",
  "tokio",
  "tokio-rustls",
  "tower-service",
@@ -1864,7 +1863,6 @@ dependencies = [
  "futures-util",
  "log",
  "rustls",
- "rustls-native-certs",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
@@ -2440,6 +2438,7 @@ dependencies = [
 name = "xenoteer-sdk"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bytes",
  "futures-util",
  "http",
@@ -2447,13 +2446,17 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
+ "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
  "tokio-util",
+ "tower-service",
  "tungstenite",
  "xenoteer-protocol",
 ]

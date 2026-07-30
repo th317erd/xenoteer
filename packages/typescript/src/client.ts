@@ -10,6 +10,7 @@ import {
 import { XenoteerError } from "./errors.js";
 import {
   redactedClientOptions,
+  snapshotClientOptions,
   type XenoteerClientOptions,
 } from "./options.js";
 import type {
@@ -133,6 +134,8 @@ export class XenoteerClient implements AsyncDisposable {
   readonly #protocol: ProtocolVersion;
   readonly #clientName: string;
   readonly #clientVersion: string;
+  readonly #webSocketFactory: WebSocketFactory | undefined;
+  readonly #eventPolicy: Readonly<EventSessionOptions>;
   readonly #safeOptions: Readonly<Record<string, unknown>>;
 
   private constructor(
@@ -146,16 +149,36 @@ export class XenoteerClient implements AsyncDisposable {
     this.#protocol = protocol;
     this.#clientName = options.clientName ?? "@xenoteer/sdk";
     this.#clientVersion = options.clientVersion ?? "0.1.0";
+    this.#webSocketFactory = options.webSocketFactory;
+    this.#eventPolicy = Object.freeze({
+      capacity: options.webSocketQueueCapacity ?? 256,
+      maxMessageBytes: options.webSocketMaxMessageBytes ?? 1_048_576,
+      handshakeTimeoutMs: options.webSocketHandshakeTimeoutMs ?? 10_000,
+      acknowledgmentTimeoutMs:
+        options.webSocketAcknowledgmentTimeoutMs ?? 10_000,
+      heartbeatGraceMs: options.webSocketHeartbeatGraceMs ?? 5_000,
+      closeTimeoutMs: options.webSocketCloseTimeoutMs ?? 2_000,
+      ...(options.reconnect === undefined
+        ? {}
+        : {
+            reconnect: Object.freeze({
+              maxAttempts: options.reconnect.maxAttempts ?? 5,
+              initialDelayMs: options.reconnect.initialDelayMs ?? 100,
+              maxDelayMs: options.reconnect.maxDelayMs ?? 5_000,
+            }),
+          }),
+    });
     this.#safeOptions = redactedClientOptions(options);
   }
 
   static async connect(options: XenoteerClientOptions): Promise<XenoteerClient> {
-    const transport = new HttpTransport(options);
+    const retained = snapshotClientOptions(options);
+    const transport = new HttpTransport(retained);
     const status = validateStatusResponse(
       await transport.request<object>("GET", "/v1/status"),
     );
     const protocol = negotiateProtocol(
-      options.protocolRange ?? DEFAULT_RANGE,
+      retained.protocolRange ?? DEFAULT_RANGE,
       status.protocol_min,
       status.protocol_max,
     );
@@ -163,7 +186,7 @@ export class XenoteerClient implements AsyncDisposable {
     if (typeof generation === "string") {
       transport.state.bindDesktop(status.desktop.id, generation);
     }
-    return new XenoteerClient(transport, status, protocol, options);
+    return new XenoteerClient(transport, status, protocol, retained);
   }
 
   get status(): StatusResponse {
@@ -217,14 +240,35 @@ export class XenoteerClient implements AsyncDisposable {
   }
 
   /**
-   * Opens the authenticated v1 WebSocket using a caller-injected header-capable
-   * factory. The long-lived bearer is never placed in the URL or subprotocol.
+   * Opens the authenticated v1 WebSocket with the root retained factory.
    */
   async openEventSession(
+    options?: OpenEventSessionOptions,
+  ): Promise<EventSession>;
+  /** Compatibility overload. @deprecated Retain `webSocketFactory` at `connect()`. */
+  async openEventSession(
     factory: WebSocketFactory,
-    options: OpenEventSessionOptions = {},
+    options?: OpenEventSessionOptions,
+  ): Promise<EventSession>;
+  async openEventSession(
+    factoryOrOptions?: WebSocketFactory | OpenEventSessionOptions,
+    compatibilityOptions: OpenEventSessionOptions = {},
   ): Promise<EventSession> {
     this.#ensureOpen();
+    const compatibilityFactory = typeof factoryOrOptions === "function"
+      ? factoryOrOptions
+      : undefined;
+    const factory = compatibilityFactory ?? this.#webSocketFactory;
+    if (factory === undefined) {
+      throw new XenoteerError(
+        "invalid_request",
+        "openEventSession requires an explicit header-capable WebSocket factory",
+      );
+    }
+    const options: OpenEventSessionOptions =
+      typeof factoryOrOptions === "function"
+        ? compatibilityOptions
+        : factoryOrOptions ?? {};
     const protocol = this.#protocol;
     const requestId = globalThis.crypto.randomUUID();
     const hello = {
@@ -258,7 +302,12 @@ export class XenoteerClient implements AsyncDisposable {
       hello,
       this.#transport.state,
       {
+        ...this.#eventPolicy,
         ...options,
+        ...((options.reconnect ?? this.#eventPolicy.reconnect) === undefined
+          ? {}
+          : { reconnect: options.reconnect ?? this.#eventPolicy.reconnect }),
+        safeLog: (event) => this.#transport.safeLog(event),
         refreshAuthoritative: async () => {
           const status = await this.refreshStatus();
           const generation = status.desktop.generation;

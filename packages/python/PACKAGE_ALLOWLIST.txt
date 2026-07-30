@@ -13,6 +13,7 @@ src/xenoteer/artifacts.py
 src/xenoteer/__init__.py
 src/xenoteer/client.py
 src/xenoteer/command.py
+src/xenoteer/connection.py
 src/xenoteer/conformance.py
 src/xenoteer/desktop.py
 src/xenoteer/errors.py
@@ -27,6 +28,8 @@ src/xenoteer/py.typed
 src/xenoteer/state.py
 src/xenoteer/transport.py
 src/xenoteer/wire.py
-tests/test_sdk.py
 tests/test_hardening.py
+tests/test_connection_options.py
+tests/test_readme.py
+tests/test_sdk.py
 WHEEL_ALLOWLIST.txt

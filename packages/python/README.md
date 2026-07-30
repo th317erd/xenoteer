@@ -12,11 +12,15 @@ import os
 from xenoteer import ClientOptions, XenoteerClient
 
 
+async def token_provider() -> str:
+    return os.environ["XENOTEER_TOKEN"]
+
+
 async def automate() -> None:
     async with await XenoteerClient.connect(
         ClientOptions(
             base_url="https://127.0.0.1:9443",
-            token=lambda: os.environ["XENOTEER_TOKEN"],
+            token=token_provider,
         )
     ) as client:
         desktop = client.desktop()  # immutable ID + generation fence
@@ -35,6 +39,101 @@ async def automate() -> None:
 negotiates the highest shared protocol minor. It never acquires a controller
 lease. Desktop, lease, window, element, and command handles remain bound to the
 generation in the status snapshot and never silently relocate after restart.
+
+### Connection adapters and ownership
+
+`XenoteerClient.connect()` is the single adapter boundary:
+
+```text
+connect(
+    options,
+    *,
+    http_client=None,
+    transport=None,
+    websocket_factory=None,
+    transport_ownership="borrowed",
+)
+```
+
+`http_client` and `transport` are mutually exclusive and are rejected before
+network I/O. Ownership is explicit:
+
+| Connection input | HTTP resource owner | On failed connect | On client close | Event WebSocket |
+| --- | --- | --- | --- | --- |
+| neither | SDK | SDK closes it | SDK closes it once | reviewed default factory |
+| injected `httpx.AsyncClient` | caller | remains open | remains open | explicit paired factory required |
+| injected `AsyncTransport`, `borrowed` | caller | remains open | remains open | explicit paired factory required |
+| injected `AsyncTransport`, `client` | SDK | closes it once | closes it once | explicit paired factory required |
+
+Every callback is borrowed for the connected client's lifetime. Every socket
+returned by a WebSocket factory is SDK-owned and closed exactly once after a
+failed handshake, replacement, or session close. An injected
+`httpx.AsyncClient` is always borrowed; asking for `transport_ownership="client"`
+with one is rejected instead of pretending that ownership changed.
+Factory sockets must support weak references, as the supported `websockets`
+connection does. This lets the SDK remember that the same live physical socket
+was already closed without retaining dead generations or confusing a later
+object that reuses its raw runtime ID. An incompatible candidate is rejected
+before handshake I/O and closed within the connection deadline.
+
+If status validation or protocol negotiation fails, cleanup of an SDK-owned
+transport is capped by five seconds and the configured connect/request
+deadlines. Cleanup failure or timeout never replaces the original connection
+error. Custom transport cleanup must remain cancellation-cooperative; Python
+cannot preempt an arbitrary adapter that suppresses cancellation, so such a
+cleanup task may outlive the cap until the adapter eventually returns. Borrowed
+transports and injected HTTP clients are never closed by this failure path.
+
+### Reconnect, TLS, and proxy policy
+
+`ClientOptions.reconnect_policy` is one frozen `ReconnectPolicy`. It bounds the
+attempt count, initial and maximum exponential delay, and minimum/maximum jitter.
+The exact policy, client name/version, negotiated protocol minor, WebSocket URL,
+and factory are retained across reconnects. A fresh token is resolved before
+every HTTP, artifact, initial WebSocket, and reconnect WebSocket attempt.
+Reconnect applies only to the event transport and never replays commands.
+
+`ClientOptions.connect_timeout` (10 seconds by default, at most 60) is one wall
+deadline for status negotiation and for each initial/reconnect WebSocket token,
+factory, hello send, bounded welcome, and validation sequence. The WebSocket
+hello and welcome are each capped at 1 MiB. `request_timeout` also bounds token
+resolution before HTTP and artifact adapter I/O. A token source is either a
+static string or a genuinely asynchronous provider (`async def` or async
+`__call__`); synchronous callables are rejected during option validation before
+I/O and are never invoked. Deadlines cancel and await cancellation-cooperative
+async providers, including their `finally` cleanup. Python cannot preempt a
+provider that blocks the event loop or suppresses cancellation, so providers
+must remain non-blocking and propagate `CancelledError`.
+`client_name` and `client_version` are nonempty, at most 128 UTF-8 bytes, and
+reject Unicode control characters before any I/O.
+
+HTTP and WSS adapters are a paired security policy. Deriving a same-origin WSS
+URL does **not** transfer custom CA roots, mTLS identity, proxy or `no_proxy`
+rules, certificate pins, DNS resolution, or custom network agents from an HTTP
+adapter. Xenoteer deliberately does not inspect or copy secret TLS material.
+When HTTP behavior is customized through `http_client` or `transport`, supply a
+`websocket_factory` configured with the matching reviewed TLS/proxy policy;
+`open_events()` fails explicitly when the pair is missing. The package defaults
+use the independently reviewed platform defaults of HTTPX and `websockets`.
+
+### Safe connection logging
+
+`ClientOptions.safe_log_hook` accepts a synchronous callback and rejects an
+`async def` hook before I/O. It receives a frozen `SafeLogEvent` with only:
+operation, outcome, attempt, method, reviewed route template, status,
+request/response byte counts, and stable error code. Operations are closed to
+`http.request`, `artifact.upload`, `artifact.download`, `artifact.delete`, and
+`websocket.handshake`; outcomes are `started`, `succeeded`, or `failed`.
+
+There is exactly one `started` and one terminal event for each actual attempt,
+including token-provider, body, transport, status, header, stream, sink, and
+cancellation failures. A download succeeds only after its complete verified
+stream reaches the sink. Unknown paths become `unknown`; raw paths, URLs,
+queries, IDs, tickets, credentials, bodies, server prose, close reasons,
+provider/callback errors, and transport exception text have no field in the
+schema. Ordinary hook exceptions are ignored and never retry, cancel, or replace
+the transport outcome. Process-control exceptions such as `KeyboardInterrupt`
+are intentionally not swallowed.
 
 ## No hidden command replay
 
@@ -82,8 +181,9 @@ async with desktop.control(ttl=30) as control:
 
 ## Windows, accessibility, capture, and viewing
 
-Selectors remain public v1 dictionaries so additive protocol fields are
-preserved:
+Client-authored selector dictionaries are strict frozen-v1 inputs: unknown or
+obsolete fields are rejected before I/O. Server-authored response dictionaries
+preserve additive fields so newer metadata survives round-trips:
 
 ```python
 window = await desktop.windows.one(
@@ -93,9 +193,9 @@ window = await desktop.windows.one(
             "type": "text",
             "field": "title",
             "matcher": {
-                "mode": "contains",
-                "value": "Editor",
-                "case_sensitive": False,
+                "type": "exact",
+                "value": "Xenoteer GTK3 Fixture — Main",
+                "case_sensitive": True,
             },
         },
     }
@@ -103,7 +203,21 @@ window = await desktop.windows.one(
 await (await window.activate()).wait_until_terminal(10)
 
 element = await desktop.accessibility.one(
-    {"root": {"type": "desktop"}, "predicate": {"type": "role", "role": "button"}}
+    {
+        "scope": {"type": "desktop"},
+        "predicates": [
+            {
+                "type": "name",
+                "matcher": {
+                    "type": "exact",
+                    "value": "Stable Button",
+                    "case_sensitive": True,
+                },
+            }
+        ],
+        "order": "object_path_ascending",
+        "result_index": None,
+    }
 )
 await (await element.invoke()).wait_until_terminal(10)
 
@@ -148,7 +262,11 @@ redacted from repr.
 
 HTTPS/WSS is required for non-loopback hosts. Plain HTTP/WS is accepted only for
 a numeric loopback address. Artifact streaming validates declared length and
-digest before returning success.
+digest before returning success. `Artifacts.download_to()` accepts only a
+genuine async sink (`async def` function or async callable object), validated
+before adapter I/O. Sink execution shares the request's absolute deadline and
+must remain non-blocking and cancellation-cooperative. Use `download_bytes()`
+when an in-memory result is sufficient.
 
 ## Installed behavior example
 
@@ -182,11 +300,13 @@ into a virtual environment, then install this checkout without re-resolving its
 dependencies and run every boundary:
 
 ```sh
-python -m pip install -r packages/python/requirements-test.lock
+python -m pip install --require-hashes --only-binary=:all: \
+  -r packages/python/requirements-test.lock
 python -m pip install --no-deps -e packages/python
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/python/src \
   python -m unittest discover -s packages/python/tests -v
-python packages/python/scripts/run_conformance.py
+python scripts/conformance/run.py --adapter \
+  python packages/python/scripts/run_conformance.py
 (cd packages/python && mypy --cache-dir /tmp/xenoteer-mypy-cache)
 ruff check --no-cache packages/python/src packages/python/tests packages/python/scripts
 python -m build --outdir /tmp/xenoteer-dist packages/python

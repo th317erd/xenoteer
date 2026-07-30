@@ -38,6 +38,71 @@ PROTECTED_CANARIES = (
 )
 MAX_API_BODY = 16 * 1024 * 1024
 QUERY_RETRY_STATUSES = {409, 429, 503}
+CURSOR_QUERY_TRANSACTION_TIMEOUT_SECONDS = 60.0
+MAX_CURSOR_QUERY_TRANSACTIONS = 16
+MAX_CURSOR_QUERY_REQUESTS = 80
+MAX_CURSOR_QUERY_PAGES = 40
+# Both retryable backoff problems used here carry the server's fixed
+# `Retry-After: 1` contract. Restarting the whole transaction avoids guessing
+# whether a continuation was consumed before capacity was exhausted.
+CURSOR_QUERY_RETRY_BACKOFF_SECONDS = 1.0
+MIN_CURSOR_BYTES = 16
+MAX_CURSOR_BYTES = 1_024
+MAX_CURSOR_QUERY_VISITED_NODES = 25_000
+MAX_ACCESSIBILITY_BUS_NAME_BYTES = 255
+MAX_ACCESSIBILITY_OBJECT_PATH_BYTES = 4_096
+MAX_ACCESSIBILITY_IDENTITY_BYTES = 64
+MAX_ACCESSIBILITY_WARNINGS = 32
+MAX_ACCESSIBILITY_WARNING_CODE_BYTES = 64
+MAX_ACCESSIBILITY_SHORT_TEXT_BYTES = 4_096
+EXPECTED_CURSOR_QUERY_ORDER = "name_ascending"
+ELEMENT_REFERENCE_FIELDS = frozenset(
+    {
+        "desktop_id",
+        "desktop_generation",
+        "atspi_generation",
+        "application",
+        "object_path",
+        "object_identity_hash",
+        "cache_sequence",
+    }
+)
+APPLICATION_REFERENCE_FIELDS = frozenset(
+    {
+        "desktop_id",
+        "desktop_generation",
+        "atspi_generation",
+        "unique_bus_name",
+        "root_object_path",
+        "app_instance_generation",
+        "identity_hash",
+    }
+)
+QueryElementIdentity = tuple[str, str, int, str, str, str, int]
+SAFE_QUERY_PROBLEM_CODES = frozenset(
+    {
+        "ambiguous_target",
+        "capability_unavailable",
+        "element_not_found",
+        "interface_not_supported",
+        "internal",
+        "invalid_request",
+        "permission_denied",
+        "query_budget_exceeded",
+        "resource_exhausted",
+        "stale_reference",
+        "toolkit_protocol_error",
+    }
+)
+SAFE_QUERY_RETRY_ADVICE = frozenset(
+    {"never", "same_command_id", "after_resync", "after_backoff"}
+)
+CURSOR_QUERY_RETRY_CONTRACTS = {
+    (409, "stale_reference", "after_resync"): "after_resync",
+    (409, "toolkit_protocol_error", "after_resync"): "after_resync",
+    (429, "resource_exhausted", "after_backoff"): "after_backoff",
+    (503, "capability_unavailable", "after_backoff"): "after_backoff",
+}
 REF_REJECTION_STATUSES = {404, 409}
 AT_SPI_BUS_ADDRESS = "unix:path=/run/xenoteer/bus/at-spi/bus_99"
 P2P_ATTEMPT_WARNING_MARKERS = (
@@ -99,6 +164,322 @@ def is_u64_string(value: object, *, minimum: int = 0) -> bool:
 
 def is_signed_integer(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def safe_query_problem_value(value: object, allowed: frozenset[str]) -> str:
+    return value if isinstance(value, str) and value in allowed else "invalid"
+
+
+def safe_query_problem_instance(value: object) -> str | None:
+    prefix = "urn:xenoteer:request:"
+    if not isinstance(value, str) or not value.startswith(prefix):
+        return None
+    identifier = value[len(prefix) :]
+    if len(identifier) != 36 or identifier != identifier.lower():
+        return None
+    try:
+        parsed = uuid.UUID(identifier)
+    except (ValueError, AttributeError):
+        return None
+    return value if str(parsed) == identifier else None
+
+
+def query_problem_diagnostic(
+    status: int,
+    problem: dict[str, Any],
+    *,
+    attempt: int,
+    page: int,
+    cursor_present: bool,
+) -> str:
+    safe_status: int | str = (
+        status if is_integer(status, minimum=400) and status <= 599 else "invalid"
+    )
+    code = safe_query_problem_value(problem.get("code"), SAFE_QUERY_PROBLEM_CODES)
+    retry = safe_query_problem_value(problem.get("retry"), SAFE_QUERY_RETRY_ADVICE)
+    fields = (
+        f"status={safe_status} code={code} retry={retry} attempt={attempt} page={page} "
+        f"cursor_present={'true' if cursor_present else 'false'}"
+    )
+    instance = safe_query_problem_instance(problem.get("instance"))
+    if instance is not None:
+        fields += f" instance={instance}"
+    return fields
+
+
+def query_retry_mode(
+    status: int,
+    problem: dict[str, Any],
+    retry_after: str | None,
+) -> str | None:
+    if problem.get("status") != status:
+        return None
+    code = problem.get("code")
+    retry = problem.get("retry")
+    if not isinstance(code, str) or not isinstance(retry, str):
+        return None
+    mode = CURSOR_QUERY_RETRY_CONTRACTS.get((status, code, retry))
+    if mode == "after_backoff" and retry_after != "1":
+        return None
+    if mode == "after_resync" and retry_after is not None:
+        return None
+    return mode
+
+
+def require_query_identity_hash(value: object, detail: str) -> str:
+    require(
+        isinstance(value, str)
+        and len(value) == MAX_ACCESSIBILITY_IDENTITY_BYTES
+        and re.fullmatch(r"[0-9a-f]{64}", value) is not None,
+        detail,
+    )
+    return value
+
+
+def valid_atspi_bus_name(value: object) -> bool:
+    if (
+        not isinstance(value, str)
+        or len(value) > MAX_ACCESSIBILITY_BUS_NAME_BYTES
+        or not value.startswith(":")
+    ):
+        return False
+    elements = value[1:].split(".")
+    return len(elements) >= 2 and all(
+        element
+        and all(
+            character.isascii() and (character.isalnum() or character in "_-")
+            for character in element
+        )
+        for element in elements
+    )
+
+
+def valid_atspi_object_path(value: object) -> bool:
+    if (
+        not isinstance(value, str)
+        or len(value) > MAX_ACCESSIBILITY_OBJECT_PATH_BYTES
+    ):
+        return False
+    if value == "/":
+        return True
+    if not value.startswith("/"):
+        return False
+    elements = value[1:].split("/")
+    return all(
+        element
+        and all(
+            character.isascii() and (character.isalnum() or character == "_")
+            for character in element
+        )
+        for element in elements
+    )
+
+
+def bounded_utf8_text(value: object, *, maximum_bytes: int) -> bool:
+    if not isinstance(value, str) or not value or "\0" in value:
+        return False
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return len(encoded) <= maximum_bytes
+
+
+def require_query_warnings(value: object) -> None:
+    require(
+        isinstance(value, list) and len(value) <= MAX_ACCESSIBILITY_WARNINGS,
+        "cursor page warnings exceeded their protocol bound",
+    )
+    for warning in value:
+        require(
+            isinstance(warning, dict)
+            and {"code", "message"}.issubset(warning),
+            "cursor page warning was malformed",
+        )
+        code = warning.get("code")
+        message = warning.get("message")
+        require(
+            isinstance(code, str)
+            and 0 < len(code) <= MAX_ACCESSIBILITY_WARNING_CODE_BYTES
+            and re.fullmatch(r"[a-z0-9._-]+", code) is not None,
+            "cursor page warning code was invalid",
+        )
+        require(
+            bounded_utf8_text(
+                message,
+                maximum_bytes=MAX_ACCESSIBILITY_SHORT_TEXT_BYTES,
+            ),
+            "cursor page warning message was invalid",
+        )
+
+
+def require_query_scope(
+    value: dict[str, Any],
+    *,
+    desktop_id: str,
+    desktop_generation: str,
+    atspi_generation: int,
+    detail: str,
+) -> None:
+    require(
+        value.get("desktop_id") == desktop_id
+        and value.get("desktop_generation") == desktop_generation
+        and parse_u64_string(value.get("atspi_generation"), minimum=1)
+        == atspi_generation,
+        detail,
+    )
+
+
+def query_element_identity(
+    entry: dict[str, Any],
+    *,
+    desktop_id: str,
+    desktop_generation: str,
+    atspi_generation: int,
+    snapshot_revision: int,
+) -> QueryElementIdentity:
+    snapshot = element_snapshot(entry)
+    reference = snapshot.get("ref")
+    require(
+        isinstance(reference, dict) and ELEMENT_REFERENCE_FIELDS.issubset(reference),
+        "cursor page entry omitted its strict reference fields",
+    )
+    require_query_scope(
+        reference,
+        desktop_id=desktop_id,
+        desktop_generation=desktop_generation,
+        atspi_generation=atspi_generation,
+        detail="cursor page entry reference changed transaction scope",
+    )
+    application = reference.get("application")
+    require(
+        isinstance(application, dict)
+        and APPLICATION_REFERENCE_FIELDS.issubset(application),
+        "cursor page entry reference omitted strict application fields",
+    )
+    require_query_scope(
+        application,
+        desktop_id=desktop_id,
+        desktop_generation=desktop_generation,
+        atspi_generation=atspi_generation,
+        detail="cursor page entry application changed transaction scope",
+    )
+    unique_bus_name = application.get("unique_bus_name")
+    root_object_path = application.get("root_object_path")
+    object_path = reference.get("object_path")
+    require(
+        valid_atspi_bus_name(unique_bus_name)
+        and valid_atspi_object_path(root_object_path)
+        and valid_atspi_object_path(object_path),
+        "cursor page entry reference omitted its bounded object identity",
+    )
+    app_instance_generation = parse_u64_string(
+        application.get("app_instance_generation"),
+        minimum=1,
+    )
+    require(
+        app_instance_generation is not None,
+        "cursor page entry application generation was invalid",
+    )
+    application_identity_hash = require_query_identity_hash(
+        application.get("identity_hash"),
+        "cursor page entry application identity hash was invalid",
+    )
+    object_identity_hash = require_query_identity_hash(
+        reference.get("object_identity_hash"),
+        "cursor page entry object identity hash was invalid",
+    )
+    cache_sequence = parse_u64_string(reference.get("cache_sequence"), minimum=1)
+    require(
+        cache_sequence is not None,
+        "cursor page entry cache sequence was invalid",
+    )
+    element_revision = parse_u64_string(snapshot.get("revision"), minimum=1)
+    require(
+        element_revision is not None and element_revision <= snapshot_revision,
+        "cursor page entry revision escaped its transaction snapshot",
+    )
+    return (
+        unique_bus_name,
+        root_object_path,
+        app_instance_generation,
+        application_identity_hash,
+        object_path,
+        object_identity_hash,
+        cache_sequence,
+    )
+
+
+def require_cursor_query_page(
+    page: dict[str, Any],
+    *,
+    desktop_id: str,
+    desktop_generation: str,
+    prefix: str,
+    transaction_metadata: tuple[int, int, str] | None,
+    seen_elements: set[QueryElementIdentity],
+    previous_name: str | None,
+) -> tuple[tuple[int, int, str], list[str], str | None]:
+    require(
+        page.get("desktop_id") == desktop_id
+        and page.get("desktop_generation") == desktop_generation,
+        "cursor page changed desktop transaction scope",
+    )
+    atspi_generation = parse_u64_string(page.get("atspi_generation"), minimum=1)
+    snapshot_revision = parse_u64_string(page.get("snapshot_revision"), minimum=1)
+    order = page.get("order")
+    require(
+        atspi_generation is not None
+        and snapshot_revision is not None
+        and order == EXPECTED_CURSOR_QUERY_ORDER,
+        "cursor page omitted its transaction metadata",
+    )
+    current_metadata = atspi_generation, snapshot_revision, order
+    require(
+        transaction_metadata is None or current_metadata == transaction_metadata,
+        "cursor page mixed accessibility transaction revisions",
+    )
+    require(page.get("truncated") is False, "cursor page was unexpectedly truncated")
+    entries = page.get("elements")
+    require(isinstance(entries, list), "cursor page omitted elements")
+    require(
+        len(entries) <= 25,
+        "cursor page exceeded its declared element limit",
+    )
+    visited_nodes = page.get("visited_nodes")
+    require(
+        is_integer(visited_nodes, minimum=len(entries))
+        and visited_nodes <= MAX_CURSOR_QUERY_VISITED_NODES,
+        "cursor page reported invalid traversal evidence",
+    )
+    require_query_warnings(page.get("warnings"))
+    page_names: list[str] = []
+    for entry in entries:
+        require(isinstance(entry, dict), "cursor page entry was malformed")
+        identity = query_element_identity(
+            entry,
+            desktop_id=desktop_id,
+            desktop_generation=desktop_generation,
+            atspi_generation=atspi_generation,
+            snapshot_revision=snapshot_revision,
+        )
+        require(
+            identity not in seen_elements,
+            "cursor page repeated an element identity",
+        )
+        seen_elements.add(identity)
+        name = element_snapshot(entry).get("name")
+        require(
+            isinstance(name, str) and name.startswith(prefix),
+            "cursor page entry omitted its matching name",
+        )
+        require(
+            previous_name is None or previous_name <= name,
+            "cursor page violated its declared name ordering",
+        )
+        previous_name = name
+        page_names.append(name)
+    return current_metadata, page_names, previous_name
 
 
 def require_detailed_trace(result: dict[str, Any]) -> dict[str, Any]:
@@ -520,6 +901,22 @@ class ApiClient:
         *,
         timeout: float = 10,
     ) -> tuple[int, dict[str, Any]]:
+        status, value, _ = self.request_json_response(
+            method,
+            path,
+            body,
+            timeout=timeout,
+        )
+        return status, value
+
+    def request_json_response(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, Any] | None = None,
+        *,
+        timeout: float = 10,
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
         encoded = None
         headers = {
             "Authorization": self.authorization,
@@ -542,6 +939,7 @@ class ApiClient:
             status = response.status
             payload = response.read(MAX_API_BODY + 1)
             content_type = response.headers.get_content_type()
+            retry_after = response.headers.get("Retry-After")
         require(len(payload) <= MAX_API_BODY, "API response exceeded its fixture bound")
         require(
             content_type in {"application/json", "application/problem+json"},
@@ -552,7 +950,10 @@ class ApiClient:
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise AcceptanceError("API response was malformed JSON") from error
         require(isinstance(value, dict), "API response was not a JSON object")
-        return status, value
+        response_headers = {}
+        if retry_after is not None:
+            response_headers["retry-after"] = retry_after
+        return status, value, response_headers
 
     def discover(self) -> None:
         status, value = self.request_json("GET", "/v1/status")
@@ -589,7 +990,10 @@ class ApiClient:
         last_status = "missing"
         last_reason = "missing"
         while time.monotonic() < deadline:
-            value = self.status(timeout=5)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            value = self.status(timeout=min(5, remaining))
             capabilities = value.get("capabilities", {}).get("capabilities", [])
             if isinstance(capabilities, list):
                 for capability in capabilities:
@@ -772,67 +1176,179 @@ class ApiClient:
             timeout=12,
         )
 
-    def collect_name_prefix(self, prefix: str) -> tuple[list[str], int]:
-        cursor: str | None = None
-        names: list[str] = []
-        pages = 0
-        while True:
-            body = {
-                "desktop_id": self.desktop_id,
-                "desktop_generation": self.generation,
-                "selector": {
-                    "scope": {"type": "desktop"},
-                    "predicates": [
-                        {
-                            "type": "name",
-                            "matcher": {
-                                "type": "prefix",
-                                "value": prefix,
-                                "case_sensitive": True,
-                            },
-                        }
-                    ],
-                    "order": "name_ascending",
-                    "result_index": None,
-                },
-                "limit": 25,
-                "cursor": cursor,
-                "expansion": {
-                    "value": False,
-                    "text_metadata": False,
-                    "component": False,
-                },
-                "limits": {
-                    "max_visited_nodes": 25_000,
-                    "max_depth": 64,
-                    "max_matches": 1_000,
-                    "timeout_ms": 10_000,
-                },
-            }
-            status, page = self.request_json(
-                "POST",
-                f"/v1/desktops/{self.desktop_id}/accessibility/elements/query",
-                body,
-                timeout=12,
-            )
-            require(status == 200, "cursor-bound accessibility query failed")
-            entries = page.get("elements")
-            require(isinstance(entries, list), "cursor page omitted elements")
-            for entry in entries:
-                require(isinstance(entry, dict), "cursor page entry was malformed")
-                name = element_snapshot(entry).get("name")
-                require(isinstance(name, str), "cursor page entry omitted its name")
-                names.append(name)
-            pages += 1
-            require(pages <= 40, "cursor pagination exceeded its fixture bound")
-            next_cursor = page.get("next_cursor")
-            if next_cursor is None:
-                return names, pages
-            require(
-                isinstance(next_cursor, str) and next_cursor,
-                "cursor page returned an invalid continuation",
-            )
-            cursor = next_cursor
+    def collect_name_prefix(
+        self,
+        prefix: str,
+        *,
+        timeout: float = CURSOR_QUERY_TRANSACTION_TIMEOUT_SECONDS,
+        max_transactions: int = MAX_CURSOR_QUERY_TRANSACTIONS,
+        max_requests: int = MAX_CURSOR_QUERY_REQUESTS,
+        max_pages: int = MAX_CURSOR_QUERY_PAGES,
+    ) -> tuple[list[str], int]:
+        require(
+            isinstance(timeout, (int, float))
+            and not isinstance(timeout, bool)
+            and 0 < timeout <= CURSOR_QUERY_TRANSACTION_TIMEOUT_SECONDS,
+            "cursor query timeout exceeded its fixture bound",
+        )
+        require(
+            is_integer(max_transactions, minimum=1)
+            and max_transactions <= MAX_CURSOR_QUERY_TRANSACTIONS,
+            "cursor query transaction count exceeded its fixture bound",
+        )
+        require(
+            is_integer(max_requests, minimum=1)
+            and max_requests <= MAX_CURSOR_QUERY_REQUESTS,
+            "cursor query request count exceeded its fixture bound",
+        )
+        require(
+            is_integer(max_pages, minimum=1) and max_pages <= MAX_CURSOR_QUERY_PAGES,
+            "cursor query page count exceeded its fixture bound",
+        )
+        deadline = time.monotonic() + timeout
+        transaction = 1
+        requests = 0
+        while transaction <= max_transactions:
+            cursor: str | None = None
+            names: list[str] = []
+            pages = 0
+            last_problem: str | None = None
+            transaction_metadata: tuple[int, int, str] | None = None
+            seen_elements: set[QueryElementIdentity] = set()
+            previous_name: str | None = None
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or requests >= max_requests:
+                    detail = last_problem or (
+                        f"status=none code=none retry=none attempt={transaction} "
+                        f"page={pages + 1} "
+                        f"cursor_present={'true' if cursor is not None else 'false'}"
+                    )
+                    raise AcceptanceError(
+                        f"cursor query retry budget exhausted: {detail}"
+                    )
+                body = {
+                    "desktop_id": self.desktop_id,
+                    "desktop_generation": self.generation,
+                    "selector": {
+                        "scope": {"type": "desktop"},
+                        "predicates": [
+                            {
+                                "type": "name",
+                                "matcher": {
+                                    "type": "prefix",
+                                    "value": prefix,
+                                    "case_sensitive": True,
+                                },
+                            }
+                        ],
+                        "order": "name_ascending",
+                        "result_index": None,
+                    },
+                    "limit": 25,
+                    "cursor": cursor,
+                    "expansion": {
+                        "value": False,
+                        "text_metadata": False,
+                        "component": False,
+                    },
+                    "limits": {
+                        "max_visited_nodes": 25_000,
+                        "max_depth": 64,
+                        "max_matches": 1_000,
+                        "timeout_ms": 10_000,
+                    },
+                }
+                status, page, response_headers = self.request_json_response(
+                    "POST",
+                    f"/v1/desktops/{self.desktop_id}/accessibility/elements/query",
+                    body,
+                    timeout=min(12, remaining),
+                )
+                requests += 1
+                page_index = pages + 1
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    safe_status: int | str = (
+                        status
+                        if is_integer(status, minimum=100) and status <= 599
+                        else "invalid"
+                    )
+                    raise AcceptanceError(
+                        "cursor query retry budget exhausted: "
+                        f"status={safe_status} code=none retry=none "
+                        f"attempt={transaction} page={page_index} "
+                        f"cursor_present={'true' if cursor is not None else 'false'}"
+                    )
+                if status != 200:
+                    last_problem = query_problem_diagnostic(
+                        status,
+                        page,
+                        attempt=transaction,
+                        page=page_index,
+                        cursor_present=cursor is not None,
+                    )
+                    retry_mode = query_retry_mode(
+                        status,
+                        page,
+                        response_headers.get("retry-after"),
+                    )
+                    if retry_mode is None:
+                        raise AcceptanceError(
+                            f"cursor-bound accessibility query failed: {last_problem}"
+                        )
+                    if transaction >= max_transactions or requests >= max_requests:
+                        raise AcceptanceError(
+                            f"cursor query retry budget exhausted: {last_problem}"
+                        )
+                    if retry_mode == "after_resync":
+                        try:
+                            self.wait_accessibility_available(timeout=remaining)
+                        except AcceptanceError:
+                            raise AcceptanceError(
+                                f"cursor query retry budget exhausted: {last_problem}"
+                            ) from None
+                    else:
+                        if remaining < CURSOR_QUERY_RETRY_BACKOFF_SECONDS:
+                            raise AcceptanceError(
+                                f"cursor query retry budget exhausted: {last_problem}"
+                            )
+                        time.sleep(CURSOR_QUERY_RETRY_BACKOFF_SECONDS)
+                    transaction += 1
+                    break
+
+                transaction_metadata, page_names, previous_name = (
+                    require_cursor_query_page(
+                        page,
+                        desktop_id=self.desktop_id,
+                        desktop_generation=self.generation,
+                        prefix=prefix,
+                        transaction_metadata=transaction_metadata,
+                        seen_elements=seen_elements,
+                        previous_name=previous_name,
+                    )
+                )
+                names.extend(page_names)
+                pages += 1
+                next_cursor = page.get("next_cursor")
+                if next_cursor is None:
+                    return names, pages
+                require(
+                    isinstance(next_cursor, str)
+                    and MIN_CURSOR_BYTES <= len(next_cursor) <= MAX_CURSOR_BYTES
+                    and re.fullmatch(r"[A-Za-z0-9_-]+", next_cursor) is not None,
+                    "cursor page returned an invalid continuation",
+                )
+                require(
+                    page_names,
+                    "cursor page returned an empty continuation",
+                )
+                require(
+                    pages < max_pages,
+                    "cursor pagination exceeded its fixture bound",
+                )
+                cursor = next_cursor
+        raise AcceptanceError("cursor query transaction state escaped its fixture bound")
 
     def wait_name(
         self,
@@ -2501,6 +3017,21 @@ def exercise_missing_event_poll_fallback(
         api.require_ref_rejected(reference)
 
 
+def expected_large_stress_names() -> list[str]:
+    return [f"Phase5 Large Row {index:05d}" for index in range(4_000, 4_096)]
+
+
+def require_large_stress_pagination(names: list[str], pages: int) -> None:
+    expected = expected_large_stress_names()
+    require(
+        pages >= 4 and names == expected,
+        "large accessibility query did not return every exact ordered stress row; "
+        f"pages={pages} count={len(names)} "
+        f"first={names[0] if names else None!r} "
+        f"last={names[-1] if names else None!r}",
+    )
+
+
 def exercise_stress_and_reconnect(container: LiveContainer, api: ApiClient) -> None:
     # Establish control before the intentionally large accessibility surface
     # can transiently degrade optional viewer readiness. The controller lease
@@ -2532,16 +3063,7 @@ def exercise_stress_and_reconnect(container: LiveContainer, api: ApiClient) -> N
     ):
         require(api.wait_name(name, timeout=60) is not None, f"{name} was absent")
     large_names, large_pages = api.collect_name_prefix("Phase5 Large Row 04")
-    require(
-        large_pages >= 4
-        and len(large_names) == 96
-        and large_names[0] == "Phase5 Large Row 04000"
-        and large_names[-1] == "Phase5 Large Row 04095",
-        "large accessibility query did not traverse its stable cursor to the final row; "
-        f"pages={large_pages} count={len(large_names)} "
-        f"first={large_names[0] if large_names else None!r} "
-        f"last={large_names[-1] if large_names else None!r}",
-    )
+    require_large_stress_pagination(large_names, large_pages)
     old_entry = api.wait_name("Phase5 Stable Button")
     require(old_entry is not None, "stress fixture stable button was absent")
     old_reference = element_reference(old_entry)

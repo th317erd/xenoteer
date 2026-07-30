@@ -12,12 +12,22 @@ import random
 import re
 import time
 import uuid
+import weakref
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from types import TracebackType
-from typing import Any, Literal, Protocol, TypeAlias, cast
+from typing import Any, Literal, TypeAlias, cast
 from urllib.parse import urlsplit
 
+from .connection import (
+    ReconnectPolicy,
+    SafeLogEvent,
+    SafeLogHook,
+    WebSocketFactory,
+    WebSocketLike,
+    emit_safe_log,
+    safe_error_code,
+)
 from .errors import XenoteerError
 from .protocol_generated import EventMessageWire, JsonObject, JsonValue
 from .wire import as_uint64_string, decode_uint64, encode_uint64, validate_uint64_fields
@@ -268,25 +278,158 @@ def decode_server_message(value: object) -> EventItem | SubscriptionAck:
     return UnknownServerMessage(message_type, copy.deepcopy(value))
 
 
-class WebSocketLike(Protocol):
-    async def send(self, message: str) -> Any: ...
-
-    async def recv(self) -> object: ...
-
-    async def close(self, **kwargs: Any) -> Any: ...
-
-
-WebSocketFactory: TypeAlias = Callable[
-    ..., WebSocketLike | Awaitable[WebSocketLike]
-]
-AuthorizationSource: TypeAlias = str | Callable[[], str | Awaitable[str]]
+AuthorizationSource: TypeAlias = str | Callable[[], Awaitable[str]]
 _SENTINEL = object()
+
+
+async def _bounded_socket_close(
+    socket: WebSocketLike,
+    *,
+    code: int,
+    reason: str,
+    timeout: float,
+    deadline: float | None = None,
+) -> None:
+    remaining = timeout
+    if deadline is not None:
+        remaining = min(
+            remaining,
+            max(0.0, deadline - asyncio.get_running_loop().time()),
+        )
+    task = asyncio.create_task(
+        socket.close(code=code, reason=reason),
+        name="xenoteer-websocket-close",
+    )
+    if remaining <= 0:
+        await asyncio.sleep(0)
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return
+    try:
+        async with asyncio.timeout(remaining):
+            await task
+    except TimeoutError:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    except asyncio.CancelledError:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+    except Exception:
+        pass
+
+
+def _consume_socket_close_failure(task: asyncio.Task[None]) -> None:
+    if not task.cancelled():
+        task.exception()
+
+
+async def _send_socket(
+    socket: WebSocketLike,
+    encoded: str,
+    *,
+    deadline: float,
+) -> None:
+    try:
+        async with asyncio.timeout_at(deadline):
+            await socket.send(encoded)
+    except TimeoutError:
+        raise XenoteerError(
+            "request_timeout",
+            "WebSocket write timed out",
+        ) from None
 
 
 @dataclass(slots=True)
 class _WriteRequest:
     encoded: str
     completed: asyncio.Future[None]
+    deadline: float
+
+
+@dataclass(slots=True)
+class _SocketOwner:
+    reference: weakref.ReferenceType[WebSocketLike]
+    closed: bool = False
+    close_task: asyncio.Task[None] | None = None
+
+    @property
+    def socket(self) -> WebSocketLike | None:
+        return self.reference()
+
+
+class _SocketOwners:
+    """Weak lifetime identity markers, bucketed to tolerate synthetic ID reuse."""
+
+    __slots__ = ("_buckets", "__weakref__")
+
+    def __init__(self) -> None:
+        self._buckets: dict[int, list[_SocketOwner]] = {}
+
+    def owner_for(self, socket: WebSocketLike) -> _SocketOwner:
+        identity = id(socket)
+        bucket = self._prune(identity)
+        for owner in bucket:
+            if owner.socket is socket:
+                return owner
+        registry_reference = weakref.ref(self)
+
+        def discard(
+            reference: weakref.ReferenceType[WebSocketLike],
+            *,
+            socket_identity: int = identity,
+        ) -> None:
+            registry = registry_reference()
+            if registry is not None:
+                registry._discard(socket_identity, reference)
+
+        try:
+            reference = weakref.ref(socket, discard)
+        except TypeError:
+            raise XenoteerError(
+                "invalid_request",
+                "WebSocket factory sockets must support weak references",
+            ) from None
+        owner = _SocketOwner(reference)
+        bucket.append(owner)
+        self._buckets[identity] = bucket
+        return owner
+
+    @property
+    def live_count(self) -> int:
+        for identity in list(self._buckets):
+            self._prune(identity)
+        return sum(len(bucket) for bucket in self._buckets.values())
+
+    def _prune(self, identity: int) -> list[_SocketOwner]:
+        bucket = [
+            owner
+            for owner in self._buckets.get(identity, ())
+            if owner.socket is not None
+        ]
+        if bucket:
+            self._buckets[identity] = bucket
+        else:
+            self._buckets.pop(identity, None)
+        return bucket
+
+    def _discard(
+        self,
+        identity: int,
+        reference: weakref.ReferenceType[WebSocketLike],
+    ) -> None:
+        bucket = [
+            owner
+            for owner in self._buckets.get(identity, ())
+            if owner.reference is not reference and owner.socket is not None
+        ]
+        if bucket:
+            self._buckets[identity] = bucket
+        else:
+            self._buckets.pop(identity, None)
 
 
 class EventSession:
@@ -297,6 +440,7 @@ class EventSession:
         "_active_subscription",
         "_closed",
         "_close_info",
+        "_connect_timeout",
         "_control_item",
         "_error",
         "_factory",
@@ -307,7 +451,7 @@ class EventSession:
         "_last_desktop_id",
         "_last_received",
         "_last_sequence",
-        "_max_reconnect_attempts",
+        "_reconnect_policy",
         "_max_message_bytes",
         "_pending",
         "_permanent",
@@ -316,7 +460,10 @@ class EventSession:
         "_read_stale_timeout",
         "_reader",
         "_registry",
+        "_safe_log_hook",
         "_socket",
+        "_socket_owner",
+        "_socket_owners",
         "_subscription",
         "_url",
         "_welcome",
@@ -337,10 +484,14 @@ class EventSession:
         factory: WebSocketFactory,
         heartbeat_interval: float,
         read_stale_timeout: float,
-        max_reconnect_attempts: int,
+        reconnect_policy: ReconnectPolicy,
+        connect_timeout: float,
+        safe_log_hook: SafeLogHook | None,
         registry: "GenerationRegistry | None",
     ) -> None:
         self._socket = socket
+        self._socket_owners = _SocketOwners()
+        self._socket_owner = self._socket_owners.owner_for(socket)
         self._welcome = welcome
         # The physical extra slot is reserved for the iterator sentinel. A
         # separate control slot preserves an authoritative terminal frame even
@@ -351,6 +502,7 @@ class EventSession:
         self._closed = False
         self._error: XenoteerError | None = None
         self._close_info: CloseInfo | None = None
+        self._connect_timeout = connect_timeout
         self._url = url
         self._authorization_source = authorization_source
         self._hello = copy.deepcopy(dict(hello))
@@ -361,12 +513,13 @@ class EventSession:
             welcome.heartbeat_seconds * 3,
             welcome.heartbeat_seconds + 1,
         )
-        self._max_reconnect_attempts = max_reconnect_attempts
+        self._reconnect_policy = reconnect_policy
         self._max_message_bytes = min(
             MAX_WEBSOCKET_MESSAGE_BYTES, welcome.max_message_bytes
         )
         self._permanent = False
         self._registry = registry
+        self._safe_log_hook = safe_log_hook
         if registry is not None and welcome.desktop_generation is not None:
             registry.observe(welcome.desktop_generation)
         self._last_received = time.monotonic()
@@ -412,10 +565,14 @@ class EventSession:
         websocket_factory: WebSocketFactory | None = None,
         heartbeat_interval: float = 15.0,
         read_stale_timeout: float = 45.0,
-        max_reconnect_attempts: int = 5,
+        reconnect_policy: ReconnectPolicy | None = None,
+        max_reconnect_attempts: int | None = None,
+        connect_timeout: float = 10.0,
+        safe_log_hook: SafeLogHook | None = None,
         registry: "GenerationRegistry | None" = None,
     ) -> "EventSession":
         _validate_websocket_url(url)
+        _validate_authorization_source(authorization)
         if isinstance(capacity, bool) or not isinstance(capacity, int) or not 1 <= capacity <= 4096:
             raise XenoteerError("invalid_request", "event capacity must be in 1..4096")
         for label, value in (
@@ -435,13 +592,29 @@ class EventSession:
                 "invalid_request", "read stale timeout must exceed heartbeat interval"
             )
         if (
-            isinstance(max_reconnect_attempts, bool)
-            or not isinstance(max_reconnect_attempts, int)
-            or not 0 <= max_reconnect_attempts <= 20
+            isinstance(connect_timeout, bool)
+            or not isinstance(connect_timeout, (int, float))
+            or not 0 < connect_timeout <= 60
         ):
             raise XenoteerError(
-                "invalid_request", "max reconnect attempts must be in 0..20"
+                "invalid_request", "connect timeout must be in (0, 60] seconds"
             )
+        if reconnect_policy is not None and max_reconnect_attempts is not None:
+            raise XenoteerError(
+                "invalid_request",
+                "reconnect policy and legacy reconnect attempts cannot both be set",
+            )
+        if reconnect_policy is None:
+            attempts = (
+                5
+                if max_reconnect_attempts is None
+                else max_reconnect_attempts
+            )
+            policy = ReconnectPolicy(max_attempts=attempts)
+        else:
+            policy = reconnect_policy
+        if not isinstance(policy, ReconnectPolicy):
+            raise XenoteerError("invalid_request", "reconnect policy is invalid")
         factory = websocket_factory
         if factory is None:
             try:
@@ -451,7 +624,15 @@ class EventSession:
                     "missing_dependency", "websockets is required for event sessions"
                 ) from None
             factory = cast(WebSocketFactory, connect)
-        socket, welcome = await cls._open_socket(factory, url, authorization, hello)
+        socket, welcome = await cls._open_socket(
+            factory,
+            url,
+            authorization,
+            hello,
+            safe_log_hook=safe_log_hook,
+            attempt=0,
+            connect_timeout=float(connect_timeout),
+        )
         return cls(
             socket,
             welcome,
@@ -462,7 +643,9 @@ class EventSession:
             factory=factory,
             heartbeat_interval=float(heartbeat_interval),
             read_stale_timeout=float(read_stale_timeout),
-            max_reconnect_attempts=max_reconnect_attempts,
+            reconnect_policy=policy,
+            connect_timeout=float(connect_timeout),
+            safe_log_hook=safe_log_hook,
             registry=registry,
         )
 
@@ -472,43 +655,131 @@ class EventSession:
         url: str,
         authorization_source: AuthorizationSource,
         hello: Mapping[str, Any],
+        *,
+        safe_log_hook: SafeLogHook | None,
+        attempt: int,
+        connect_timeout: float,
+        deadline: float | None = None,
     ) -> tuple[WebSocketLike, ServerWelcome]:
-        authorization = await _resolve_authorization(authorization_source)
+        emit_safe_log(
+            safe_log_hook,
+            SafeLogEvent(
+                operation="websocket.handshake",
+                outcome="started",
+                attempt=attempt,
+                route="/v1/ws",
+            ),
+        )
+        socket: WebSocketLike | None = None
+        if deadline is None:
+            deadline = asyncio.get_running_loop().time() + connect_timeout
         try:
-            candidate = factory(
-                url,
-                additional_headers={"authorization": authorization},
-                max_size=MAX_WEBSOCKET_MESSAGE_BYTES,
-                max_queue=16,
-                compression=None,
-                open_timeout=10,
-            )
-            socket = (
-                await candidate
-                if inspect.isawaitable(candidate)
-                else candidate
-            )
-            await socket.send(json.dumps(hello, separators=(",", ":"), ensure_ascii=False))
-            first = await asyncio.wait_for(socket.recv(), timeout=10)
-            if (
-                not isinstance(first, str)
-                or len(first.encode("utf-8")) > MAX_WEBSOCKET_MESSAGE_BYTES
-            ):
-                raise XenoteerError(
-                    "invalid_response", "server welcome frame is invalid"
+            async with asyncio.timeout_at(deadline):
+                try:
+                    encoded_hello = json.dumps(
+                        hello,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    )
+                except (TypeError, ValueError):
+                    raise XenoteerError(
+                        "invalid_request", "WebSocket hello is not valid JSON"
+                    ) from None
+                if len(encoded_hello.encode("utf-8")) > MAX_WEBSOCKET_MESSAGE_BYTES:
+                    raise XenoteerError(
+                        "invalid_request", "WebSocket hello exceeds its size limit"
+                    )
+                authorization = await _resolve_authorization(
+                    authorization_source
                 )
-            try:
-                decoded = json.loads(first)
-            except (json.JSONDecodeError, RecursionError):
-                raise XenoteerError(
-                    "invalid_response", "server welcome is invalid JSON"
-                ) from None
-            welcome = _decode_welcome(decoded, hello)
+                candidate = factory(
+                    url,
+                    additional_headers={"authorization": authorization},
+                    max_size=MAX_WEBSOCKET_MESSAGE_BYTES,
+                    max_queue=16,
+                    compression=None,
+                    open_timeout=connect_timeout,
+                )
+                socket = (
+                    await candidate
+                    if inspect.isawaitable(candidate)
+                    else candidate
+                )
+                try:
+                    weakref.ref(socket)
+                except TypeError:
+                    raise XenoteerError(
+                        "invalid_request",
+                        "WebSocket factory sockets must support weak references",
+                    ) from None
+                await socket.send(encoded_hello)
+                first = await socket.recv()
+                if (
+                    not isinstance(first, str)
+                    or len(first) > MAX_WEBSOCKET_MESSAGE_BYTES
+                    or len(first.encode("utf-8"))
+                    > MAX_WEBSOCKET_MESSAGE_BYTES
+                ):
+                    raise XenoteerError(
+                        "invalid_response", "server welcome frame is invalid"
+                    )
+                try:
+                    decoded = json.loads(first)
+                except (json.JSONDecodeError, RecursionError):
+                    raise XenoteerError(
+                        "invalid_response", "server welcome is invalid JSON"
+                    ) from None
+                welcome = _decode_welcome(decoded, hello)
+            emit_safe_log(
+                safe_log_hook,
+                SafeLogEvent(
+                    operation="websocket.handshake",
+                    outcome="succeeded",
+                    attempt=attempt,
+                    route="/v1/ws",
+                ),
+            )
             return socket, welcome
-        except XenoteerError:
-            raise
-        except Exception as error:
-            raise _websocket_error(error, connecting=True) from None
+        except BaseException as error:
+            if socket is not None:
+                await _bounded_socket_close(
+                    socket,
+                    code=1002,
+                    reason="handshake failed",
+                    timeout=connect_timeout,
+                    deadline=deadline,
+                )
+            failure: BaseException
+            if isinstance(error, XenoteerError):
+                failure = error
+            elif isinstance(error, TimeoutError) or (
+                isinstance(error, asyncio.CancelledError)
+                and asyncio.get_running_loop().time() >= deadline
+            ):
+                failure = XenoteerError(
+                    "request_timeout", "WebSocket handshake timed out"
+                )
+            elif isinstance(error, asyncio.CancelledError):
+                failure = error
+            elif isinstance(error, Exception):
+                failure = _websocket_error(error, connecting=True)
+            else:
+                failure = error
+            emit_safe_log(
+                safe_log_hook,
+                SafeLogEvent(
+                    operation="websocket.handshake",
+                    outcome="failed",
+                    attempt=attempt,
+                    route="/v1/ws",
+                    status=_websocket_status(error),
+                    error_code=safe_error_code(failure),
+                ),
+            )
+            if failure is error:
+                raise
+            raise failure from None
 
     async def subscribe(
         self,
@@ -572,8 +843,10 @@ class EventSession:
         future.add_done_callback(_consume_future_exception)
         self._pending[selected_request_id] = (copy.deepcopy(message), future)
         try:
-            await self.send(message)
-            return await asyncio.wait_for(future, float(timeout))
+            deadline = asyncio.get_running_loop().time() + float(timeout)
+            async with asyncio.timeout_at(deadline):
+                await self._send_with_deadline(message, deadline)
+                return await future
         except TimeoutError:
             raise XenoteerError(
                 "request_timeout", "event subscription acknowledgement timed out"
@@ -582,6 +855,16 @@ class EventSession:
             self._pending.pop(selected_request_id, None)
 
     async def send(self, message: Mapping[str, Any]) -> None:
+        await self._send_with_deadline(
+            message,
+            asyncio.get_running_loop().time() + self._connect_timeout,
+        )
+
+    async def _send_with_deadline(
+        self,
+        message: Mapping[str, Any],
+        deadline: float,
+    ) -> None:
         if self._closed:
             raise XenoteerError("transport", "event session is closed")
         try:
@@ -594,7 +877,9 @@ class EventSession:
             raise XenoteerError("invalid_request", "WebSocket message is too large")
         completed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         try:
-            self._writer_queue.put_nowait(_WriteRequest(encoded, completed))
+            self._writer_queue.put_nowait(
+                _WriteRequest(encoded, completed, deadline)
+            )
         except asyncio.QueueFull:
             raise XenoteerError(
                 "backpressure", "WebSocket writer queue is full"
@@ -608,9 +893,17 @@ class EventSession:
                 if request.completed.cancelled():
                     continue
                 try:
-                    await self._socket.send(request.encoded)
+                    await _send_socket(
+                        self._socket,
+                        request.encoded,
+                        deadline=request.deadline,
+                    )
                 except Exception as error:
-                    failure = _websocket_error(error)
+                    failure = (
+                        error
+                        if isinstance(error, XenoteerError)
+                        else _websocket_error(error)
+                    )
                     if not request.completed.done():
                         request.completed.set_exception(failure)
                 else:
@@ -643,7 +936,7 @@ class EventSession:
                         raise failure
                     while True:
                         reconnect_attempt += 1
-                        if reconnect_attempt > self._max_reconnect_attempts:
+                        if reconnect_attempt > self._reconnect_policy.max_attempts:
                             raise XenoteerError(
                                 "transport",
                                 "event WebSocket reconnect budget exhausted",
@@ -690,6 +983,11 @@ class EventSession:
                 self._error = XenoteerError("transport", "event WebSocket closed")
         finally:
             self._closed = True
+            await self._close_socket_once(
+                self._socket_owner,
+                code=1011,
+                reason="event session ended",
+            )
             if not self._heartbeat.done():
                 self._heartbeat.cancel()
             if not self._writer.done():
@@ -935,83 +1233,150 @@ class EventSession:
     async def _reconnect(self, attempt: int) -> None:
         """Reconnect event transport only; command mutations are never replayed."""
 
-        delay = min(5.0, 0.1 * (2 ** (attempt - 1)))
-        await asyncio.sleep(delay * random.uniform(0.5, 1.0))
-        hello = copy.deepcopy(self._hello)
-        if (
-            self._last_sequence is not None
-            and self._last_desktop_id is not None
-            and self._last_desktop_generation is not None
-        ):
-            hello["request_id"] = _new_id()
-            hello["resume"] = {
-                "desktop_id": self._last_desktop_id,
-                "desktop_generation": self._last_desktop_generation,
-                "event_sequence": self._last_sequence,
-            }
-        socket, welcome = await self._open_socket(
-            self._factory, self._url, self._authorization_source, hello
-        )
-        if (
-            welcome.protocol_major != self._welcome.protocol_major
-            or welcome.protocol_minor != self._welcome.protocol_minor
-        ):
-            await socket.close(code=1002, reason="protocol changed")
-            raise XenoteerError(
-                "unsupported_version", "protocol changed across reconnect"
-            )
-        if welcome.desktop_generation != self._welcome.desktop_generation:
-            if self._registry is not None:
-                self._registry.invalidate("reconnect_generation_changed")
-            await socket.close(code=1002, reason="generation changed")
-            raise XenoteerError(
-                "generation_changed", "desktop generation changed across reconnect"
-            )
+        deadline = asyncio.get_running_loop().time() + self._connect_timeout
+        socket: WebSocketLike | None = None
+        socket_owner: _SocketOwner | None = None
+        adopted = False
         try:
-            await self._socket.close(code=1012, reason="event reconnect")
-        except Exception:
-            pass
-        self._socket = socket
-        self._welcome = welcome
-        self._max_message_bytes = min(
-            MAX_WEBSOCKET_MESSAGE_BYTES, welcome.max_message_bytes
-        )
-        self._last_received = time.monotonic()
-        if self._subscription is not None:
-            subscription = copy.deepcopy(self._subscription)
-            request_id = _new_id()
-            subscription["request_id"] = request_id
-            if self._last_sequence is not None:
-                subscription["since_sequence"] = self._last_sequence
-            await self.send(subscription)
-            try:
-                encoded_ack = await asyncio.wait_for(self._socket.recv(), timeout=10)
-            except Exception as error:
-                raise _websocket_error(error) from None
-            if (
-                not isinstance(encoded_ack, str)
-                or len(encoded_ack.encode("utf-8")) > self._max_message_bytes
-            ):
-                raise XenoteerError(
-                    "invalid_response", "resubscription acknowledgement is invalid"
+            async with asyncio.timeout_at(deadline):
+                jitter = random.uniform(
+                    self._reconnect_policy.jitter_min,
+                    self._reconnect_policy.jitter_max,
                 )
-            try:
-                ack_wire = json.loads(encoded_ack)
-            except (json.JSONDecodeError, RecursionError):
-                raise XenoteerError(
-                    "invalid_response", "resubscription acknowledgement is invalid"
-                ) from None
-            ack = decode_server_message(ack_wire)
-            if (
-                not isinstance(ack, SubscriptionAck)
-                or ack.request_id != request_id
-                or ack.topics != tuple(subscription["topics"])
-            ):
-                raise XenoteerError(
-                    "invalid_response", "resubscription acknowledgement differed"
+                await asyncio.sleep(
+                    self._reconnect_policy.delay_before(attempt, jitter)
                 )
-            self._subscription = copy.deepcopy(subscription)
-            self._active_subscription = copy.deepcopy(subscription)
+                hello = copy.deepcopy(self._hello)
+                if (
+                    self._last_sequence is not None
+                    and self._last_desktop_id is not None
+                    and self._last_desktop_generation is not None
+                ):
+                    hello["request_id"] = _new_id()
+                    hello["resume"] = {
+                        "desktop_id": self._last_desktop_id,
+                        "desktop_generation": self._last_desktop_generation,
+                        "event_sequence": self._last_sequence,
+                    }
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise TimeoutError
+                socket, welcome = await self._open_socket(
+                    self._factory,
+                    self._url,
+                    self._authorization_source,
+                    hello,
+                    safe_log_hook=self._safe_log_hook,
+                    attempt=attempt,
+                    connect_timeout=self._connect_timeout,
+                    deadline=deadline,
+                )
+                socket_owner = self._socket_owners.owner_for(socket)
+                if socket_owner is self._socket_owner:
+                    raise XenoteerError(
+                        "transport",
+                        "WebSocket factory reused the active socket",
+                    )
+                if socket_owner.closed:
+                    raise XenoteerError(
+                        "transport",
+                        "WebSocket factory reused a previously closed socket",
+                    )
+                if (
+                    welcome.protocol_major != self._welcome.protocol_major
+                    or welcome.protocol_minor != self._welcome.protocol_minor
+                ):
+                    raise XenoteerError(
+                        "unsupported_version",
+                        "protocol changed across reconnect",
+                    )
+                if (
+                    welcome.desktop_generation
+                    != self._welcome.desktop_generation
+                ):
+                    if self._registry is not None:
+                        self._registry.invalidate(
+                            "reconnect_generation_changed"
+                        )
+                    raise XenoteerError(
+                        "generation_changed",
+                        "desktop generation changed across reconnect",
+                    )
+
+                candidate_max_message_bytes = min(
+                    MAX_WEBSOCKET_MESSAGE_BYTES,
+                    welcome.max_message_bytes,
+                )
+                subscription: dict[str, Any] | None = None
+                if self._subscription is not None:
+                    subscription = copy.deepcopy(self._subscription)
+                    request_id = _new_id()
+                    subscription["request_id"] = request_id
+                    if self._last_sequence is not None:
+                        subscription["since_sequence"] = self._last_sequence
+                    encoded = json.dumps(
+                        subscription,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    )
+                    await _send_socket(socket, encoded, deadline=deadline)
+                    encoded_ack = await socket.recv()
+                    if (
+                        not isinstance(encoded_ack, str)
+                        or len(encoded_ack.encode("utf-8"))
+                        > candidate_max_message_bytes
+                    ):
+                        raise XenoteerError(
+                            "invalid_response",
+                            "resubscription acknowledgement is invalid",
+                        )
+                    try:
+                        ack_wire = json.loads(encoded_ack)
+                    except (json.JSONDecodeError, RecursionError):
+                        raise XenoteerError(
+                            "invalid_response",
+                            "resubscription acknowledgement is invalid",
+                        ) from None
+                    ack = decode_server_message(ack_wire)
+                    if (
+                        not isinstance(ack, SubscriptionAck)
+                        or ack.request_id != request_id
+                        or ack.topics != tuple(subscription["topics"])
+                    ):
+                        raise XenoteerError(
+                            "invalid_response",
+                            "resubscription acknowledgement differed",
+                        )
+
+                await self._close_socket_once(
+                    self._socket_owner,
+                    code=1012,
+                    reason="event reconnect",
+                    deadline=deadline,
+                )
+                self._socket = socket
+                self._socket_owner = socket_owner
+                self._welcome = welcome
+                self._max_message_bytes = candidate_max_message_bytes
+                self._last_received = time.monotonic()
+                if subscription is not None:
+                    self._subscription = copy.deepcopy(subscription)
+                    self._active_subscription = copy.deepcopy(subscription)
+                adopted = True
+        except TimeoutError:
+            raise XenoteerError(
+                "request_timeout",
+                "WebSocket reconnect timed out",
+            ) from None
+        finally:
+            if socket_owner is not None and not adopted:
+                await self._close_socket_once(
+                    socket_owner,
+                    code=1002,
+                    reason="reconnect failed",
+                    deadline=deadline,
+                )
 
     async def _heartbeat_loop(self) -> None:
         try:
@@ -1021,8 +1386,10 @@ class EventSession:
                     break
                 if time.monotonic() - self._last_received > self._read_stale_timeout:
                     try:
-                        await self._socket.close(
-                            code=1012, reason="read heartbeat stale"
+                        await self._close_socket_once(
+                            self._socket_owner,
+                            code=1012,
+                            reason="read heartbeat stale",
                         )
                     except Exception:
                         pass
@@ -1037,8 +1404,10 @@ class EventSession:
                     )
                 except XenoteerError:
                     try:
-                        await self._socket.close(
-                            code=1012, reason="heartbeat send failure"
+                        await self._close_socket_once(
+                            self._socket_owner,
+                            code=1012,
+                            reason="heartbeat send failure",
                         )
                     except Exception:
                         pass
@@ -1077,18 +1446,49 @@ class EventSession:
             self._heartbeat.cancel()
         if self._writer is not current and not self._writer.done():
             self._writer.cancel()
-        try:
-            await self._socket.close(code=1000, reason="client closed")
-        except Exception:
-            pass
-        for task in (self._reader, self._heartbeat, self._writer):
-            if task is not current:
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+        await self._close_socket_once(
+            self._socket_owner, code=1000, reason="client closed"
+        )
+        tasks = [
+            task
+            for task in (self._reader, self._heartbeat, self._writer)
+            if task is not current
+        ]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         if self._close_info is None:
             self._close_info = CloseInfo(1000, "client closed", False)
+
+    async def _close_socket_once(
+        self,
+        owner: _SocketOwner,
+        *,
+        code: int,
+        reason: str,
+        deadline: float | None = None,
+    ) -> None:
+        if not owner.closed:
+            socket = owner.socket
+            owner.closed = True
+            if socket is not None:
+                owner.close_task = asyncio.create_task(
+                    _bounded_socket_close(
+                        socket,
+                        code=code,
+                        reason=reason,
+                        timeout=self._connect_timeout,
+                        deadline=deadline,
+                    ),
+                    name="xenoteer-websocket-owned-close",
+                )
+        close_task = owner.close_task
+        if close_task is None:
+            return
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            close_task.add_done_callback(_consume_socket_close_failure)
+            raise
 
     async def __aenter__(self) -> "EventSession":
         if self._closed:
@@ -1181,26 +1581,12 @@ def _close_info(error: Exception) -> CloseInfo:
     return CloseInfo(
         code if isinstance(code, int) else None,
         _safe_close_reason(reason),
-        code not in {
-            1000,
-            1001,
-            1002,
-            1003,
-            1007,
-            1008,
-            1009,
-            1010,
-            4401,
-            4403,
-        },
+        code in {None, 1001, 1012, 1013},
     )
 
 
 def _websocket_error(error: Exception, *, connecting: bool = False) -> XenoteerError:
-    status = getattr(error, "status_code", None)
-    response = getattr(error, "response", None)
-    if status is None and response is not None:
-        status = getattr(response, "status_code", None)
+    status = _websocket_status(error)
     code, _ = _close_code_reason(error)
     if status == 401 or code == 4401:
         return XenoteerError("authentication", "WebSocket authentication failed")
@@ -1210,6 +1596,20 @@ def _websocket_error(error: Exception, *, connecting: bool = False) -> XenoteerE
         "transport",
         "WebSocket connection failed" if connecting else "WebSocket transport failed",
         source=error,
+    )
+
+
+def _websocket_status(error: BaseException) -> int | None:
+    status = getattr(error, "status_code", None)
+    response = getattr(error, "response", None)
+    if status is None and response is not None:
+        status = getattr(response, "status_code", None)
+    return (
+        status
+        if isinstance(status, int)
+        and not isinstance(status, bool)
+        and 100 <= status <= 599
+        else None
     )
 
 
@@ -1263,10 +1663,18 @@ def _safe_close_reason(value: str | None) -> str | None:
 
 
 async def _resolve_authorization(source: AuthorizationSource) -> str:
+    _validate_authorization_source(source)
     try:
         value = source() if callable(source) else source
-        if inspect.isawaitable(value):
+        if callable(source):
+            if not inspect.isawaitable(value):
+                raise XenoteerError(
+                    "invalid_request",
+                    "WebSocket credential provider must be an async callable",
+                )
             value = await value
+    except XenoteerError:
+        raise
     except Exception:
         raise XenoteerError(
             "authentication", "WebSocket credential provider failed"
@@ -1280,6 +1688,23 @@ async def _resolve_authorization(source: AuthorizationSource) -> str:
     ):
         raise XenoteerError("authentication", "WebSocket credential is invalid")
     return value
+
+
+def _validate_authorization_source(source: object) -> None:
+    if isinstance(source, str):
+        return
+    callback = getattr(source, "__call__", None)
+    if (
+        not callable(source)
+        or not (
+            inspect.iscoroutinefunction(source)
+            or inspect.iscoroutinefunction(callback)
+        )
+    ):
+        raise XenoteerError(
+            "invalid_request",
+            "WebSocket credential provider must be an async callable",
+        )
 
 
 def _validate_websocket_url(value: str) -> None:

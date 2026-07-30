@@ -300,6 +300,18 @@ crates/xenoteer-sdk/src/
 - `CommandHandle<T>` is cancel-safe: dropping handle stops local watching, not
   server execution.
 - Feature flags: `rustls-tls` default, optional native roots; no default OpenSSL.
+- `ClientOptions` validates connect/request/reconnect bounds, safe client
+  metadata, protocol range, shared HTTP/WSS Rustls roots, and optional mTLS DER
+  identity before connection. Static and async token sources resolve immediately
+  before every HTTP or WSS attempt; provider failures are content-redacted.
+- Release-one Rust transport is direct-origin-only and ignores environment proxy
+  variables. The pinned Hyper and Tokio-Tungstenite connector interfaces do not
+  provide one vetted bounded proxy connector that can preserve the exact same
+  Rustls roots/client identity across HTTPS and WSS; proxy support is therefore
+  unsupported rather than silently applying a split transport policy.
+- Safe logging exposes closed metadata-only transport/operation/outcome enums;
+  paths, headers, bodies, credentials, identifiers, provider errors, and backend
+  prose have no representation in the hook contract.
 - Mock transport trait is test-only/publicly limited so SDK conformance tests can
   simulate disconnect/replay without a daemon.
 

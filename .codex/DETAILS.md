@@ -910,3 +910,340 @@
   invocation, and all sibling discovery contracts. `bash -n`, ShellCheck,
   Python AST parsing, the complete static container gate, diff checks, and
   two independent review rounds are green.
+- Repair commit `47b5dbfe27c9b97887d97e9a0859a2c1e4c7b766` produced exact
+  production image
+  `sha256:e8b60118065d3d4d83418d3f77b5a62f1a6cee21a84968c20e4b02a1aca3520b`
+  and exact derived fixture
+  `sha256:a29e8d8b482c5ea32315ebb2b443960c595a3d6c618838deda0b3b71d5b44835`.
+  Both record clean source-tree
+  `f92b67c11e97339020c5f811d925d783f3f5fdcd210253a55d019ffd587e62a5`
+  and dependency-lock
+  `0aecfd5eecdedf7a250f2d69a54d6b60aee506c4bc8f149ac4c7788dd6fe81d4`;
+  the fixture records the exact production ID and preserves its 28-layer
+  prefix in 32 total layers.
+- The first and only Phase-5 AT-SPI live run against that `47b5dbf` pair failed
+  after 38.37 seconds at the cursor-bound accessibility query. Lanes 2-7 were
+  not started and lane 1 was not rerun, so both image identities are rejected.
+  The visible daemon evidence shows repeated structural/targeted AT-SPI rebuilds
+  and generation changes before the query failure. The exact failure log is
+  `/tmp/codex/xenoteer-47b5dbf-phase5-atspi-live.log` with SHA-256
+  `bcf74161af1128f649f7d108dd3de71927cf86b0f09455db782060eb43b921eb`.
+  Diagnosis must reproduce and close the cursor/revision failure class before
+  another coherent image pair is built; rerunning the rejected candidate is not
+  acceptance evidence.
+- The cursor failure now has a preserved fail-first reproduction at
+  `/tmp/codex/xenoteer-47b5dbf-phase5-pagination-red.log` (SHA-256
+  `ed26f2b1ea85eafa2a32e2136c1d5d366030828d4bd5e34bd19dbeee4dc8602d`):
+  the former live collector consumed page one, received the daemon's intentional
+  409 stale cursor after an AT-SPI cache mutation, and aborted instead of
+  restarting the complete pagination transaction. The repair retries only the
+  exact 409 stale/toolkit-resync and 429/503 backoff contracts within one
+  60-second/16-transaction/80-request/40-page budget. Independent review still
+  gates acceptance and must verify that every successful page is bound to one
+  desktop/AT-SPI generation/snapshot revision and that all 96 expected names
+  are checked exactly rather than only by count/endpoints.
+- The independent pagination review confirmed those two gaps as release
+  blockers. Its fix now freezes desktop ID/generation, AT-SPI generation,
+  snapshot revision, and order for every successful transaction; validates
+  strict application/element scope, identity, revision, warning, traversal,
+  cursor, and `Retry-After` contracts; resets metadata only on a whole
+  transaction restart; and compares the exact ordered 96-row stress result.
+  The focused hardening suite has 21 tests, and complete container-script
+  discovery passes 42/42. Primary RED evidence is
+  `/tmp/codex/xenoteer-phase6-pagination-hardening-red.log` (SHA-256
+  `edb6f421cfb94e953bbe21b1e598b8552f7d2bafa9d2582af9ebb7b4c7a57bbb`);
+  final GREEN evidence is
+  `/tmp/codex/xenoteer-phase6-pagination-complete-green.log` (SHA-256
+  `713c763b2d0db53f3693982556151bd2c11bca056d1341dd3061660e72c55ec6`).
+  A new immutable-image Phase-5 lane remains mandatory because the original
+  rejected image log did not retain the HTTP problem body/status.
+- The Phase-6 packaged-doc/runtime audit corrected the Python README's obsolete
+  selector forms, split SDK CI into one Rust job plus Node 22/24 and Python
+  3.11--3.14 matrices, and moved the unqualified published Rust Phase-3 example
+  into the internal non-publishable `fixtures/phase3-sdk-smoke` crate. The
+  authoritative Rust archive verifier must be rerun after the concurrent Rust
+  options work refreshes both Cargo locks.
+- The connection-options audit found a security defect in the TypeScript safe
+  logger: raw request paths can contain desktop, command, lease, and artifact
+  identifiers despite the public no-ID promise, and streaming downloads plus
+  WebSocket attempts bypass logging. Python has no safe logger. Both languages
+  also split HTTP/WebSocket adapter policy and ownership, can leak failed
+  handshake candidates, and do not document that same-origin WSS derivation
+  cannot copy CA roots, mTLS identity, proxies, pinning, DNS, or agents from the
+  HTTP adapter. Phase 6 now requires closed route-template log events, exact
+  attempt lifecycle evidence, explicit borrowed/owned adapter semantics,
+  failed-socket cleanup, retained reconnect policy, and paired TLS/proxy
+  guidance before another image build.
+- The first independent connection-options review rejected the author-green
+  Rust/TypeScript wave. TypeScript awaited rotating token providers outside the
+  effective HTTP/WebSocket deadline, could leave the established failed socket
+  open while reconnecting, and used an uncancellable reconnect sleep. Rust
+  could lose the terminal half of a safe HTTP log pair when its attempt future
+  was dropped by timeout/client/caller cancellation, and sent WebSocket hello/
+  subscription frames outside the connect deadline. Each finding requires a
+  fail-first cancellation/stalled-peer regression and independent re-review;
+  author-green package/conformance results are not closure evidence yet.
+- The completed Rust/TypeScript review also found that TypeScript retried
+  normal/protocol-terminal WebSocket close codes, could yield artifact bytes
+  before validating mandatory exact length/digest headers, and allowed
+  case-insensitive caller header collisions with SDK-owned authority/framing.
+  Rust retained a failed established WebSocket through reconnect backoff and
+  replacement attempts. The repair wave must prove exact terminal/transient
+  close classes, pre-yield integrity rejection, reserved-header rejection, and
+  old-peer closure before replacement.
+- Rust `catch_unwind` cannot make callback panic payloads secret: the process
+  global panic hook runs before the unwind is caught and may emit the payload.
+  The SDK may erase ordinary provider/hook errors and catch panics so they do
+  not escape or change outcomes, but it must document panic-hook output as
+  caller/runtime responsibility and forbid secrets in panic payloads. Per-call
+  global hook swapping would introduce a worse concurrent-process race.
+- Python's broadened connection-boundary regression reproduced all four tested
+  Unicode control-character metadata canaries being accepted and confirmed
+  that no public `connect_timeout` bounded token/factory/hello/welcome work.
+  Primary API RED evidence is
+  `/tmp/codex/xenoteer-python-connection-deadlines-api-red.log` (SHA-256
+  `93a75db20415ba5e78e68609ca36813a907fde182a2d102d2ccd3915d39eb59f`);
+  a separate full focused run hung exactly at the unbounded provider and is
+  corroborating failure evidence, not a successful test.
+- The independent CI/package review rejected the file named
+  `requirements-test.lock` as an exact lock: it pins versions but not artifact
+  hashes, CI omits pip `--require-hashes`, and the existing source contract
+  rejects hash continuations. A same-version index artifact could therefore be
+  replaced without changing the repository. Phase 6 now requires a hashed lock
+  compatible with every Python 3.11--3.14 CI runtime plus negative tests for
+  missing, altered, malformed, and unhashed entries.
+- The broadened TypeScript/Rust lifecycle repair has genuine fail-first
+  evidence: `/tmp/codex/xenoteer-ts-lifecycle-red.log` (SHA-256
+  `298b304a54e26e3c73e01f2b883456bb4a6cadd90065b4088a1148a2ce79e50b`)
+  records ten behavioral failures plus the unbounded-provider watchdog, and
+  `/tmp/codex/xenoteer-rust-lifecycle-red.log` (SHA-256
+  `dd8ec4f9056882c04bd9166cfedc914baa9be6822e17ff1043d9a1634db515ea`)
+  records the missing bounded stalled-WebSocket-send behavior. The TypeScript
+  focused repair is 11/11 green; Rust compilation and complete gates remain
+  pending.
+- The final Rust/TypeScript connection-policy author gates are green.
+  TypeScript passes 80/80 tests, the immutable 73/73 conformance corpus, and
+  its deterministic 61-file package check; the final test log SHA-256 is
+  `b8fd1df5b8906d77ee51f8da00aff290e586ab50516329dee3b1069621be4bab`.
+  Rust passes 69 unit, 4 conformance, 7 connection-option, 1 package-boundary,
+  2 lifecycle, and 5 TLS tests plus strict Clippy, warning-denied docs, and
+  exact package listing; its final test log SHA-256 is
+  `55964aeb39b49a9dd411c4dec25df9bb570a46dae7b6021cd8ecf13507904b95`.
+  Adjacent fail-first evidence caught provider side effects before
+  reserved-header rejection and terminal close 1000 consuming a retry
+  (`/tmp/codex/xenoteer-ts-adjacent-red.log`, SHA-256
+  `bd71e91cbea60ebf17d3aaed8982fa111df5cb5d94c1260d92bde251f735e3fb`);
+  its focused GREEN SHA-256 is
+  `059cccacd00a2073f9cd7b4b5a4bba48a797953c150f2f698a22ff254f66c58c`.
+  Independent repair re-review remains mandatory before closure.
+- The independent repair re-review found one remaining medium Rust defect:
+  HTTP/artifact token resolution used its own relative timeout without selecting
+  client cancellation, then the actual HTTP operation received a fresh full
+  timeout. A hung provider could survive `Client::close()` for up to the
+  configured 300 seconds and provider latency plus I/O could consume nearly
+  twice the documented end-to-end deadline. The common request path must use
+  one absolute deadline across provider and transport work.
+- The same re-review found two adjacent Rust WebSocket gaps. Policy close codes
+  before welcome (`4401`, `4403`, `1008`) were collapsed into generic protocol
+  failure rather than exact terminal authentication/permission errors, and
+  established heartbeat/pong writes still used an unbounded send outside client
+  cancellation. Both need fail-first initial/reconnect/blocked-sink coverage.
+- Rust also marked an HTTP safe-log exchange successful as soon as response
+  headers arrived. Body stall/truncation/oversize/malformed decode or
+  cancellation after headers could therefore return an SDK failure with a sole
+  `Succeeded` terminal event. The guard must span bounded body collection and
+  decode under the same absolute deadline and publish exactly one truthful
+  terminal.
+- The four-finding Rust follow-up has preserved behavioral RED
+  `/tmp/codex/xenoteer-rust-four-findings-behavioral-red.log` (SHA-256
+  `810addc6a24fe5665601f50287e9af83c15ac592287ada62f61fb8597e83c098`)
+  and missing established-send RED
+  `/tmp/codex/xenoteer-rust-established-send-red.log` (SHA-256
+  `31a5eb2d5d699b612bd8a36645c0d77c23094e015f6fd9fb90ed13bd4f9fb9f0`).
+  The author-green implementation uses one monotonic HTTP deadline through
+  provider/request/body/artifact/decode, spans safe-log state through final
+  semantics, maps pre-welcome policy closes exactly, and bounds/cancels
+  established heartbeat/Pong writes. Final SDK evidence (75 unit plus every
+  conformance/connection/package/lifecycle/TLS integration) has SHA-256
+  `a7500a81651dfb37cbbbc836efbecb5350c792ec2a1a72598d287db4d01902ab`;
+  Clippy, rustdoc, formatting, and package listing are green. Independent
+  post-repair verification remains pending.
+- Python now rejects synchronous token callbacks before I/O and accepts only a
+  static token or cancellation-cooperative async provider. Five repeated
+  cooperative provider timeouts prove five cancellations/finalizers, zero
+  active or pending provider tasks, and zero adapter I/O. This does not claim
+  Python can preempt hostile callback code that blocks the event loop or
+  suppresses cancellation. CI hardening RED evidence is
+  `/tmp/codex/xenoteer-python-ci-hardening-red.log` (SHA-256
+  `7c55aeeedf5fef7a6f3a853c94dab7036eb18345edc3f0ac37b429708ca7f27b`);
+  the 22/22 GREEN contract log is
+  `/tmp/codex/xenoteer-python-ci-hardening-green.log` (SHA-256
+  `196f3c56315f0b7ece5d2eb8f13477157de30c00027098ed15d1fab19d456509`).
+  The final hashed lock has SHA-256
+  `c7d75f89890f5522f2eab656e6d62890e72e3657de5c4604a78d1d22f9503f54`;
+  the self-contained contract embeds the reviewed wheel filename/hash matrix,
+  validates 3.11--3.14 coverage, inspects executable run scalars, and rejects
+  missing/malformed/altered/unhashed/source-artifact or inert-command mutations.
+- A read-only wheel proof resolved every one of the 18 pinned Python test
+  dependencies for CPython 3.11, 3.12, 3.13, and 3.14 on
+  `manylinux2014_x86_64`: 72/72 selections were binary wheels, with root
+  METADATA name/version independently matched to the lock and no incompatible
+  runtime/package pair. The machine record is
+  `/tmp/codex/xenoteer-wheel-proof-agent-20260730/proof-manifest.json`
+  (SHA-256
+  `214454afd7c15b5afe8c6ccdc1d85e401739f86df3820e9146217d90e44cee55`).
+  This proves the declared glibc-based Linux x86_64 CI matrix, not musl, ARM,
+  macOS, or Windows.
+- The final Python author gates are green: 85/85 unit tests, 73/73 immutable
+  conformance cases, Ruff, strict mypy across 20 source files, 22/22 CI
+  contracts, 16/16 package-boundary tests, fresh-venv hash-only/binary-only
+  installation, and exact 25-file wheel/41-file sdist verification. Final wheel
+  SHA-256 is
+  `70b475332425fa5ec5d920b325c8d4b4403d218546563c8471e7ef75d28f8769`;
+  sdist SHA-256 is
+  `3f1b083b6c77c00f4e19b9bc415f5a67efa612f0a6ad9e42cf50f2114f1c6ebc`.
+  The aggregate static script was not accepted as green in the author pass
+  because its outer 10-second cap expired after its internal Python and package
+  checks; the coordinator must run the complete gate without that undersized
+  cap.
+- The independent Python review found a remaining split-deadline defect in
+  ordinary JSON and artifact HTTP paths: token resolution received one full
+  timeout, then the injected/default HTTP adapter and body work received
+  separate per-phase/full budgets. Only the additive
+  `request_with_timeout` path had an outer timeout. Every public request path
+  must instead use one absolute, client-cancellable deadline through final
+  output semantics.
+- Python WebSocket review found three adjacent medium gaps: failure cleanup,
+  established sends/resubscribe/heartbeat, and old-socket retirement could
+  await a blocking adapter without a bound; exported `EventSession.connect`
+  still accepted and synchronously invoked credential callbacks on the event
+  loop; and close classification used a permissive denylist instead of the
+  exact cross-SDK transient set `{missing, 1001, 1012, 1013}`. These require
+  blocked-adapter, zero-I/O sync-provider, and exact pre/post-welcome
+  replacement-count regressions.
+- Python post-repair review found close-once tracking stored `id(socket)` values
+  forever. Since Python may reuse an object ID after the prior socket dies, a
+  later reconnect/final socket could be mistaken for an already-closed socket
+  and leak. The ownership design must be identity-safe with bounded lifetime and
+  prove three or more reconnect generations under a deterministic collision.
+- The new self-contained CI run-scalar parser still false-passed command-prefix
+  impostors and failure masking because it used `startswith`: for example
+  `npm test-fake`, `npm test || true`, or `npm test &` could satisfy the
+  blocking `npm test` contract. The validator must require exact shell-token
+  boundaries and reject background/control/masking syntax, with mutations for
+  every required Rust, TypeScript, and Python command.
+- Python distribution verification was also not truly Apache-only: it required
+  an Apache marker and rejected BUSL specifically, but accepted another SPDX
+  identifier such as GPL alongside the Apache marker. Every packaged text
+  source must contain exactly the allowed Apache identifier and reject any
+  second/non-Apache expression across both wheel and sdist mutation fixtures.
+- Python follow-up RED evidence is now split deterministically. Absolute HTTP
+  deadline RED
+  `/tmp/codex/xenoteer-python-absolute-deadline-red.log` (SHA-256
+  `869bdbeec87a3b1d66dd44d616a05aa8dd807292a25a543ba119ab29e88d7e28`)
+  proves fresh auth/JSON/upload/download/delete budgets plus close/body stalls.
+  WebSocket RED
+  `/tmp/codex/xenoteer-python-websocket-bounds-red.log` (SHA-256
+  `a391f541d79adb0e6ddbc4c3bbf86eb4e7bc546a1b1f44e4686f30319da60fc5`)
+  proves the public sync-provider loophole and hanging failed-handshake cleanup
+  and established send.
+- The remaining Python/CI/package behavioral REDs are:
+  `/tmp/codex/xenoteer-python-close-policy-red.log` (SHA-256
+  `ab5441b1466747e8202394bb396a2325b18754aec007b05ff4c0680b9d74cad0`)
+  for exact close/replacement behavior;
+  `/tmp/codex/xenoteer-ci-shell-contract-red.log` (SHA-256
+  `c33021db6106c3818eec51abac2c5e8fc25e8aaf14ce1dbc2e5f00d730269382`)
+  for admitted command-prefix/failure-masking variants; and
+  `/tmp/codex/xenoteer-python-spdx-red.log` (SHA-256
+  `fda5f1840e2407e1aa6280718d7dc059838d816b5c542416cb4642fc48d28f7a`)
+  with 19 accepted non-Apache/multiple-marker wheel and sdist mutations.
+- The Python six-finding author repair is now green: one absolute HTTP/artifact
+  deadline with active-operation close cancellation; bounded failed/established
+  WebSocket cleanup, send, subscribe, resubscribe, heartbeat and retirement;
+  async-only exported authorization; exact transient close set; shell-token-aware
+  CI commands; and exactly one Apache SPDX marker per packaged source.
+  Evidence includes 97/97 full tests (log SHA-256 prefix `fb82cbef`), 14/14
+  focused WebSocket tests (`10debbf2`), 23/23 CI contracts (`327b3345`),
+  73/73 conformance (`c2242dae`), strict mypy (`2d6b2fd3`), Ruff
+  (`82b3e6a6`), and exact 25-file wheel/41-file sdist verification
+  (`a762de78`). Independent post-repair review remains pending; final evidence
+  must record complete hashes rather than these checkpoint prefixes.
+- Post-repair archive probing found member-name collapse before validation:
+  real wheel and sdist files with two `xenoteer/__init__.py` entries
+  (non-Apache first, valid Apache second) were both accepted. Duplicate and
+  normalization-alias members must be rejected before allowlist, metadata, or
+  SPDX validation.
+- Authoritative duplicate-archive RED is
+  `/tmp/codex/xenoteer-python-package-duplicates-red.log` (SHA-256
+  `3a97fa26f99ac1c095be304988881f47ca40059f9a787a92db8dba59f3e7ee08`):
+  eight wheel/sdist bypasses cover malicious-first and identical-valid source,
+  LICENSE, and metadata duplicates; malicious-last and normalization aliases
+  are pinned as already-failing adjacent cases.
+- Post-repair runtime probing also proved public synchronous artifact sinks can
+  block the event loop beyond the absolute deadline; a sleep-based sink
+  completed well past a 10 ms request timeout. Python cannot safely preempt
+  arbitrary synchronous callback code, so exported download sinks must be
+  genuinely async and validated before invocation or adapter I/O;
+  `download_bytes` may retain an internal async collector.
+- Artifact-sink RED
+  `/tmp/codex/xenoteer-python-artifact-sink-red.log` (SHA-256
+  `c34c86302d1a93dbbf835c70b5dd00c3f89c932fc4ac71518adf4b3bf80a136e`)
+  proves both synchronous functions and callable objects execute/block and
+  reach HTTP, including through exported `Artifacts.download_to`, rather than
+  being rejected before I/O.
+- Final Python review confirmed failed connect/negotiation cleanup awaited a
+  client-owned injected transport's `close()` without an independent bound,
+  even though ordinary client close is capped. Cooperative owned cleanup must
+  be time-bounded, borrowed adapters untouched, and the original connect/
+  negotiation failure must retain priority over cleanup timeout/failure.
+- The same final review confirmed three adjacent medium gaps. Archive
+  uniqueness was checked only before wheel dist-info/sdist root normalization,
+  so alternate-version roots collapsed to the same logical allowlist and
+  passed. A factory returning the same still-live socket in generation
+  `A -> B -> A` created a fresh owner and closed A twice. The CI run parser
+  treated required commands inside heredocs, uncalled functions, and
+  `if false` bodies as executed. Repairs must validate normalized archive
+  uniqueness, track live socket identity without raw-ID reuse or unbounded
+  history, and require each gate as an exact simple executable step rather than
+  attempting to infer arbitrary shell control flow.
+- Final closure review found the simple-step validator ignored indented YAML
+  plain-scalar continuation lines. A physically one-line accepted `run:`
+  followed by a deeper-indented `|| true` is folded by YAML into one masked
+  command while the validator saw only the first line. Required run scalars
+  must reject all continuation content, not merely block-scalar syntax.
+- Failed-connect cleanup RED is
+  `/tmp/codex/xenoteer-python-connect-cleanup-red.log` (SHA-256
+  `e6e67c3c9dd46b8917e97f05b6251561e765387a2259f558f66724516886d3bd`):
+  malformed-status and caller-cancellation cases hang in owned `close()`, while
+  throwing-close error priority and borrowed no-close already pass.
+- Rust close classification now has explicit table coverage for 14 close-code
+  rows across 28 initial/reconnect scenarios, including every transient member,
+  normal/protocol/data/size/application terminal representatives, and exact
+  auth/permission policy codes plus candidate counts. The focused log
+  `/tmp/codex/xenoteer-rust-close-matrix-focused.log` has SHA-256
+  `ac447ae88b3f83ab935c9ec59ee661ceff8425bffa15360de35c6d85edd4c388`.
+- The coordinator's final Phase-6 source gate is green on the complete dirty
+  candidate tree. The Rust workspace ran 1,344 passing tests with 24 native-only
+  ignores and no failures; its log SHA-256 is
+  `ee6b9604f43e875c93650ab12ed80591e04850b64ea9ecf77ed7807c63bb9349`.
+  Warning-denied Clippy, warning-denied rustdoc, doctests, schema freshness,
+  both standalone Rust fixtures, deterministic Cargo package boundaries, and
+  cargo-deny also passed. Their respective evidence hashes are
+  `fca00bdfeea4facd30c45b11fb0f2665ed94afcec93fbbeb2eb9fda77a09871c`,
+  `2815b83af627571a7531928783e81d4d59aaff1aac5dd9e1f793bf43d4b2d617`,
+  `782daac2e9082beb9a33f4e48412d82457557d5e62cdfe1d8999bef2bf2eaa04`,
+  `89dbb400e013cb29ebd1df92b4387d2658687947e04953328b77da6e3bf445c4`,
+  `ef1c5c125a90cc7d3e0981153172851073653d07d2ab8d20d73e502580fd8286`,
+  `057260e02b0da9cb0de31a003161e67d075c0e10bcc7ce311a5e3586df2b5c10`,
+  and
+  `cee56e90ac485955b428c91f2f175de89f4b09256981d6b6a821571c2e18597f`.
+- The final aggregate static gate passed after generated Python, mypy, Ruff,
+  egg-info, and Node dependency caches were moved out of the source tree into
+  `/tmp/codex`; its log SHA-256 is
+  `43a66f6244c307193da4348392cad8a064d216b0efbd53d0ca07f51eaeaecee2`.
+  Authenticated native X11, authenticated AT-SPI, and concurrent isolation
+  gates all passed without reruns; their log hashes are
+  `825c56b0faedfa7eac78c0ac1c7495eee482b83d6f92dd35b31b30950e088a12`,
+  `324cb5a9ac5eeb73f0958f5129c46a983075ed06554b72024aba883c9afc3aab`,
+  and
+  `fa6d67f2f106c6bef0dc41a3212d1235753033183dd8f57dbd5a196451d4ebbe`.

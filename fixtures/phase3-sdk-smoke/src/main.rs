@@ -1,6 +1,6 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
-//! Minimal black-box SDK probe for the Phase 3 control image.
+//! Internal black-box SDK probe for the Phase 3 control image.
 
 use std::{env, error::Error, fs, io, str::FromStr};
 
@@ -19,7 +19,9 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let generation =
         DesktopGeneration::from_str(&required_argument(&mut arguments, "desktop generation")?)?;
     if arguments.next().is_some() {
-        return Err("usage: phase3-control-smoke BASE_URI TOKEN_FILE DESKTOP_ID GENERATION".into());
+        return Err(
+            "usage: xenoteer-phase3-sdk-smoke BASE_URI TOKEN_FILE DESKTOP_ID GENERATION".into(),
+        );
     }
 
     let token = fs::read(token_path)?;

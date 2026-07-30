@@ -152,14 +152,14 @@ build_recorder() {
 }
 
 run_sdk_smoke() {
-  local cargo_binary invoking_home invoking_cargo sdk_binary sdk_output
+  local cargo_binary invoking_home invoking_cargo manifest sdk_binary sdk_output
+  manifest="$repo_root/fixtures/phase3-sdk-smoke/Cargo.toml"
   local cargo_args=(
     build --quiet --locked --jobs 2
-    --manifest-path "$repo_root/Cargo.toml"
+    --manifest-path "$manifest"
     --target-dir "$repo_root/target"
     --target "$fixture_rust_target"
-    --package xenoteer-sdk
-    --example phase3-control-smoke
+    --bin xenoteer-phase3-sdk-smoke
   )
 
   if [[ -n ${SUDO_UID:-} && $SUDO_UID != 0 ]]; then
@@ -180,7 +180,7 @@ run_sdk_smoke() {
     nice -n 15 ionice -c 3 "$cargo_binary" "${cargo_args[@]}"
   fi
 
-  sdk_binary="$repo_root/target/$fixture_rust_target/debug/examples/phase3-control-smoke"
+  sdk_binary="$repo_root/target/$fixture_rust_target/debug/xenoteer-phase3-sdk-smoke"
   sdk_output="$test_dir/sdk-smoke.json"
   if [[ ! -x $sdk_binary ]]; then
     printf 'SDK smoke build did not produce its expected binary\n' >&2

@@ -1,13 +1,13 @@
 //! Bounded WebSocket event streams with explicit continuity outcomes.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, future::Future, sync::Arc, time::Duration};
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use http::{StatusCode, header::AUTHORIZATION};
 use serde_json::Value;
-use tokio::{net::TcpStream, sync::mpsc, task::AbortHandle};
+use tokio::{net::TcpStream, sync::mpsc, task::AbortHandle, time::Instant};
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async_with_config,
+    Connector, MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
     tungstenite::{
         Error as WebSocketError, Message, client::IntoClientRequest, protocol::WebSocketConfig,
     },
@@ -19,17 +19,15 @@ use xenoteer_protocol::{
     WebSocketClientDescriptor, WebSocketClientMessage, WebSocketServerMessage,
 };
 
-use crate::{Client, Desktop, SdkError};
+use crate::{Client, Desktop, SafeLogOperation, SafeLogOutcome, SafeLogTransport, SdkError};
 
 /// Default maximum number of undelivered non-terminal event items.
 pub const DEFAULT_EVENT_QUEUE_CAPACITY: usize = 256;
 /// Maximum caller-configurable event queue capacity.
 pub const MAX_EVENT_QUEUE_CAPACITY: usize = 4_096;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MIN_HEARTBEAT: Duration = Duration::from_millis(250);
 const MAX_HEARTBEAT: Duration = Duration::from_secs(120);
-const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(10);
 const EVENT_RESERVED_QUEUE_SLOTS: usize = 2;
 
 /// Bounded local delivery policy for one event stream.
@@ -62,6 +60,8 @@ pub enum EventStreamCloseReason {
     ServerDraining,
     /// The peer sent a permanent WebSocket close code.
     PeerClosed(u16),
+    /// The configured bounded reconnect attempt budget was exhausted.
+    ReconnectExhausted,
     /// A frozen protocol invariant was violated.
     ProtocolViolation,
     /// A subscription-bound message did not match the active subscription.
@@ -225,9 +225,10 @@ impl Desktop {
             topics: Arc::new(topics),
             cancellation: self.transport.cancellation_token(),
         };
-        let (socket, heartbeat, subscription_request_id) = connect(&configuration, since_sequence)
-            .await
-            .map_err(EventConnectError::into_sdk_error)?;
+        let (socket, heartbeat, subscription_request_id) =
+            connect(&configuration, since_sequence, false)
+                .await
+                .map_err(EventConnectError::into_sdk_error)?;
         let task_guard = self.transport.register_event_task()?;
         let (sender, receiver) = event_channel(options.queue_capacity);
         let task = tokio::spawn(async move {
@@ -272,6 +273,7 @@ pub(crate) struct EventConfiguration {
 #[derive(Debug)]
 enum EventConnectError {
     Reconnectable,
+    TokenProvider,
     Authentication,
     Permission,
     Server { code: ErrorCode, detail: String },
@@ -282,6 +284,7 @@ impl EventConnectError {
     fn into_sdk_error(self) -> SdkError {
         match self {
             Self::Reconnectable => SdkError::Transport,
+            Self::TokenProvider => SdkError::TokenProvider,
             Self::Authentication => SdkError::EventHandshakeRejected { status: 401 },
             Self::Permission => SdkError::EventHandshakeRejected { status: 403 },
             Self::Server { code, detail } => SdkError::EventRejected { code, detail },
@@ -292,10 +295,57 @@ impl EventConnectError {
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+struct ConnectLogGuard {
+    client: Client,
+    operation: SafeLogOperation,
+    succeeded: bool,
+}
+
+impl ConnectLogGuard {
+    fn new(client: &Client, reconnect: bool) -> Self {
+        let operation = if reconnect {
+            SafeLogOperation::WebSocketReconnect
+        } else {
+            SafeLogOperation::WebSocketConnect
+        };
+        client.safe_log(
+            SafeLogTransport::WebSocket,
+            operation,
+            SafeLogOutcome::Started,
+        );
+        Self {
+            client: client.clone(),
+            operation,
+            succeeded: false,
+        }
+    }
+
+    fn succeed(&mut self) {
+        self.succeeded = true;
+    }
+}
+
+impl Drop for ConnectLogGuard {
+    fn drop(&mut self) {
+        self.client.safe_log(
+            SafeLogTransport::WebSocket,
+            self.operation,
+            if self.succeeded {
+                SafeLogOutcome::Succeeded
+            } else {
+                SafeLogOutcome::Failed
+            },
+        );
+    }
+}
+
 async fn connect(
     configuration: &EventConfiguration,
     last_sequence: Option<u64>,
+    reconnect: bool,
 ) -> Result<(Socket, Duration, RequestId), EventConnectError> {
+    let mut log = ConnectLogGuard::new(&configuration.client, reconnect);
+    let deadline = Instant::now() + configuration.client.connect_timeout();
     configuration
         .client
         .ensure_open()
@@ -305,38 +355,42 @@ async fn connect(
         .websocket_url()
         .into_client_request()
         .map_err(|_| EventConnectError::Protocol)?;
-    request
-        .headers_mut()
-        .insert(AUTHORIZATION, configuration.client.authorization_header());
+    let authorization = until_connect_deadline(
+        configuration.client.websocket_authorization_header(),
+        &configuration.cancellation,
+        deadline,
+    )
+    .await?
+    .map_err(|_| EventConnectError::TokenProvider)?;
+    request.headers_mut().insert(AUTHORIZATION, authorization);
     let websocket_configuration = WebSocketConfig::default()
         .max_message_size(Some(crate::MAX_RESPONSE_BYTES))
         .max_frame_size(Some(crate::MAX_RESPONSE_BYTES));
-    let connect = connect_async_with_config(request, Some(websocket_configuration), true);
-    let (mut socket, _) = tokio::select! {
-        result = tokio::time::timeout(CONNECT_TIMEOUT, connect) => {
-            result
-                .map_err(|_| EventConnectError::Reconnectable)?
-                .map_err(classify_connect_error)?
-        }
-        () = configuration.cancellation.cancelled() => {
-            return Err(EventConnectError::Reconnectable);
-        }
-    };
+    let connect = connect_async_tls_with_config(
+        request,
+        Some(websocket_configuration),
+        true,
+        Some(Connector::Rustls(configuration.client.tls_config())),
+    );
+    let (mut socket, _) = until_connect_deadline(connect, &configuration.cancellation, deadline)
+        .await?
+        .map_err(classify_connect_error)?;
 
     let hello = ClientHello {
         message_type: "client.hello".to_owned(),
         request_id: RequestId::new(),
         protocol: VersionRange::exact(configuration.protocol),
         client: WebSocketClientDescriptor {
-            name: "xenoteer-sdk-rust".to_owned(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
+            name: configuration.client.client_metadata().0.to_owned(),
+            version: configuration.client.client_metadata().1.to_owned(),
         },
         // Filtering exists only on events.subscribe; hello resume would briefly
         // create an unauthorized all-topic watch.
         resume: None,
     };
-    send_json(&mut socket, &hello).await?;
-    let welcome = receive_application_message(&mut socket, &configuration.cancellation).await?;
+    send_json_until(&mut socket, &hello, &configuration.cancellation, deadline).await?;
+    let welcome =
+        receive_application_message(&mut socket, &configuration.cancellation, deadline).await?;
     let WebSocketServerMessage::Welcome {
         protocol,
         desktop,
@@ -370,9 +424,17 @@ async fn connect(
         topics: configuration.topics.as_ref().clone(),
         since_sequence: last_sequence,
     };
-    send_json(&mut socket, &subscribe).await?;
+    send_json_until(
+        &mut socket,
+        &subscribe,
+        &configuration.cancellation,
+        deadline,
+    )
+    .await?;
     loop {
-        match receive_application_message(&mut socket, &configuration.cancellation).await? {
+        match receive_application_message(&mut socket, &configuration.cancellation, deadline)
+            .await?
+        {
             WebSocketServerMessage::EventsSubscribed { request_id, topics }
                 if request_id == subscription_request_id
                     && topics.as_slice() == configuration.topics.as_slice() =>
@@ -393,6 +455,7 @@ async fn connect(
             _ => return Err(EventConnectError::Protocol),
         }
     }
+    log.succeed();
     Ok((
         socket,
         Duration::from_millis(u64::from(limits.heartbeat_ms)),
@@ -421,26 +484,23 @@ fn classify_connect_error(error: WebSocketError) -> EventConnectError {
 async fn receive_application_message(
     socket: &mut Socket,
     cancellation: &CancellationToken,
+    deadline: Instant,
 ) -> Result<WebSocketServerMessage, EventConnectError> {
     loop {
-        let message = tokio::select! {
-            result = tokio::time::timeout(CONNECT_TIMEOUT, socket.next()) => {
-                result
-                    .map_err(|_| EventConnectError::Reconnectable)?
-                    .ok_or(EventConnectError::Reconnectable)?
-                    .map_err(classify_connect_error)?
-            }
-            () = cancellation.cancelled() => return Err(EventConnectError::Reconnectable),
-        };
+        let message = until_connect_deadline(socket.next(), cancellation, deadline)
+            .await?
+            .ok_or(EventConnectError::Reconnectable)?
+            .map_err(classify_connect_error)?;
         match message {
             Message::Text(text) => {
                 return serde_json::from_str(text.as_ref())
                     .map_err(|_| EventConnectError::Protocol);
             }
-            Message::Ping(payload) => socket
-                .send(Message::Pong(payload))
-                .await
-                .map_err(|_| EventConnectError::Reconnectable)?,
+            Message::Ping(payload) => {
+                until_connect_deadline(socket.send(Message::Pong(payload)), cancellation, deadline)
+                    .await?
+                    .map_err(|_| EventConnectError::Reconnectable)?
+            }
             Message::Pong(_) => {}
             Message::Close(frame) => {
                 return Err(classify_close(
@@ -452,24 +512,66 @@ async fn receive_application_message(
     }
 }
 
+async fn until_connect_deadline<F, T>(
+    future: F,
+    cancellation: &CancellationToken,
+    deadline: Instant,
+) -> Result<T, EventConnectError>
+where
+    F: Future<Output = T>,
+{
+    tokio::select! {
+        result = tokio::time::timeout_at(deadline, future) => {
+            result.map_err(|_| EventConnectError::Reconnectable)
+        }
+        () = cancellation.cancelled() => Err(EventConnectError::Reconnectable),
+    }
+}
+
 fn classify_close(code: Option<u16>) -> EventConnectError {
     match code {
         None | Some(1001 | 1012 | 1013) => EventConnectError::Reconnectable,
+        Some(4401) => EventConnectError::Authentication,
+        Some(1008 | 4403) => EventConnectError::Permission,
         _ => EventConnectError::Protocol,
     }
 }
 
-async fn send_json<T: serde::Serialize>(
-    socket: &mut Socket,
-    value: &T,
-) -> Result<(), EventConnectError> {
+fn encode_json_message<T: serde::Serialize>(value: &T) -> Result<Message, EventConnectError> {
     let encoded = serde_json::to_string(value).map_err(|_| EventConnectError::Protocol)?;
     if encoded.len() > crate::MAX_RESPONSE_BYTES {
         return Err(EventConnectError::Protocol);
     }
-    socket
-        .send(Message::Text(encoded.into()))
-        .await
+    Ok(Message::Text(encoded.into()))
+}
+
+async fn send_json_until<S, T>(
+    socket: &mut S,
+    value: &T,
+    cancellation: &CancellationToken,
+    deadline: Instant,
+) -> Result<(), EventConnectError>
+where
+    S: Sink<Message, Error = WebSocketError> + Unpin,
+    T: serde::Serialize,
+{
+    let message = encode_json_message(value)?;
+    until_connect_deadline(socket.send(message), cancellation, deadline)
+        .await?
+        .map_err(|_| EventConnectError::Reconnectable)
+}
+
+async fn send_established_message<S>(
+    socket: &mut S,
+    message: Message,
+    cancellation: &CancellationToken,
+    timeout: Duration,
+) -> Result<(), EventConnectError>
+where
+    S: Sink<Message, Error = WebSocketError> + Unpin,
+{
+    until_connect_deadline(socket.send(message), cancellation, Instant::now() + timeout)
+        .await?
         .map_err(|_| EventConnectError::Reconnectable)
 }
 
@@ -477,18 +579,24 @@ async fn supervise(
     configuration: EventConfiguration,
     sender: mpsc::Sender<EventStreamItem>,
     queue_capacity: usize,
-    mut socket: Socket,
+    socket: Socket,
     mut heartbeat: Duration,
     mut subscription_request_id: RequestId,
     mut last_sequence: Option<u64>,
 ) {
-    let mut attempt = 0_u32;
+    let mut socket = Some(socket);
     loop {
+        let Some(mut established) = socket.take() else {
+            let _terminal = sender.try_send(EventStreamItem::Closed {
+                reason: EventStreamCloseReason::ProtocolViolation,
+            });
+            return;
+        };
         match run_socket(
             &configuration,
             &sender,
             queue_capacity,
-            &mut socket,
+            &mut established,
             heartbeat,
             subscription_request_id,
             &mut last_sequence,
@@ -502,67 +610,109 @@ async fn supervise(
             SessionEnd::Reconnect if sender.is_closed() => return,
             SessionEnd::Reconnect => {}
         }
-        attempt = attempt.saturating_add(1);
-        let base_ms = 100_u64.saturating_mul(1_u64 << attempt.min(6));
-        let jitter_ms = u64::from(RequestId::new().as_uuid().as_bytes()[0]);
-        let delay =
-            Duration::from_millis(base_ms.saturating_add(jitter_ms)).min(MAX_RECONNECT_DELAY);
-        tokio::select! {
-            () = tokio::time::sleep(delay) => {}
-            () = configuration.cancellation.cancelled() => {
+        retire_established_socket(
+            &mut established,
+            &configuration.cancellation,
+            configuration.client.connect_timeout(),
+        )
+        .await;
+        drop(established);
+
+        let mut attempt = 0_u32;
+        let reconnect_policy = configuration.client.reconnect_policy();
+        loop {
+            attempt = attempt.saturating_add(1);
+            if attempt > reconnect_policy.max_attempts {
                 let _terminal = sender.try_send(EventStreamItem::Closed {
-                    reason: EventStreamCloseReason::ClientClosed,
+                    reason: EventStreamCloseReason::ReconnectExhausted,
                 });
                 return;
             }
-        }
-        match connect(&configuration, last_sequence).await {
-            Ok((new_socket, new_heartbeat, new_subscription_request_id)) => {
-                socket = new_socket;
-                heartbeat = new_heartbeat;
-                subscription_request_id = new_subscription_request_id;
-                attempt = 0;
+            let jitter_sample = RequestId::new().as_uuid().as_bytes()[0];
+            let delay = reconnect_delay(reconnect_policy, attempt, jitter_sample);
+            tokio::select! {
+                () = tokio::time::sleep(delay) => {}
+                () = configuration.cancellation.cancelled() => {
+                    let _terminal = sender.try_send(EventStreamItem::Closed {
+                        reason: EventStreamCloseReason::ClientClosed,
+                    });
+                    return;
+                }
             }
-            Err(EventConnectError::Reconnectable) => {}
-            Err(EventConnectError::Authentication) => {
-                emit_terminal_server_error(
-                    &sender,
-                    ErrorCode::AuthenticationRequired,
-                    "event authentication failed",
-                );
-                return;
-            }
-            Err(EventConnectError::Permission) => {
-                emit_terminal_server_error(
-                    &sender,
-                    ErrorCode::PermissionDenied,
-                    "event permission denied",
-                );
-                return;
-            }
-            Err(EventConnectError::Server { code, detail }) => {
-                let _item = try_emit(
-                    &sender,
-                    queue_capacity,
-                    EventStreamItem::ServerError {
-                        request_id: None,
-                        code,
-                        detail,
-                    },
-                );
-                let _terminal = sender.try_send(EventStreamItem::Closed {
-                    reason: EventStreamCloseReason::ServerError(code),
-                });
-                return;
-            }
-            Err(EventConnectError::Protocol) => {
-                let _terminal = sender.try_send(EventStreamItem::Closed {
-                    reason: EventStreamCloseReason::ProtocolViolation,
-                });
-                return;
+            match connect(&configuration, last_sequence, true).await {
+                Ok((new_socket, new_heartbeat, new_subscription_request_id)) => {
+                    socket = Some(new_socket);
+                    heartbeat = new_heartbeat;
+                    subscription_request_id = new_subscription_request_id;
+                    break;
+                }
+                Err(EventConnectError::Reconnectable | EventConnectError::TokenProvider) => {}
+                Err(EventConnectError::Authentication) => {
+                    emit_terminal_server_error(
+                        &sender,
+                        ErrorCode::AuthenticationRequired,
+                        "event authentication failed",
+                    );
+                    return;
+                }
+                Err(EventConnectError::Permission) => {
+                    emit_terminal_server_error(
+                        &sender,
+                        ErrorCode::PermissionDenied,
+                        "event permission denied",
+                    );
+                    return;
+                }
+                Err(EventConnectError::Server { code, detail }) => {
+                    let _item = try_emit(
+                        &sender,
+                        queue_capacity,
+                        EventStreamItem::ServerError {
+                            request_id: None,
+                            code,
+                            detail,
+                        },
+                    );
+                    let _terminal = sender.try_send(EventStreamItem::Closed {
+                        reason: EventStreamCloseReason::ServerError(code),
+                    });
+                    return;
+                }
+                Err(EventConnectError::Protocol) => {
+                    let _terminal = sender.try_send(EventStreamItem::Closed {
+                        reason: EventStreamCloseReason::ProtocolViolation,
+                    });
+                    return;
+                }
             }
         }
     }
+}
+
+async fn retire_established_socket(
+    socket: &mut Socket,
+    cancellation: &CancellationToken,
+    timeout: Duration,
+) {
+    tokio::select! {
+        _result = tokio::time::timeout(timeout, socket.close(None)) => {}
+        () = cancellation.cancelled() => {}
+    }
+}
+
+fn reconnect_delay(policy: crate::ReconnectPolicy, attempt: u32, jitter_sample: u8) -> Duration {
+    let multiplier = 1_u32 << attempt.saturating_sub(1).min(30);
+    let base = policy
+        .initial_delay
+        .saturating_mul(multiplier)
+        .min(policy.max_delay);
+    let available_jitter = policy.max_delay.saturating_sub(base).min(base / 4);
+    let jitter_nanos = available_jitter
+        .as_nanos()
+        .saturating_mul(u128::from(jitter_sample))
+        / u128::from(u8::MAX);
+    let jitter = Duration::from_nanos(u64::try_from(jitter_nanos).unwrap_or(u64::MAX));
+    base.saturating_add(jitter).min(policy.max_delay)
 }
 
 fn emit_terminal_server_error(
@@ -599,6 +749,7 @@ async fn run_socket(
 ) -> SessionEnd {
     let tick = (heartbeat / 2).max(MIN_HEARTBEAT);
     let stale_after = heartbeat.saturating_mul(2).max(MIN_HEARTBEAT * 2);
+    let send_timeout = heartbeat.min(configuration.client.connect_timeout());
     let mut interval = tokio::time::interval(tick);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     interval.tick().await;
@@ -625,8 +776,23 @@ async fn run_socket(
                         request_id,
                         nonce: nonce.clone(),
                     };
-                    if send_json(socket, &ping).await.is_err() {
-                        return SessionEnd::Reconnect;
+                    let message = match encode_json_message(&ping) {
+                        Ok(message) => message,
+                        Err(_) => {
+                            return SessionEnd::Terminal(EventStreamCloseReason::ProtocolViolation);
+                        }
+                    };
+                    if send_established_message(
+                        socket,
+                        message,
+                        &configuration.cancellation,
+                        send_timeout,
+                    ).await.is_err() {
+                        return if configuration.cancellation.is_cancelled() {
+                            SessionEnd::Terminal(EventStreamCloseReason::ClientClosed)
+                        } else {
+                            SessionEnd::Reconnect
+                        };
                     }
                     pending_ping = Some((request_id, nonce, now));
                 }
@@ -637,7 +803,9 @@ async fn run_socket(
                     Ok(message) => message,
                     Err(error) => {
                         return match classify_connect_error(error) {
-                            EventConnectError::Reconnectable => SessionEnd::Reconnect,
+                            EventConnectError::Reconnectable | EventConnectError::TokenProvider => {
+                                SessionEnd::Reconnect
+                            }
                             _ => SessionEnd::Terminal(EventStreamCloseReason::ProtocolViolation),
                         };
                     }
@@ -666,8 +834,17 @@ async fn run_socket(
                         }
                     }
                     Message::Ping(payload) => {
-                        if socket.send(Message::Pong(payload)).await.is_err() {
-                            return SessionEnd::Reconnect;
+                        if send_established_message(
+                            socket,
+                            Message::Pong(payload),
+                            &configuration.cancellation,
+                            send_timeout,
+                        ).await.is_err() {
+                            return if configuration.cancellation.is_cancelled() {
+                                SessionEnd::Terminal(EventStreamCloseReason::ClientClosed)
+                            } else {
+                                SessionEnd::Reconnect
+                            };
                         }
                     }
                     Message::Pong(_) => {}
@@ -951,9 +1128,18 @@ fn subscription_server_message(message_type: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error;
+    use std::{
+        error::Error,
+        pin::Pin,
+        sync::atomic::{AtomicUsize, Ordering},
+        task::{Context, Poll},
+    };
 
-    use tokio::{net::TcpListener, time::timeout};
+    use futures_util::Sink;
+    use tokio::{
+        net::TcpListener,
+        time::{Instant, timeout},
+    };
     use tokio_tungstenite::{
         WebSocketStream, accept_async,
         tungstenite::protocol::{CloseFrame, frame::coding::CloseCode},
@@ -966,6 +1152,78 @@ mod tests {
     use super::*;
 
     type TestError = Box<dyn Error + Send + Sync>;
+
+    struct StalledPeerSink;
+
+    impl Sink<Message> for StalledPeerSink {
+        type Error = WebSocketError;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+
+        fn start_send(self: Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+    }
+
+    struct ObservedStalledPeerSink {
+        polled: Arc<tokio::sync::Notify>,
+        dropped: Arc<AtomicUsize>,
+    }
+
+    impl Drop for ObservedStalledPeerSink {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl Sink<Message> for ObservedStalledPeerSink {
+        type Error = WebSocketError;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            self.polled.notify_one();
+            Poll::Pending
+        }
+
+        fn start_send(self: Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+    }
 
     fn configuration(
         base: impl AsRef<str>,
@@ -1693,9 +1951,301 @@ mod tests {
             Ok::<(), TestError>(())
         });
         let configuration = configuration(base, desktop_id, desktop_generation, vec![topic])?;
-        let result = timeout(Duration::from_secs(3), connect(&configuration, Some(17))).await;
+        let result = timeout(
+            Duration::from_secs(3),
+            connect(&configuration, Some(17), false),
+        )
+        .await;
         assert!(result?.is_ok());
         server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stalled_hello_and_subscribe_sends_obey_absolute_deadline_and_cancellation()
+    -> Result<(), TestError> {
+        for message in [
+            serde_json::json!({"type": "client.hello"}),
+            serde_json::json!({"type": "events.subscribe"}),
+        ] {
+            let cancellation = CancellationToken::new();
+            assert!(matches!(
+                send_json_until(
+                    &mut StalledPeerSink,
+                    &message,
+                    &cancellation,
+                    Instant::now() + Duration::from_millis(10),
+                )
+                .await,
+                Err(EventConnectError::Reconnectable)
+            ));
+
+            let cancellation = CancellationToken::new();
+            cancellation.cancel();
+            assert!(matches!(
+                timeout(
+                    Duration::from_millis(50),
+                    send_json_until(
+                        &mut StalledPeerSink,
+                        &message,
+                        &cancellation,
+                        Instant::now() + Duration::from_secs(1),
+                    ),
+                )
+                .await?,
+                Err(EventConnectError::Reconnectable)
+            ));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn established_heartbeat_and_pong_writes_are_bounded_cancellable_and_drop_the_socket()
+    -> Result<(), TestError> {
+        let heartbeat = WebSocketClientMessage::Ping {
+            request_id: RequestId::new(),
+            nonce: RequestId::new().to_string(),
+        };
+        let messages = [
+            Message::Text(serde_json::to_string(&heartbeat)?.into()),
+            Message::Pong(vec![1, 2, 3].into()),
+        ];
+        for (index, message) in messages.into_iter().enumerate() {
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let mut sink = ObservedStalledPeerSink {
+                polled: Arc::new(tokio::sync::Notify::new()),
+                dropped: dropped.clone(),
+            };
+            assert!(matches!(
+                send_established_message(
+                    &mut sink,
+                    message.clone(),
+                    &CancellationToken::new(),
+                    Duration::from_millis(10),
+                )
+                .await,
+                Err(EventConnectError::Reconnectable)
+            ));
+            drop(sink);
+            assert_eq!(dropped.load(Ordering::SeqCst), 1, "timeout {index}");
+
+            let cancellation = CancellationToken::new();
+            let task_cancellation = cancellation.clone();
+            let polled = Arc::new(tokio::sync::Notify::new());
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let task_polled = polled.clone();
+            let task_dropped = dropped.clone();
+            let task = tokio::spawn(async move {
+                let mut sink = ObservedStalledPeerSink {
+                    polled: task_polled,
+                    dropped: task_dropped,
+                };
+                send_established_message(
+                    &mut sink,
+                    message,
+                    &task_cancellation,
+                    Duration::from_secs(1),
+                )
+                .await
+            });
+            timeout(Duration::from_millis(100), polled.notified()).await?;
+            cancellation.cancel();
+            assert!(matches!(
+                timeout(Duration::from_millis(100), task).await??,
+                Err(EventConnectError::Reconnectable)
+            ));
+            assert_eq!(dropped.load(Ordering::SeqCst), 1, "cancellation {index}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pre_welcome_close_classification_and_retry_counts_match_the_exact_table()
+    -> Result<(), TestError> {
+        for (close_code, expected) in [
+            (None, "reconnectable"),
+            (Some(1001_u16), "reconnectable"),
+            (Some(1012), "reconnectable"),
+            (Some(1013), "reconnectable"),
+            (Some(1000), "protocol"),
+            (Some(1002), "protocol"),
+            (Some(1003), "protocol"),
+            (Some(1007), "protocol"),
+            (Some(1009), "protocol"),
+            (Some(1011), "protocol"),
+            (Some(4555), "protocol"),
+            (Some(4401), "authentication"),
+            (Some(4403), "permission"),
+            (Some(1008), "permission"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let base = format!("http://{}", listener.local_addr()?);
+            let desktop_id = DesktopId::new();
+            let generation = DesktopGeneration::new();
+            let initial_server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await?;
+                let mut socket = accept_async(stream).await?;
+                let _hello = socket.next().await.ok_or("missing hello")??;
+                socket
+                    .send(Message::Close(close_code.map(|code| CloseFrame {
+                        code: CloseCode::from(code),
+                        reason: "policy".into(),
+                    })))
+                    .await?;
+                drop(socket);
+                Ok::<bool, TestError>(
+                    timeout(Duration::from_millis(100), listener.accept())
+                        .await
+                        .is_ok(),
+                )
+            });
+            let configuration = configuration(base, desktop_id, generation, Vec::new())?;
+            let initial =
+                timeout(Duration::from_secs(2), connect(&configuration, None, false)).await?;
+            assert!(
+                match expected {
+                    "reconnectable" => matches!(initial, Err(EventConnectError::Reconnectable)),
+                    "protocol" => matches!(initial, Err(EventConnectError::Protocol)),
+                    "authentication" => matches!(initial, Err(EventConnectError::Authentication)),
+                    "permission" => matches!(initial, Err(EventConnectError::Permission)),
+                    _ => false,
+                },
+                "initial close {close_code:?} did not classify as {expected}"
+            );
+            assert!(
+                !initial_server.await??,
+                "initial close {close_code:?} opened an unexpected replacement"
+            );
+
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let base = format!("http://{}", listener.local_addr()?);
+            let reconnect_server = tokio::spawn(async move {
+                let (mut initial, _, _, _) =
+                    accept_subscription(&listener, desktop_id, generation, 1_000).await?;
+                initial
+                    .send(Message::Close(Some(CloseFrame {
+                        code: CloseCode::Restart,
+                        reason: "restart".into(),
+                    })))
+                    .await?;
+                drop(initial);
+
+                let (stream, _) = listener.accept().await?;
+                let mut reconnect = accept_async(stream).await?;
+                let _hello = reconnect.next().await.ok_or("missing reconnect hello")??;
+                reconnect
+                    .send(Message::Close(close_code.map(|code| CloseFrame {
+                        code: CloseCode::from(code),
+                        reason: "policy".into(),
+                    })))
+                    .await?;
+                drop(reconnect);
+                let mut connection_count = 2_usize;
+                if expected == "reconnectable" {
+                    let (stream, _) = listener.accept().await?;
+                    connection_count += 1;
+                    let mut replacement = accept_async(stream).await?;
+                    let _hello = replacement
+                        .next()
+                        .await
+                        .ok_or("missing replacement hello")??;
+                    replacement
+                        .send(Message::Close(Some(CloseFrame {
+                            code: CloseCode::Normal,
+                            reason: "terminal".into(),
+                        })))
+                        .await?;
+                    drop(replacement);
+                }
+                Ok::<(usize, bool), TestError>((
+                    connection_count,
+                    timeout(Duration::from_millis(100), listener.accept())
+                        .await
+                        .is_ok(),
+                ))
+            });
+            let client = Client::from_options(
+                crate::ClientOptions::builder(&base, "event-test-token-0123456789abcdef")
+                    .reconnect_policy(crate::ReconnectPolicy::new(
+                        3,
+                        Duration::from_millis(1),
+                        Duration::from_millis(1),
+                    )?)
+                    .build()?,
+            )?;
+            let configuration = EventConfiguration {
+                cancellation: client.cancellation_token(),
+                client,
+                desktop_id,
+                desktop_generation: generation,
+                protocol: ProtocolVersion::V1_0,
+                topics: Arc::new(Vec::new()),
+            };
+            let (socket, heartbeat, request_id) = connect(&configuration, None, false)
+                .await
+                .map_err(|error| format!("initial connect failed: {error:?}"))?;
+            let (sender, mut receiver) = event_channel(2);
+            timeout(
+                Duration::from_secs(2),
+                supervise(
+                    configuration,
+                    sender,
+                    2,
+                    socket,
+                    heartbeat,
+                    request_id,
+                    None,
+                ),
+            )
+            .await?;
+            match expected {
+                "authentication" | "permission" => {
+                    let expected_code = if expected == "authentication" {
+                        ErrorCode::AuthenticationRequired
+                    } else {
+                        ErrorCode::PermissionDenied
+                    };
+                    assert_eq!(
+                        receiver.try_recv()?,
+                        EventStreamItem::ServerError {
+                            request_id: None,
+                            code: expected_code,
+                            detail: if expected == "authentication" {
+                                "event authentication failed".to_owned()
+                            } else {
+                                "event permission denied".to_owned()
+                            },
+                        }
+                    );
+                    assert_eq!(
+                        receiver.try_recv()?,
+                        EventStreamItem::Closed {
+                            reason: EventStreamCloseReason::ServerError(expected_code)
+                        }
+                    );
+                }
+                "reconnectable" | "protocol" => {
+                    assert_eq!(
+                        receiver.try_recv()?,
+                        EventStreamItem::Closed {
+                            reason: EventStreamCloseReason::ProtocolViolation
+                        },
+                        "reconnect close {close_code:?}"
+                    );
+                }
+                _ => return Err("unknown close classification".into()),
+            }
+            let (connection_count, unexpected_replacement) = reconnect_server.await??;
+            assert!(
+                !unexpected_replacement,
+                "reconnect close {close_code:?} opened an unexpected extra replacement"
+            );
+            assert_eq!(
+                connection_count,
+                if expected == "reconnectable" { 3 } else { 2 },
+                "reconnect close {close_code:?}"
+            );
+        }
         Ok(())
     }
 
@@ -1746,7 +2296,7 @@ mod tests {
             });
             let configuration = configuration(base, desktop_id, generation, Vec::new())?;
             assert!(matches!(
-                timeout(Duration::from_secs(3), connect(&configuration, None)).await?,
+                timeout(Duration::from_secs(3), connect(&configuration, None, false),).await?,
                 Err(EventConnectError::Protocol)
             ));
             server.await??;
@@ -1774,7 +2324,7 @@ mod tests {
         let configuration =
             configuration(base, DesktopId::new(), DesktopGeneration::new(), Vec::new())?;
         assert!(matches!(
-            timeout(Duration::from_secs(3), connect(&configuration, None)).await?,
+            timeout(Duration::from_secs(3), connect(&configuration, None, false),).await?,
             Err(EventConnectError::Authentication)
         ));
         server.await??;
@@ -1836,7 +2386,7 @@ mod tests {
             Ok::<(), TestError>(())
         });
         let configuration = configuration(base, desktop_id, generation, Vec::new())?;
-        let (mut socket, heartbeat, request_id) = connect(&configuration, None)
+        let (mut socket, heartbeat, request_id) = connect(&configuration, None, false)
             .await
             .map_err(|error| format!("connect failed: {error:?}"))?;
         let (sender, _receiver) = event_channel(2);
@@ -1891,6 +2441,14 @@ mod tests {
                     reason: "restart".into(),
                 })))
                 .await?;
+            match timeout(Duration::from_millis(250), first.next()).await {
+                Ok(None | Some(Ok(Message::Close(_)))) => {}
+                Ok(Some(Ok(other))) => {
+                    return Err(format!("old socket yielded unexpected message: {other:?}").into());
+                }
+                Ok(Some(Err(_))) => {}
+                Err(_) => return Err("old socket was retained into reconnect backoff".into()),
+            }
 
             let (mut second, request_id, topics, since_sequence) =
                 accept_subscription(&listener, desktop_id, generation, 1_000).await?;
@@ -1910,7 +2468,7 @@ mod tests {
             Ok::<(), TestError>(())
         });
         let configuration = configuration(base, desktop_id, generation, vec![topic])?;
-        let (socket, heartbeat, request_id) = connect(&configuration, None)
+        let (socket, heartbeat, request_id) = connect(&configuration, None, false)
             .await
             .map_err(|error| format!("connect failed: {error:?}"))?;
         let (sender, mut receiver) = event_channel(4);
@@ -1951,6 +2509,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn supervisor_stops_after_bounded_reconnect_exhaustion() -> Result<(), TestError> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let base = format!("http://{}", listener.local_addr()?);
+        let desktop_id = DesktopId::new();
+        let generation = DesktopGeneration::new();
+        let topic = EventTopic::new("window.changed")?;
+        let server = tokio::spawn(async move {
+            let (mut initial, _, _, _) =
+                accept_subscription(&listener, desktop_id, generation, 1_000).await?;
+            initial
+                .send(Message::Close(Some(CloseFrame {
+                    code: CloseCode::Restart,
+                    reason: "restart".into(),
+                })))
+                .await?;
+            let (failed_reconnect, _) = listener.accept().await?;
+            drop(failed_reconnect);
+            Ok::<(), TestError>(())
+        });
+        let client = Client::from_options(
+            crate::ClientOptions::builder(&base, "event-test-token-0123456789abcdef")
+                .reconnect_policy(crate::ReconnectPolicy::new(
+                    1,
+                    Duration::from_millis(1),
+                    Duration::from_millis(1),
+                )?)
+                .build()?,
+        )?;
+        let configuration = EventConfiguration {
+            cancellation: client.cancellation_token(),
+            client,
+            desktop_id,
+            desktop_generation: generation,
+            protocol: ProtocolVersion::V1_0,
+            topics: Arc::new(vec![topic]),
+        };
+        let (socket, heartbeat, request_id) = connect(&configuration, None, false)
+            .await
+            .map_err(|error| format!("connect failed: {error:?}"))?;
+        let (sender, mut receiver) = event_channel(2);
+        timeout(
+            Duration::from_secs(2),
+            supervise(
+                configuration,
+                sender,
+                2,
+                socket,
+                heartbeat,
+                request_id,
+                None,
+            ),
+        )
+        .await?;
+        assert_eq!(
+            receiver.try_recv()?,
+            EventStreamItem::Closed {
+                reason: EventStreamCloseReason::ReconnectExhausted
+            }
+        );
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn structured_application_error_is_delivered_before_terminal_reason()
     -> Result<(), TestError> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -1974,7 +2596,7 @@ mod tests {
             Ok::<(), TestError>(())
         });
         let configuration = configuration(base, desktop_id, generation, Vec::new())?;
-        let (socket, heartbeat, request_id) = connect(&configuration, None)
+        let (socket, heartbeat, request_id) = connect(&configuration, None, false)
             .await
             .map_err(|error| format!("connect failed: {error:?}"))?;
         let (sender, mut receiver) = event_channel(2);
@@ -2023,7 +2645,7 @@ mod tests {
             Ok::<(), TestError>(())
         });
         let configuration = configuration(base, desktop_id, generation, Vec::new())?;
-        let (socket, heartbeat, request_id) = connect(&configuration, None)
+        let (socket, heartbeat, request_id) = connect(&configuration, None, false)
             .await
             .map_err(|error| format!("connect failed: {error:?}"))?;
         let (sender, mut receiver) = event_channel(1);
@@ -2069,7 +2691,7 @@ mod tests {
             Ok::<(), TestError>(())
         });
         let configuration = configuration(base, desktop_id, generation, Vec::new())?;
-        let (mut socket, heartbeat, request_id) = connect(&configuration, None)
+        let (mut socket, heartbeat, request_id) = connect(&configuration, None, false)
             .await
             .map_err(|error| format!("connect failed: {error:?}"))?;
         let (sender, _receiver) = event_channel(1);
@@ -2112,7 +2734,7 @@ mod tests {
             Ok::<(), TestError>(())
         });
         let configuration = configuration(base, desktop_id, generation, Vec::new())?;
-        let (mut socket, heartbeat, request_id) = connect(&configuration, None)
+        let (mut socket, heartbeat, request_id) = connect(&configuration, None, false)
             .await
             .map_err(|error| format!("connect failed: {error:?}"))?;
         let (sender, _receiver) = event_channel(1);
@@ -2158,7 +2780,7 @@ mod tests {
             Ok::<(), TestError>(())
         });
         let configuration = configuration(base, desktop_id, generation, Vec::new())?;
-        let (socket, heartbeat, request_id) = connect(&configuration, None)
+        let (socket, heartbeat, request_id) = connect(&configuration, None, false)
             .await
             .map_err(|error| format!("connect failed: {error:?}"))?;
         let (sender, mut receiver) = event_channel(1);
@@ -2223,7 +2845,7 @@ mod tests {
             Ok::<(), TestError>(())
         });
         let configuration = configuration(base, desktop_id, generation, Vec::new())?;
-        let (socket, heartbeat, request_id) = connect(&configuration, Some(7))
+        let (socket, heartbeat, request_id) = connect(&configuration, Some(7), false)
             .await
             .map_err(|error| format!("connect failed: {error:?}"))?;
         let (sender, mut receiver) = event_channel(2);
@@ -2259,6 +2881,23 @@ mod tests {
             }
         );
         server.await??;
+        Ok(())
+    }
+
+    #[test]
+    fn reconnect_backoff_is_exponential_jittered_and_capped() -> Result<(), TestError> {
+        let policy =
+            crate::ReconnectPolicy::new(5, Duration::from_millis(100), Duration::from_millis(450))?;
+        assert_eq!(reconnect_delay(policy, 1, 0), Duration::from_millis(100));
+        assert_eq!(reconnect_delay(policy, 2, 0), Duration::from_millis(200));
+        assert_eq!(reconnect_delay(policy, 3, 0), Duration::from_millis(400));
+        assert_eq!(reconnect_delay(policy, 4, 0), Duration::from_millis(450));
+        assert!(reconnect_delay(policy, 1, u8::MAX) > Duration::from_millis(100));
+        assert!(reconnect_delay(policy, 1, u8::MAX) <= Duration::from_millis(125));
+        assert_eq!(
+            reconnect_delay(policy, 4, u8::MAX),
+            Duration::from_millis(450)
+        );
         Ok(())
     }
 }
