@@ -287,7 +287,8 @@ scripts/container/test-static.sh
 scripts/container/test-runtime-profiles.sh
 ```
 
-Docker-required gates:
+Docker-required focused development/CI gates (their mutable tags are
+convenient navigation only; none is release qualification by itself):
 
 ```sh
 sudo --preserve-env=XENOTEER_IMAGE scripts/container/build.sh
@@ -306,6 +307,30 @@ sudo XENOTEER_IDLE_SOAK_SECONDS=1800 \
   scripts/container/test-idle-soak.sh xenoteer:dev
 ```
 
+The sole Phase 6 release gate is the canonical seven-lane orchestrator, not any
+one direct test above. After building the production and desktop-app fixture
+images from the final unchanged tree, resolve both to distinct lowercase
+immutable IDs and run:
+
+```sh
+sudo /usr/bin/python3 scripts/container/qualify-phase6.py \
+  sha256:<production-image-64-hex-digest> \
+  sha256:<fixture-image-64-hex-digest>
+```
+
+Do not hold `/tmp/codex/xenoteer-heavy-build.lock` around the orchestrator; it
+owns that lock only for the four outer-lock lanes, while the other three lanes
+self-lock. The canonical orchestrator is root-only even though individual
+development gates may retain rootless support. Preflight failures before lane
+1 may be retried with the same exact pair. Once a lane starts, any rejection or
+interruption invalidates the pair for release and requires rebuilt images with
+new exact IDs. A private
+`attempt.json` records non-authoritative progress; only the hash-bound
+`qualification.json` below
+`/tmp/xenoteer-phase6-qualification-evidence` is success authority. There is no
+resume, lane skip, or direct-test substitution. See `scripts/sdk/README.md` for
+the evidence and package-lane contract.
+
 The image test waits for healthy status, confirms PID 1 and both payload UIDs,
 performs authenticated and unauthenticated X11 tests, scans for the forbidden X11
 TCP port, verifies manifests and endpoint semantics, exercises bounded SIGTERM,
@@ -318,8 +343,8 @@ registered-process, concurrent idempotency, disconnected-response recovery, and
 owned-input reset workflows. Launch idempotency is enforced again inside the
 root process broker, including one bounded replay after an ambiguous lost reply;
 changed content under the retained command ID is rejected. A host-side Rust SDK
-example is built with four
-low-priority jobs and must complete a real command against the same image. Its
+example is built with two low-priority jobs and must complete a real command
+against the same image. Its
 independent UID-1000 X11 recorder must observe multiple smooth-motion samples
 and the exact endpoint, then observe a held physical button being released by a
 lease-expiry reset; an HTTP success response alone is not accepted as input

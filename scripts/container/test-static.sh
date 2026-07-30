@@ -78,8 +78,10 @@ required=(
   fixtures/phase3-sdk-smoke/src/main.rs
   scripts/container/test-phase4-event-flood.py
   scripts/container/test-phase4-event-flood.sh
+  scripts/container/qualify-phase6.py
   scripts/container/tests/test_host_rust_toolchain.py
   scripts/container/tests/test_phase5_atspi_live.py
+  scripts/container/tests/test_phase6_qualification.py
   scripts/container/test-phase4-live-fixtures.py
   scripts/container/test-phase5-atspi-live.py
   scripts/conformance/validate.py
@@ -88,9 +90,11 @@ required=(
   scripts/packages/verify-boundaries.py
   scripts/packages/tests/test_verify_boundaries.py
   scripts/sdk/README.md
+  scripts/sdk/qualification_identity.py
   scripts/sdk/public_quickstarts.py
   scripts/sdk/test-public-quickstarts.py
   scripts/sdk/test-phase6-ci-contract.py
+  scripts/sdk/tests/test_qualification_identity.py
   scripts/sdk/tests/test_public_quickstarts.py
   crates/xenoteer-sdk/examples/phase6_behaviors.rs
   packages/python/src/xenoteer/examples/phase6_behaviors.py
@@ -198,8 +202,10 @@ grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
 timeout 10s env PYTHONDONTWRITEBYTECODE=1 python3 \
   scripts/sdk/test-phase6-ci-contract.py
 for public_quickstart_python in \
+  scripts/sdk/qualification_identity.py \
   scripts/sdk/public_quickstarts.py \
   scripts/sdk/test-public-quickstarts.py \
+  scripts/sdk/tests/test_qualification_identity.py \
   scripts/sdk/tests/test_public_quickstarts.py; do
   python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \
     "$public_quickstart_python"
@@ -219,11 +225,15 @@ grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
   scripts/container/test-phase4-event-flood.sh
 for container_python_test in \
   scripts/container/tests/test_host_rust_toolchain.py \
-  scripts/container/tests/test_phase5_atspi_live.py; do
+  scripts/container/tests/test_phase5_atspi_live.py \
+  scripts/container/tests/test_phase6_qualification.py; do
   python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \
     "$container_python_test"
   grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' "$container_python_test"
 done
+python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/container/qualify-phase6.py").read_text())'
+grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
+  scripts/container/qualify-phase6.py
 timeout 20s env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
   -s scripts/container/tests -p 'test_*.py'
 sh -n tests/platform/run-x11-spikes.sh
@@ -430,14 +440,27 @@ if ! awk -F '\t' '$1 == "scripts/sdk/test-phase6-ci-contract.py" && $3 == "BUSL-
 fi
 for public_quickstart_path in \
   scripts/sdk/README.md \
+  scripts/sdk/qualification_identity.py \
   scripts/sdk/public_quickstarts.py \
   scripts/sdk/test-public-quickstarts.py \
+  scripts/sdk/tests/test_qualification_identity.py \
   scripts/sdk/tests/test_public_quickstarts.py; do
   if ! awk -F '\t' -v path="$public_quickstart_path" \
     '$1 == path && $3 == "BUSL-1.1" && $4 == "LICENSE" { found = 1 } END { exit !found }' \
     /tmp/xenoteer-first-party.tsv; then
     printf 'Public quick-start gate file is absent from the BSL source inventory: %s\n' \
       "$public_quickstart_path" >&2
+    exit 1
+  fi
+done
+for phase6_qualification_path in \
+  scripts/container/qualify-phase6.py \
+  scripts/container/tests/test_phase6_qualification.py; do
+  if ! awk -F '\t' -v path="$phase6_qualification_path" \
+    '$1 == path && $3 == "BUSL-1.1" && $4 == "LICENSE" { found = 1 } END { exit !found }' \
+    /tmp/xenoteer-first-party.tsv; then
+    printf 'Phase 6 qualification file is absent from the BSL source inventory: %s\n' \
+      "$phase6_qualification_path" >&2
     exit 1
   fi
 done

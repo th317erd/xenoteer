@@ -2,34 +2,74 @@
 
 # Public SDK release qualification
 
-`test-public-quickstarts.py` is the Phase 6 release-candidate gate for the
-public Rust, TypeScript, and Python installation path. It is deliberately
-separate from source-tree unit and conformance tests: the gate assembles and
-installs the actual `.crate`, npm `.tgz`, Python wheel, and Python source
-distribution, then executes the package-native behavior program from each
-installation. Each artifact-contained example must complete the same ten
-behavior proofs; a status-only smoke test is not accepted.
+`scripts/container/qualify-phase6.py` is the sole canonical Phase 6
+release-candidate gate. It admits one exact production image and one exact
+desktop-app fixture image, then runs the frozen seven-lane qualification
+serially. Both arguments must be distinct lowercase immutable
+`sha256:<64 hex>` image IDs; tags and abbreviated digests are rejected.
 
 Run the Phase 6 package/unit gates first so Cargo's offline cache, the exact npm
 development tree, and the locked Python build/runtime dependencies are already
 available. Build the release-candidate image from the final unchanged tree,
-then run:
+build its fixture from that exact production image, resolve both images to
+immutable IDs, then run:
 
 ```sh
-sudo nice -n 15 ionice -c 3 \
-  timeout 15m python3 scripts/sdk/test-public-quickstarts.py xenoteer:desktop-apps-test
+sudo /usr/bin/python3 scripts/container/qualify-phase6.py \
+  sha256:<production-image-64-hex-digest> \
+  sha256:<fixture-image-64-hex-digest>
 ```
 
 If the Phase 6 Python tools live in a virtual environment, invoke this script
-with that environment's Python executable instead of `python3`.
+through `sudo` with that environment's absolute Python executable instead of
+`/usr/bin/python3`. Do not wrap the complete command in the heavy-build lock:
+the orchestrator proves that lock is initially free, owns it only around the
+lanes that require outer serialization, and leaves the three self-locking lanes
+free to acquire it themselves. The canonical orchestrator is deliberately
+root-only; rootless support for individual development gates does not make a
+rootless seven-lane run release qualification.
 
-The supplied tag is navigation only and must identify the desktop-app fixture
-image. Before packaging, the gate resolves the fixture and its recorded
-production base to lowercase immutable `sha256:` IDs. It verifies the fixture
-label, exact base-image label, complete production-layer prefix, and the
-production image's `com.aeor.xenoteer.source-tree.sha256` against the current
-tree. Every container is then started by the exact fixture ID and checked
-again. Any identity, ancestry, or source-tree change fails the run.
+The shared heavy-build lock is the one intentional ownership exception:
+after validating `SUDO_UID`/`SUDO_GID` against the checkout and local account,
+the root orchestrator opens the sticky parent through an anchored directory
+descriptor and normalizes the lock inode to that verified parent's UID, the
+invoking user's primary GID, and mode `0660`. The parent itself is never
+reowned, and an existing lock must be a single-link regular inode before any
+ownership or mode change. Thus a pre-existing invoking-user-owned parent
+produces a user:user lock, while a freshly root-created parent produces a
+root:invoking-group lock. In either case the file owner matches the directory
+owner, which satisfies Linux `fs.protected_regular` when util-linux
+`flock PATH COMMAND` adds `O_CREAT`; group DAC also lets the invoking user open
+the lock. The lock has no secret content or world access; the session lock and
+all evidence remain root-private.
+
+The orchestrator rejects source drift, dirty or mismatched image provenance,
+daemon binary overrides, concurrent qualification, and the first failing or
+timed-out lane. It runs every child at low CPU/I/O priority in its own bounded
+process group and records combined output in a private, exclusive evidence
+directory below `/tmp/xenoteer-phase6-qualification-evidence`. During a
+run, `attempt.json` is atomically updated with each lane's status, duration,
+exit status, and log digest. Only all seven admitted lanes can create
+`qualification.json`; that final manifest is the sole success authority, while
+the hash-bound `attempt.json` remains non-authoritative in `lanes-passed`
+state. Preflight failures before lane 1 create no attempt and may be retried
+with the same exact pair. Once any lane starts, a rejection or interruption
+invalidates that image pair for release: there is no resume, retry, or skip
+mode. Correct the cause, rebuild both images, and begin a new complete attempt
+with new exact IDs.
+
+`scripts/sdk/test-public-quickstarts.py` is lane 7 and remains useful for
+focused package-path debugging. It is not, by itself, release qualification.
+That lane assembles and installs the actual `.crate`, npm `.tgz`, Python wheel,
+and Python source distribution, then executes the package-native behavior
+program from each installation. Each artifact-contained example must complete
+the same ten behavior proofs; a status-only smoke test is not accepted.
+
+Before packaging, lane 7 verifies the fixture label, exact base-image label,
+complete production-layer prefix, and the production image's
+`com.aeor.xenoteer.source-tree.sha256` against the current tree. Every
+container is started by the exact fixture ID and checked again. Any identity,
+ancestry, or source-tree change fails the run.
 
 The gate also:
 
@@ -62,10 +102,11 @@ The gate also:
   installation tree on both success and failure;
 - checks both bearer canaries are absent from child output and container logs.
 
-Only a completely successful run prints the exact fixture image, production
-image, source-tree, and package SHA-256 identities. Copy those values into the
-Phase 6 implementation record only after this exact-image run; unit tests and
-an older image are not substitutes.
+Only a completely successful canonical seven-lane run prints the exact fixture
+image, production image, source-tree, and package SHA-256 identities. Copy
+those values into the Phase 6 implementation record only from
+`qualification.json`; direct lane output, unit tests, and an older image are
+not substitutes.
 
 The Apache-2.0 executable sources live inside their public packages:
 `crates/xenoteer-sdk/examples/phase6_behaviors.rs`,

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import dataclasses
-import hashlib
+import importlib.util
 import json
 import os
 import pwd
@@ -25,8 +25,35 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Literal, NoReturn
 
+try:
+    from scripts.sdk import qualification_identity as _qualification_identity
+except ModuleNotFoundError as error:
+    if error.name not in {
+        "scripts",
+        "scripts.sdk",
+        "scripts.sdk.qualification_identity",
+    }:
+        raise
+    module_name = "qualification_identity"
+    existing_identity_module = sys.modules.get(module_name)
+    if existing_identity_module is not None:
+        _qualification_identity = existing_identity_module
+    else:
+        identity_path = Path(__file__).with_name("qualification_identity.py")
+        identity_spec = importlib.util.spec_from_file_location(
+            module_name,
+            identity_path,
+        )
+        if identity_spec is None or identity_spec.loader is None:
+            raise RuntimeError("could not load release identity module")
+        _qualification_identity = importlib.util.module_from_spec(identity_spec)
+        sys.modules[module_name] = _qualification_identity
+        identity_spec.loader.exec_module(_qualification_identity)
 
-DEFAULT_COMMAND_TIMEOUT_SECONDS = 10
+
+DEFAULT_COMMAND_TIMEOUT_SECONDS = (
+    _qualification_identity.DEFAULT_COMMAND_TIMEOUT_SECONDS
+)
 PACKAGE_COMMAND_TIMEOUT_SECONDS = 120
 QUICKSTART_COMMAND_TIMEOUT_SECONDS = 120
 READINESS_TIMEOUT_SECONDS = 90
@@ -35,12 +62,8 @@ ENV_BINARY = Path("/usr/bin/env")
 NICE_BINARY = Path("/usr/bin/nice")
 IONICE_BINARY = Path("/usr/bin/ionice")
 SUDO_BINARY = Path("/usr/bin/sudo")
-IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 LOOPBACK_PORT = re.compile(r"127\.0\.0\.1:([0-9]{1,5})\Z")
-DAEMON_OVERRIDE_ENVIRONMENTS = (
-    "XENOTEERD_BINARY_OVERRIDE",
-    "XENOTEER_TEST_DAEMON_BINARY",
-)
+DAEMON_OVERRIDE_ENVIRONMENTS = _qualification_identity.DAEMON_OVERRIDE_ENVIRONMENTS
 REQUIRED_BEHAVIORS = (
     "status-capabilities",
     "scoped-lease-fixture-launch",
@@ -85,21 +108,34 @@ FIXTURE_ARTIFACT_LOCK_IMAGE_PATH = (
 FIXTURE_ARTIFACT_LOCK_REPOSITORY_PATH = (
     "container/fixtures/desktop-apps/artifacts.lock"
 )
-FIXTURE_DEBIAN_SNAPSHOT = "20260719T000000Z"
-FIXTURE_ONLY_LABELS = frozenset(
-    {
-        "com.aeor.xenoteer.distribution-scope",
-        "com.aeor.xenoteer.fixture",
-        "com.aeor.xenoteer.fixture.debian-snapshot",
-        "com.aeor.xenoteer.fixture.base-image-id",
-        "com.aeor.xenoteer.fixture.electron-version",
-        "com.aeor.xenoteer.fixture.electron-linux-x64-sha256",
-    }
+FIXTURE_DEBIAN_SNAPSHOT = _qualification_identity.FIXTURE_DEBIAN_SNAPSHOT
+FIXTURE_ONLY_LABELS = _qualification_identity.FIXTURE_ONLY_LABELS
+GateError = _qualification_identity.GateError
+UntrackedSource = _qualification_identity.UntrackedSource
+SourceIdentity = _qualification_identity.SourceIdentity
+FixtureArtifactLock = _qualification_identity.FixtureArtifactLock
+ExactFixtureImage = _qualification_identity.ExactFixtureImage
+reject_daemon_overrides = _qualification_identity.reject_daemon_overrides
+validate_image_id = _qualification_identity.validate_image_id
+validate_exact_image_ids = _qualification_identity.validate_exact_image_ids
+source_snapshot_digest = _qualification_identity.source_snapshot_digest
+current_source_identity = _qualification_identity.current_source_identity
+current_source_tree_hash = _qualification_identity.current_source_tree_hash
+file_sha256 = _qualification_identity.file_sha256
+validate_dependency_lock_digest = (
+    _qualification_identity.validate_dependency_lock_digest
 )
-
-
-class GateError(RuntimeError):
-    """One fail-closed public quick-start qualification error."""
+current_dependency_lock_digest = (
+    _qualification_identity.current_dependency_lock_digest
+)
+parse_fixture_artifact_lock = _qualification_identity.parse_fixture_artifact_lock
+read_fixture_artifact_lock = _qualification_identity.read_fixture_artifact_lock
+validate_fixture_image_metadata = (
+    _qualification_identity.validate_fixture_image_metadata
+)
+validate_release_image_metadata = (
+    _qualification_identity.validate_release_image_metadata
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -109,15 +145,6 @@ class CommandResult:
     returncode: int
     stdout: str
     stderr: str
-
-
-@dataclasses.dataclass(frozen=True)
-class UntrackedSource:
-    """One untracked source identity in build-wrapper ordering."""
-
-    path: str
-    mode: str
-    sha256: str
 
 
 @dataclasses.dataclass(frozen=True)
@@ -420,18 +447,6 @@ class BuildIdentity:
         ]
 
 
-@dataclasses.dataclass(frozen=True)
-class ExactFixtureImage:
-    """Derived fixture plus the exact production image/source it extends."""
-
-    fixture_id: str
-    production_id: str
-    source_tree_sha256: str
-    fixture_debian_snapshot: str = ""
-    electron_version: str = ""
-    electron_linux_x64_sha256: str = ""
-
-
 class CommandExecutor:
     """Timeout-enforcing subprocess boundary."""
 
@@ -726,27 +741,6 @@ def validate_quickstart_output(
         )
 
 
-def reject_daemon_overrides(environment: Mapping[str, str]) -> None:
-    """Forbid diagnostic binary substitution in release qualification."""
-
-    present = [
-        variable for variable in DAEMON_OVERRIDE_ENVIRONMENTS if variable in environment
-    ]
-    if present:
-        raise GateError(
-            "public quick-start qualification rejects daemon override environment: "
-            + ", ".join(present)
-        )
-
-
-def validate_image_id(value: str) -> str:
-    """Return one immutable local Docker image ID or fail."""
-
-    if IMAGE_ID.fullmatch(value) is None:
-        raise GateError(f"image did not resolve to one immutable sha256 ID: {value!r}")
-    return value
-
-
 def parse_loopback_port(value: str) -> int:
     """Parse Docker's one expected dynamically published IPv4 binding."""
 
@@ -757,98 +751,6 @@ def parse_loopback_port(value: str) -> int:
     if not 1 <= port <= 65_535:
         raise GateError("Docker returned an invalid dynamic API port")
     return port
-
-
-def source_snapshot_digest(
-    head_revision: str,
-    diff: bytes,
-    untracked: Sequence[UntrackedSource],
-) -> str:
-    """Reproduce the exact source identity encoded by container/build.sh."""
-
-    digest = hashlib.sha256()
-    digest.update(b"HEAD\0")
-    digest.update(head_revision.encode("utf-8"))
-    digest.update(b"\0")
-    digest.update(diff)
-    for item in untracked:
-        if (
-            not item.path
-            or "\0" in item.path
-            or "\n" in item.path
-            or "\t" in item.path
-        ):
-            raise GateError(f"unsupported untracked source path: {item.path!r}")
-        if re.fullmatch(r"[0-7]{3,4}", item.mode) is None:
-            raise GateError(f"invalid untracked source mode: {item.mode!r}")
-        if re.fullmatch(r"[0-9a-f]{64}", item.sha256) is None:
-            raise GateError(f"invalid untracked source digest for {item.path!r}")
-        digest.update(b"untracked\0")
-        digest.update(item.path.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(item.mode.encode("ascii"))
-        digest.update(b"\0")
-        digest.update(item.sha256.encode("ascii"))
-        digest.update(b"\0")
-    return digest.hexdigest()
-
-
-def current_source_tree_hash(
-    repository_root: Path,
-    executor: CommandExecutor,
-) -> str:
-    """Read the current tree with the same bytes and ordering as the image wrapper."""
-
-    head = executor.run(
-        ["git", "rev-parse", "--verify", "HEAD"],
-        timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS,
-        cwd=repository_root,
-    ).stdout.strip()
-    if re.fullmatch(r"[0-9a-f]{40}", head) is None:
-        raise GateError("git did not return one lowercase SHA-1 HEAD revision")
-    diff = executor.run_bytes(
-        ["git", "diff", "--binary", "--no-ext-diff", "HEAD", "--"],
-        timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS,
-        cwd=repository_root,
-    )
-    raw_paths = executor.run_bytes(
-        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-        timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS,
-        cwd=repository_root,
-    )
-    paths = raw_paths.split(b"\0")
-    if paths[-1] != b"":
-        raise GateError("git untracked-file output was not NUL terminated")
-    untracked: list[UntrackedSource] = []
-    for raw_path in paths[:-1]:
-        try:
-            path_text = raw_path.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise GateError("untracked source path is not UTF-8") from error
-        path = repository_root / path_text
-        metadata = path.lstat()
-        if not stat.S_ISREG(metadata.st_mode):
-            raise GateError(f"untracked source is not a regular file: {path_text!r}")
-        untracked.append(
-            UntrackedSource(
-                path_text,
-                format(stat.S_IMODE(metadata.st_mode), "o"),
-                file_sha256(path),
-            )
-        )
-    return source_snapshot_digest(head, diff, tuple(untracked))
-
-
-def file_sha256(path: Path) -> str:
-    """Hash one regular, nonsymlinked artifact."""
-
-    if path.is_symlink() or not path.is_file():
-        raise GateError(f"artifact is not a regular file: {path}")
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _image_path(value: str, *, description: str) -> PurePosixPath:
@@ -1108,23 +1010,10 @@ def validate_fixture_repository_inputs(
     ):
         raise GateError("desktop fixture artifact lock differs from the repository")
     if image is not None:
-        values: dict[str, str] = {}
-        for line in repository_lock.read_text(encoding="utf-8").splitlines():
-            if not line or line.startswith("#"):
-                continue
-            key, separator, value = line.partition("=")
-            if not separator or not key or not value or key in values:
-                raise GateError("desktop fixture artifact lock is malformed")
-            values[key] = value
+        artifact_lock = read_fixture_artifact_lock(repository_lock)
         if (
-            set(values)
-            != {
-                "ELECTRON_VERSION",
-                "ELECTRON_LINUX_X64_URL",
-                "ELECTRON_LINUX_X64_SHA256",
-            }
-            or values["ELECTRON_VERSION"] != image.electron_version
-            or values["ELECTRON_LINUX_X64_SHA256"]
+            artifact_lock.electron_version != image.electron_version
+            or artifact_lock.electron_linux_x64_sha256
             != image.electron_linux_x64_sha256
         ):
             raise GateError("desktop fixture labels differ from the artifact lock")
@@ -1717,131 +1606,6 @@ def _docker_inspect(
         ["docker", *arguments],
         timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS,
     ).stdout.strip()
-
-
-def validate_fixture_image_metadata(
-    fixture_id: str,
-    production_id: str,
-    inspected_json: str,
-) -> ExactFixtureImage:
-    """Require the exact desktop fixture to extend one exact production image."""
-
-    fixture_id = validate_image_id(fixture_id)
-    production_id = validate_image_id(production_id)
-    try:
-        values = json.loads(inspected_json)
-    except json.JSONDecodeError as error:
-        raise GateError("Docker returned malformed fixture image metadata") from error
-    if (
-        not isinstance(values, list)
-        or len(values) != 2
-        or not all(isinstance(value, dict) for value in values)
-    ):
-        raise GateError("Docker omitted exact production/fixture image metadata")
-    production, fixture = values
-    if production.get("Id") != production_id or fixture.get("Id") != fixture_id:
-        raise GateError("fixture or production image identity changed during inspection")
-    production_config = production.get("Config")
-    fixture_config = fixture.get("Config")
-    production_rootfs = production.get("RootFS")
-    fixture_rootfs = fixture.get("RootFS")
-    if not isinstance(production_config, dict) or not isinstance(
-        fixture_config,
-        dict,
-    ):
-        raise GateError("Docker omitted production or fixture runtime configuration")
-    production_labels = production_config.get("Labels", {})
-    fixture_labels = fixture_config.get("Labels", {})
-    if (
-        not isinstance(production_labels, dict)
-        or not isinstance(fixture_labels, dict)
-        or not all(
-            isinstance(key, str) and isinstance(value, str)
-            for key, value in production_labels.items()
-        )
-        or not all(
-            isinstance(key, str) and isinstance(value, str)
-            for key, value in fixture_labels.items()
-        )
-    ):
-        raise GateError("Docker returned malformed production or fixture labels")
-    if (
-        set(fixture_labels) - set(production_labels) != FIXTURE_ONLY_LABELS
-        or any(
-            fixture_labels.get(key) != value
-            for key, value in production_labels.items()
-        )
-    ):
-        raise GateError("fixture changed inherited labels or added unknown labels")
-    fixture_debian_snapshot = fixture_labels.get(
-        "com.aeor.xenoteer.fixture.debian-snapshot"
-    )
-    electron_version = fixture_labels.get(
-        "com.aeor.xenoteer.fixture.electron-version"
-    )
-    electron_linux_x64_sha256 = fixture_labels.get(
-        "com.aeor.xenoteer.fixture.electron-linux-x64-sha256"
-    )
-    if (
-        fixture_labels.get("com.aeor.xenoteer.distribution-scope")
-        != "test-only-non-distributable"
-        or fixture_labels.get("com.aeor.xenoteer.fixture")
-        != "phase-2-desktop-apps"
-        or fixture_labels.get("com.aeor.xenoteer.fixture.base-image-id")
-        != production_id
-        or fixture_debian_snapshot != FIXTURE_DEBIAN_SNAPSHOT
-        or not isinstance(electron_version, str)
-        or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", electron_version) is None
-        or not isinstance(electron_linux_x64_sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", electron_linux_x64_sha256) is None
-    ):
-        raise GateError("image is not the exact recorded desktop fixture derivation")
-    inherited_production_config = dict(production_config)
-    inherited_fixture_config = dict(fixture_config)
-    inherited_production_config.pop("Labels", None)
-    inherited_fixture_config.pop("Labels", None)
-    if inherited_fixture_config != inherited_production_config:
-        raise GateError("fixture changed inherited Docker runtime configuration")
-    source_tree_sha256 = production_labels.get(
-        "com.aeor.xenoteer.source-tree.sha256"
-    )
-    if (
-        not isinstance(source_tree_sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", source_tree_sha256) is None
-    ):
-        raise GateError("production image omitted its exact source-tree hash label")
-    if (
-        fixture_labels.get("com.aeor.xenoteer.source-tree.sha256")
-        != source_tree_sha256
-    ):
-        raise GateError("fixture image did not retain the production source identity")
-    production_layers = (
-        production_rootfs.get("Layers")
-        if isinstance(production_rootfs, dict)
-        else None
-    )
-    fixture_layers = (
-        fixture_rootfs.get("Layers")
-        if isinstance(fixture_rootfs, dict)
-        else None
-    )
-    if (
-        not isinstance(production_layers, list)
-        or not production_layers
-        or not all(isinstance(layer, str) and layer for layer in production_layers)
-        or not isinstance(fixture_layers, list)
-        or len(fixture_layers) <= len(production_layers)
-        or fixture_layers[: len(production_layers)] != production_layers
-    ):
-        raise GateError("fixture image does not preserve its exact production layer prefix")
-    return ExactFixtureImage(
-        fixture_id,
-        production_id,
-        source_tree_sha256,
-        fixture_debian_snapshot,
-        electron_version,
-        electron_linux_x64_sha256,
-    )
 
 
 def resolve_exact_image(

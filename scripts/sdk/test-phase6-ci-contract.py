@@ -134,6 +134,10 @@ PYTHON_WORKFLOW_CONTRACT = (
 )
 
 STATIC_PACKAGE_CONTRACT = (
+    "scripts/container/qualify-phase6.py",
+    "scripts/container/tests/test_phase6_qualification.py",
+    "scripts/sdk/qualification_identity.py",
+    "scripts/sdk/tests/test_qualification_identity.py",
     "packages/typescript/scripts/clean-dist.mjs",
     "packages/typescript/scripts/conformance-adapter.mjs",
     "packages/typescript/scripts/package-allowlist.json",
@@ -152,6 +156,10 @@ STATIC_PACKAGE_CONTRACT = (
 )
 
 STATIC_INVENTORY_CONTRACT = (
+    "scripts/container/qualify-phase6.py",
+    "scripts/container/tests/test_phase6_qualification.py",
+    "scripts/sdk/qualification_identity.py",
+    "scripts/sdk/tests/test_qualification_identity.py",
     "packages/typescript/package.json",
     "packages/typescript/package-lock.json",
     "packages/typescript/scripts/clean-dist.mjs",
@@ -672,6 +680,32 @@ class PhaseSixCiContractTests(unittest.TestCase):
 
     def test_static_gate_tracks_every_reviewed_package_boundary_file(self) -> None:
         validate_static_contract(self.static_gate)
+
+    def test_canonical_phase6_runner_is_static_but_not_an_ordinary_ci_live_gate(
+        self,
+    ) -> None:
+        validate_static_contract(self.static_gate)
+        self.assertIn(
+            "python3 -m unittest discover \\\n  -s scripts/container/tests",
+            uncommented(self.static_gate),
+        )
+        self.assertNotIn("scripts/container/qualify-phase6.py", self.workflow)
+
+    def test_missing_phase6_runner_contract_is_rejected(self) -> None:
+        for path in (
+            "scripts/container/qualify-phase6.py",
+            "scripts/container/tests/test_phase6_qualification.py",
+            "scripts/sdk/qualification_identity.py",
+            "scripts/sdk/tests/test_qualification_identity.py",
+        ):
+            with self.subTest(path=path):
+                incomplete = self.static_gate.replace(f"  {path}\n", "", 1)
+                self.assertNotEqual(incomplete, self.static_gate)
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    re.escape(path),
+                ):
+                    validate_static_contract(incomplete)
 
     def test_missing_python_boundary_file_is_rejected(self) -> None:
         incomplete = self.static_gate.replace(

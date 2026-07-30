@@ -1247,3 +1247,73 @@
   `324cb5a9ac5eeb73f0958f5129c46a983075ed06554b72024aba883c9afc3aab`,
   and
   `fa6d67f2f106c6bef0dc41a3212d1235753033183dd8f57dbd5a196451d4ebbe`.
+- Source `e80825847909990f25c958715a3e165f7ef29d0a` produced clean production
+  image
+  `sha256:e594ed77422feb26cdbbb66464883e35536dbfae941bd35ad8120f7b61c6b201`
+  and exact derived fixture
+  `sha256:529fd865939e0a37c52c387ebb188a112aba857b2c74e588ac6b4efa765c3244`.
+  Both record source tree
+  `e344a7e1f966448b6327505729f4528d002f77a479514857535503952371df28`,
+  dependency lock
+  `b7db3b0586412ff866441664a8ce11eaee23cc3172f1d9733e41e3d5f2524151`,
+  and `dirty=false`; the fixture records the exact production ID and preserves
+  its 28-layer prefix in 32 total layers.
+- The first Phase-5 AT-SPI live lane passed against that pair. The first
+  production-lifecycle lane then failed at `test-image.sh:489` before executing
+  viewer-denial assertions because the coordinator incorrectly held
+  `/tmp/codex/xenoteer-heavy-build.lock` around the complete lane while nested
+  `test-viewer-denial.sh` attempted the same non-reentrant lock for its Cargo
+  fixture build. The nested acquisition expired after 120 seconds. Lanes 3-7
+  were not started and lane 2 will not be rerun on this pair, so both identities
+  are rejected despite no observed product assertion failure. Lane-1 evidence
+  SHA-256 is
+  `28ef8088296cea1f7fb32eeb47b42dab0f807125f2373f184f9bbba2321854d6`;
+  rejected lane-2 evidence SHA-256 is
+  `45cbc7f1b6c63bb6a6b905e493fed7fd7d20778ea885d422b33c5947bff0cced`.
+- The first canonical-runner source candidate passed 45 focused runner
+  contracts, shared identity/CI contracts, independent review, and the complete
+  static gate, but the coordinator's real sudo-to-user host proof rejected its
+  shared-lock mode: root normalized
+  `/tmp/codex/xenoteer-heavy-build.lock` to `root:root 0644`, while the actual
+  util-linux `flock PATH COMMAND` used by lane 7 opens the path read-write and
+  failed for UID 1000 with status 66. Kernel/read-descriptor mock coverage had
+  missed this CLI boundary. RED evidence is
+  `/tmp/codex/xenoteer-phase6-shared-lock-real-red.log`, SHA-256
+  `8ffee26eddfdbcb39a884900dc0470d9cbe7c7ef4a9a4efc642faa772b8b9a5d`.
+- A group-DAC-only candidate also failed under Linux
+  `fs.protected_regular=2`: util-linux `flock PATH COMMAND` adds `O_CREAT`, so
+  an invoking user cannot open a differently owned regular file in the sticky
+  shared parent even when its group mode is writable. That rejected candidate
+  log has SHA-256
+  `e494a0119ece67775081059e43764c090ea09a0b073aec66554ec77f111c160f`;
+  the confirming `openat(... O_CREAT ...) = -EACCES` strace has SHA-256
+  `4422ea9a25152efc7cffe07c4494f3736ec6a1e88d7f1af349d6959f7232e0c0`.
+- The final shared-lock rule binds ownership to the already-open, verified
+  sticky parent descriptor: the lock UID equals that parent's UID, its GID is
+  the validated invoking account's primary GID, its mode is `0660`, and its
+  link count must be exactly one before any ownership or mode normalization.
+  The shared parent is never reowned. A freshly root-created parent therefore
+  yields `root:invoking-group`, while an existing invoking-user-owned parent
+  yields `user:user`; both root and the invoking user can use the same
+  util-linux path lock. The private qualification-session lock remains
+  `root:root 0600`, and all lock paths reject multiply linked inodes before
+  mutation.
+- The hardlink regression failed first for both shared and private locks; its
+  RED log SHA-256 is
+  `77a1f68470af011355accddf24bf7e39bdbd1a6979abec3b21462dc8b4e0671b`.
+  The completed canonical runner suite passes 53/53 contracts with log
+  SHA-256
+  `ed2c3b833149518bacd6b5300baf5e783f4b2b5240c588540de58169c9e43647`.
+  Its bounded real dual-parent proof passes exact owner/group/mode/link-count
+  checks plus root and invoking-user path-flock acquisition for both variants;
+  evidence SHA-256 is
+  `986e1d4c73add64004dbfb743633981145dd181d6ac65ec0ba7ad93103336a5e`.
+- Independent closure review reported no high- or medium-severity findings.
+  Its separate 53/53 run has SHA-256
+  `a43a0a5b9e04b9919968bac4b5046f845843268a3645fa4eb7ae298463d255d2`;
+  its separate real `fs.protected_regular=2` proof additionally verifies
+  session-lock privacy (`root` succeeds, invoking user is denied) and has
+  SHA-256
+  `e323d21afa1ba0fa3101beb95c144d3ddc64c0e38b8818ba1f71ad6046675f4d`.
+  The complete post-repair static gate passes with log SHA-256
+  `b1105509e2c7c0de9d729000afcaf81be26f07052fac550a42acb7cbc7186bb3`.

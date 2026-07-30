@@ -191,6 +191,21 @@ Plan: `plans/15-phased-implementation.md`
         even though the controlled rerun and all other live lanes passed
   - [ ] Build the final coherent Phase 6 image, run the gate against its exact
         immutable ID, and record only that successful image/package identity
+    - [x] Reject source `e808258` production `e594ed77` / fixture `529fd865`
+          after lane 1 passed first-run but the coordinator's lane-2 outer
+          heavy-build lock deadlocked the viewer-denial subgate's nested lock
+      - [x] Add a fail-first qualification-runner contract that rejects an
+            already-held heavy-build lock before any lane and encodes the exact
+            seven-lane order without wrapping the three self-locking lanes
+        - [x] Close the real sudo-to-invoking-user util-linux `flock` permission
+              boundary; mocked/read-descriptor locking is not sufficient
+      - [ ] Commit and push the qualification repair, build a new coherent
+            pair, and restart at lane 1
+        - [x] Run focused/static source gates, the real shared-lock boundary,
+              and independent security/portability review
+        - [x] Commit and push the qualification repair
+        - [ ] Build a new coherent production/fixture pair and restart the
+              canonical seven-lane qualification at lane 1
     - [x] Reject source `b01405a` production `a650e129` / fixture `356225fe`
           after lanes 1-3 passed first-run but the lane-4 host runner exited 77
           before exercising the image because sudo's secure `PATH` hid Cargo
