@@ -31,6 +31,10 @@ PACKAGE_COMMAND_TIMEOUT_SECONDS = 120
 QUICKSTART_COMMAND_TIMEOUT_SECONDS = 120
 READINESS_TIMEOUT_SECONDS = 90
 HEAVY_BUILD_LOCK = "/tmp/codex/xenoteer-heavy-build.lock"
+ENV_BINARY = Path("/usr/bin/env")
+NICE_BINARY = Path("/usr/bin/nice")
+IONICE_BINARY = Path("/usr/bin/ionice")
+SUDO_BINARY = Path("/usr/bin/sudo")
 IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 LOOPBACK_PORT = re.compile(r"127\.0\.0\.1:([0-9]{1,5})\Z")
 DAEMON_OVERRIDE_ENVIRONMENTS = (
@@ -148,11 +152,272 @@ class BuildIdentity:
         record = pwd.getpwuid(os.geteuid())
         return cls(record.pw_uid, record.pw_gid, Path(record.pw_dir), False)
 
-    def command(self, command: Sequence[str]) -> list[str]:
-        low_priority = ["nice", "-n", "15", "ionice", "-c", "3", *command]
+    def _trusted_path(
+        self,
+        source_environment: Mapping[str, str] | None = None,
+    ) -> tuple[Path, ...]:
+        environment = os.environ if source_environment is None else source_environment
+        raw_path = environment.get("PATH")
+        if not isinstance(raw_path, str) or not raw_path:
+            raise GateError("package build PATH is missing")
+        directories: list[Path] = []
+        observed: set[Path] = set()
+        for raw_directory in raw_path.split(os.pathsep):
+            directory = Path(raw_directory)
+            if not raw_directory or not directory.is_absolute():
+                raise GateError("package build PATH contains an empty or relative entry")
+            try:
+                resolved = directory.resolve(strict=True)
+            except OSError:
+                continue
+            if not self._is_trusted_directory(resolved, allowed_owners={0, self.uid}):
+                continue
+            if resolved not in observed:
+                directories.append(resolved)
+                observed.add(resolved)
+        if not directories:
+            raise GateError("package build PATH contains no trusted directories")
+        return tuple(directories)
+
+    def _target_has_permission(
+        self,
+        metadata: os.stat_result,
+        owner_mask: int,
+        group_mask: int,
+        other_mask: int,
+    ) -> bool:
+        """Evaluate one mode permission as the post-sudo build identity."""
+
+        if metadata.st_uid == self.uid:
+            return bool(metadata.st_mode & owner_mask)
+        if metadata.st_gid == self.gid:
+            return bool(metadata.st_mode & group_mask)
+        return bool(metadata.st_mode & other_mask)
+
+    def _target_can_traverse(self, directory: Path) -> bool:
+        for component in (directory, *directory.parents):
+            try:
+                metadata = component.stat()
+            except OSError:
+                return False
+            if not stat.S_ISDIR(metadata.st_mode) or not self._target_has_permission(
+                metadata,
+                stat.S_IXUSR,
+                stat.S_IXGRP,
+                stat.S_IXOTH,
+            ):
+                return False
+        return True
+
+    def _target_writers_are_trusted(self, metadata: os.stat_result) -> bool:
+        """Accept writes only by the target owner and its primary group."""
+
+        if metadata.st_mode & stat.S_IWOTH:
+            return False
+        if metadata.st_mode & stat.S_IWGRP:
+            return metadata.st_uid == self.uid and metadata.st_gid == self.gid
+        return True
+
+    def _is_trusted_directory(
+        self,
+        directory: Path,
+        *,
+        allowed_owners: set[int],
+    ) -> bool:
+        try:
+            metadata = directory.stat()
+        except OSError:
+            return False
+        return (
+            stat.S_ISDIR(metadata.st_mode)
+            and metadata.st_uid in allowed_owners
+            and self._target_writers_are_trusted(metadata)
+            and self._target_can_traverse(directory)
+        )
+
+    def _is_trusted_executable(
+        self,
+        candidate: Path,
+        *,
+        allowed_owners: set[int],
+    ) -> bool:
+        try:
+            candidate_parent = candidate.parent.resolve(strict=True)
+            target = candidate.resolve(strict=True)
+            target_parent = target.parent.resolve(strict=True)
+            metadata = target.stat()
+        except OSError:
+            return False
+        if any(
+            not self._is_trusted_directory(
+                directory,
+                allowed_owners=allowed_owners,
+            )
+            for directory in {candidate_parent, target_parent}
+        ):
+            return False
+        return (
+            stat.S_ISREG(metadata.st_mode)
+            and metadata.st_uid in allowed_owners
+            and self._target_writers_are_trusted(metadata)
+            and self._target_has_permission(
+                metadata,
+                stat.S_IXUSR,
+                stat.S_IXGRP,
+                stat.S_IXOTH,
+            )
+        )
+
+    def _trusted_home(self) -> Path:
+        if not self.home.is_absolute():
+            raise GateError("package build HOME must be absolute")
+        try:
+            resolved = self.home.resolve(strict=True)
+            metadata = resolved.stat()
+        except OSError as error:
+            raise GateError("package build HOME is unavailable") from error
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid not in {0, self.uid}
+            or not self._target_writers_are_trusted(metadata)
+            or not self._target_can_traverse(resolved)
+        ):
+            raise GateError("package build HOME is untrusted or inaccessible")
+        return self.home
+
+    def _trusted_installed_root(self, installed_root: Path) -> Path:
+        if not installed_root.is_absolute():
+            raise GateError(
+                "installed root is unavailable, untrusted, or inaccessible"
+            )
+        try:
+            resolved = installed_root.resolve(strict=True)
+        except OSError as error:
+            raise GateError(
+                "installed root is unavailable, untrusted, or inaccessible"
+            ) from error
+        if not self._is_trusted_directory(
+            resolved,
+            allowed_owners={0, self.uid},
+        ):
+            raise GateError(
+                "installed root is unavailable, untrusted, or inaccessible"
+            )
+        return resolved
+
+    def _fixed_executable(self, executable: Path) -> Path:
+        if not executable.is_absolute() or not self._is_trusted_executable(
+            executable,
+            allowed_owners={0},
+        ):
+            raise GateError(
+                f"required package build wrapper is unavailable: {executable.name}"
+            )
+        return executable
+
+    def resolve_executable(
+        self,
+        executable: str,
+        *,
+        source_environment: Mapping[str, str] | None = None,
+    ) -> Path:
+        """Resolve one executable before dropping privileges.
+
+        The returned path preserves a reviewed symlink name (notably npm and
+        rustup proxy shims), while trust is checked against its final target.
+        """
+
+        if not executable or "\0" in executable:
+            raise GateError("package build executable name is invalid")
+        trusted_path = self._trusted_path(source_environment)
+        requested = Path(executable)
+        if requested.is_absolute():
+            candidates = (requested,)
+        elif requested.parent == Path(".") and requested.name == executable:
+            candidates = tuple(directory / executable for directory in trusted_path)
+        else:
+            raise GateError("package build executable must be absolute or a bare name")
+        for candidate in candidates:
+            if self._is_trusted_executable(
+                candidate,
+                allowed_owners={0, self.uid},
+            ):
+                return candidate
+        raise GateError(f"required package build executable is unavailable: {requested.name}")
+
+    def command(
+        self,
+        command: Sequence[str],
+        *,
+        source_environment: Mapping[str, str] | None = None,
+    ) -> list[str]:
+        if not command:
+            raise GateError("package build command is empty")
+        home = self._trusted_home()
+        trusted_path = self._trusted_path(source_environment)
+        executable = self.resolve_executable(
+            command[0],
+            source_environment=source_environment,
+        )
+        env_binary = self._fixed_executable(ENV_BINARY)
+        nice_binary = self._fixed_executable(NICE_BINARY)
+        ionice_binary = self._fixed_executable(IONICE_BINARY)
+        clean_environment = [
+            str(env_binary),
+            "-i",
+            f"HOME={home}",
+            "PATH=" + os.pathsep.join(str(directory) for directory in trusted_path),
+        ]
+        low_priority = [
+            *clean_environment,
+            str(nice_binary),
+            "-n",
+            "15",
+            str(ionice_binary),
+            "-c",
+            "3",
+            str(executable),
+            *command[1:],
+        ]
         if not self.use_sudo:
             return low_priority
-        return ["sudo", "-H", "-u", f"#{self.uid}", "--", *low_priority]
+        sudo_binary = self._fixed_executable(SUDO_BINARY)
+        return [str(sudo_binary), "-H", "-u", f"#{self.uid}", "--", *low_priority]
+
+    def runtime_command(
+        self,
+        command: Sequence[str],
+        *,
+        source_environment: Mapping[str, str] | None = None,
+    ) -> list[str]:
+        """Validate and lower the priority of one installed quick-start.
+
+        Unlike package-build commands, runtime bearer credentials cannot pass
+        through ``env KEY=value`` argv. ``CommandExecutor.run_as_identity``
+        supplies the exact environment and performs the credential transition.
+        """
+
+        if not command:
+            raise GateError("installed quick-start command is empty")
+        requested = Path(command[0])
+        if not requested.is_absolute():
+            raise GateError("installed quick-start executable must be absolute")
+        executable = self.resolve_executable(
+            command[0],
+            source_environment=source_environment,
+        )
+        nice_binary = self._fixed_executable(NICE_BINARY)
+        ionice_binary = self._fixed_executable(IONICE_BINARY)
+        return [
+            str(nice_binary),
+            "-n",
+            "15",
+            str(ionice_binary),
+            "-c",
+            "3",
+            str(executable),
+            *command[1:],
+        ]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -170,17 +435,43 @@ class ExactFixtureImage:
 class CommandExecutor:
     """Timeout-enforcing subprocess boundary."""
 
-    def run(
+    def _run(
         self,
         command: Sequence[str],
         *,
         timeout: int,
-        check: bool = True,
-        cwd: Path | None = None,
-        env: Mapping[str, str] | None = None,
+        check: bool,
+        cwd: Path | None,
+        env: Mapping[str, str] | None,
+        identity: BuildIdentity | None,
     ) -> CommandResult:
         if timeout <= 0 or timeout > PACKAGE_COMMAND_TIMEOUT_SECONDS:
             raise GateError(f"invalid subprocess timeout: {timeout}")
+        if not command:
+            raise GateError("subprocess command is empty")
+        credential_options: dict[str, object] = {}
+        if identity is not None:
+            if identity.uid <= 0:
+                raise GateError("quick-start target identity cannot be root")
+            if identity.gid <= 0:
+                raise GateError("quick-start target group is invalid")
+            if identity.use_sudo:
+                if os.geteuid() != 0:
+                    raise GateError(
+                        "sudo quick-start boundary requires a root outer process"
+                    )
+                credential_options = {
+                    "user": identity.uid,
+                    "group": identity.gid,
+                    "extra_groups": (),
+                }
+            elif (
+                os.geteuid() != identity.uid
+                or os.getegid() != identity.gid
+            ):
+                raise GateError(
+                    "rootless quick-start identity differs from current process identity"
+                )
         try:
             completed = subprocess.run(
                 list(command),
@@ -190,9 +481,14 @@ class CommandExecutor:
                 text=True,
                 timeout=timeout,
                 check=False,
+                **credential_options,
             )
         except FileNotFoundError as error:
             raise GateError(f"required command is unavailable: {command[0]}") from error
+        except PermissionError as error:
+            raise GateError(
+                f"could not launch command: {safe_command(command)}"
+            ) from error
         except subprocess.TimeoutExpired as error:
             raise GateError(
                 f"command exceeded its {timeout}s bound: {safe_command(command)}"
@@ -204,6 +500,45 @@ class CommandExecutor:
                 f"command failed ({safe_command(command)}): {detail or 'no safe diagnostic'}"
             )
         return result
+
+    def run(
+        self,
+        command: Sequence[str],
+        *,
+        timeout: int,
+        check: bool = True,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandResult:
+        return self._run(
+            command,
+            timeout=timeout,
+            check=check,
+            cwd=cwd,
+            env=env,
+            identity=None,
+        )
+
+    def run_as_identity(
+        self,
+        command: Sequence[str],
+        *,
+        identity: BuildIdentity,
+        timeout: int,
+        env: Mapping[str, str],
+        check: bool = True,
+        cwd: Path | None = None,
+    ) -> CommandResult:
+        """Run only an installed quick-start as its non-root build identity."""
+
+        return self._run(
+            command,
+            timeout=timeout,
+            check=check,
+            cwd=cwd,
+            env=env,
+            identity=identity,
+        )
 
     def run_bytes(
         self,
@@ -333,7 +668,15 @@ class ContainerGuard:
 def safe_command(command: Sequence[str]) -> str:
     """Render only argv; credentials are always passed through the environment."""
 
-    return " ".join(str(argument) for argument in command)
+    rendered: list[str] = []
+    for argument in command:
+        value = str(argument)
+        if value.startswith("HOME="):
+            value = "HOME=<redacted>"
+        elif value.startswith("PATH="):
+            value = "PATH=<redacted>"
+        rendered.append(value)
+    return " ".join(rendered)
 
 
 def safe_diagnostic(value: str) -> str:
@@ -1089,15 +1432,16 @@ def stage_public_artifacts(
         "SDK crate",
     )
 
+    npm_binary = identity.resolve_executable("npm")
     executor.run(
-        identity.command(["npm", "run", "build"]),
+        identity.command([str(npm_binary), "run", "build"]),
         timeout=PACKAGE_COMMAND_TIMEOUT_SECONDS,
         cwd=repository_root / "packages" / "typescript",
     )
     npm_output = executor.run(
         identity.command(
             [
-                "npm",
+                str(npm_binary),
                 "pack",
                 "--json",
                 "--pack-destination",
@@ -1239,14 +1583,9 @@ def prepare_installed_quickstarts(
         if resolved_cargo is None:
             raise GateError("cargo is required to build the staged Rust consumer")
         cargo_binary = Path(resolved_cargo)
-    cargo_environment = dict(os.environ)
+    npm_binary = identity.resolve_executable("npm")
+    node_binary = identity.resolve_executable("node")
     rust_target = repository_root / "target" / "phase6-public-quickstarts"
-    cargo_environment.update(
-        {
-            "CARGO_BUILD_JOBS": "2",
-            "CARGO_TERM_COLOR": "never",
-        }
-    )
     executor.run(
         identity.command(
             [
@@ -1259,7 +1598,6 @@ def prepare_installed_quickstarts(
         ),
         timeout=PACKAGE_COMMAND_TIMEOUT_SECONDS,
         cwd=rust_consumer,
-        env=cargo_environment,
     )
     metadata = executor.run(
         identity.command(
@@ -1276,7 +1614,6 @@ def prepare_installed_quickstarts(
         ),
         timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS,
         cwd=rust_consumer,
-        env=cargo_environment,
     ).stdout
     validate_cargo_artifact_origins(metadata, rust_artifacts, repository_root)
     executor.run(
@@ -1298,13 +1635,12 @@ def prepare_installed_quickstarts(
         ),
         timeout=PACKAGE_COMMAND_TIMEOUT_SECONDS,
         cwd=rust_consumer,
-        env=cargo_environment,
     )
 
     executor.run(
         identity.command(
             [
-                "npm",
+                str(npm_binary),
                 "install",
                 "--ignore-scripts",
                 "--no-audit",
@@ -1364,7 +1700,7 @@ def prepare_installed_quickstarts(
     return InstalledQuickstarts(
         (str(rust_binary),),
         rust_artifacts,
-        ("node", str(typescript_example)),
+        (str(node_binary), str(typescript_example)),
         typescript_root / "node_modules" / "@xenoteer" / "sdk",
         python_commands[0],
         python_roots[0],
@@ -1590,6 +1926,7 @@ def wait_until_ready(
 def run_one_quickstart(
     executor: CommandExecutor,
     *,
+    identity: BuildIdentity,
     name: str,
     command: Sequence[str],
     installed_root: Path,
@@ -1600,26 +1937,36 @@ def run_one_quickstart(
 ) -> None:
     """Run one installed consumer with bounded typed-auth expectations."""
 
-    environment = dict(os.environ)
-    for unsafe in ("PYTHONPATH", "PYTHONHOME", "NODE_PATH"):
-        environment.pop(unsafe, None)
-    environment.update(
-        {
-            "XENOTEER_API_BASE": api_base,
-            "XENOTEER_TOKEN": token,
-            "XENOTEER_EXPECTED_INSTALL_ROOT": str(installed_root),
-            "XENOTEER_EXPECT_AUTH_FAILURE": "1" if expect_auth_failure else "0",
-            "XENOTEER_QUICKSTART_LANGUAGE": name,
-            "PYTHONNOUSERSITE": "1",
-            "RUST_BACKTRACE": "0",
-        }
-    )
+    runtime_root = identity._trusted_installed_root(installed_root)
+    home = identity._trusted_home()
+    trusted_path = identity._trusted_path()
+    environment = {
+        "HOME": str(home),
+        "PATH": os.pathsep.join(str(directory) for directory in trusted_path),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "XENOTEER_API_BASE": api_base,
+        "XENOTEER_TOKEN": token,
+        "XENOTEER_EXPECTED_INSTALL_ROOT": str(runtime_root),
+        "XENOTEER_EXPECT_AUTH_FAILURE": "1" if expect_auth_failure else "0",
+        "XENOTEER_QUICKSTART_LANGUAGE": name,
+        "PYTHONNOUSERSITE": "1",
+        "RUST_BACKTRACE": "0",
+    }
     if name.startswith("python-"):
-        environment["PYTHONPATH"] = str(installed_root)
-    result = executor.run(
-        ["nice", "-n", "15", "ionice", "-c", "3", *command],
+        environment["PYTHONPATH"] = str(runtime_root)
+    runtime_command = identity.runtime_command(command)
+    if any(
+        secret and any(secret in argument for argument in runtime_command)
+        for secret in forbidden_tokens
+    ):
+        raise GateError(f"{name} quick-start command contains a bearer canary")
+    result = executor.run_as_identity(
+        runtime_command,
+        identity=identity,
         timeout=QUICKSTART_COMMAND_TIMEOUT_SECONDS,
         check=False,
+        cwd=runtime_root,
         env=environment,
     )
     combined = result.stdout + result.stderr
@@ -1663,6 +2010,7 @@ def run_live_gate(
     installed: InstalledQuickstarts,
     image: ExactFixtureImage,
     executor: CommandExecutor,
+    identity: BuildIdentity,
 ) -> None:
     """Exercise every archive variant in fresh exact-fixture state."""
 
@@ -1762,6 +2110,7 @@ def run_live_gate(
             )
             run_one_quickstart(
                 executor,
+                identity=identity,
                 name=name,
                 command=command,
                 installed_root=installed_root,
@@ -1772,6 +2121,7 @@ def run_live_gate(
             )
             run_one_quickstart(
                 executor,
+                identity=identity,
                 name=name,
                 command=command,
                 installed_root=installed_root,
@@ -1872,6 +2222,7 @@ def qualify(image_reference: str) -> dict[str, str]:
             installed,
             image,
             executor,
+            identity,
         )
         return {
             "fixture_image": image.fixture_id,

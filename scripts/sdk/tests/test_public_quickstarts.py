@@ -8,8 +8,11 @@ import copy
 import importlib.util
 import io
 import json
+import os
 import re
 import shutil
+import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -369,6 +372,844 @@ class StoppedCopyExecutor:
 
 class PublicQuickstartContractTests(unittest.TestCase):
     """Prove identity, artifact, auth-gate, and cleanup primitives."""
+
+    @staticmethod
+    def _write_executable(path: Path, contents: str = "#!/bin/sh\nexit 0\n") -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.chmod(0o755)
+        path.write_text(contents, encoding="utf-8")
+        path.chmod(0o755)
+
+    def test_build_identity_preserves_a_sanitized_user_toolchain_across_sudo(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="xenoteer tool path ") as temporary:
+            root = Path(temporary)
+            tool_directory = root / "user tools"
+            system_directory = root / "system-tools"
+            self._write_executable(
+                tool_directory / "npm-cli.js",
+                "#!/usr/bin/env node\n",
+            )
+            (tool_directory / "npm").symlink_to("npm-cli.js")
+            self._write_executable(tool_directory / "node")
+            self._write_executable(system_directory / "cargo")
+            (tool_directory / "npm-cli.js").chmod(0o775)
+            tool_directory.chmod(0o775)
+            duplicate = root / "tool-alias"
+            duplicate.symlink_to(tool_directory, target_is_directory=True)
+            identity = MODULE.BuildIdentity(
+                os.getuid(),
+                os.getgid(),
+                Path.home(),
+                True,
+            )
+            source_environment = {
+                "PATH": os.pathsep.join(
+                    (
+                        str(tool_directory),
+                        str(duplicate),
+                        str(tool_directory),
+                        str(system_directory),
+                    )
+                ),
+                "PHASE6_SECRET": "must-not-cross-privilege-drop",
+            }
+
+            command = identity.command(
+                ["npm", "run", "build"],
+                source_environment=source_environment,
+            )
+
+            self.assertEqual(
+                command[:6],
+                [
+                    str(MODULE.SUDO_BINARY),
+                    "-H",
+                    "-u",
+                    f"#{os.getuid()}",
+                    "--",
+                    str(MODULE.ENV_BINARY),
+                ],
+            )
+            self.assertIn("-i", command)
+            self.assertIn(f"HOME={Path.home()}", command)
+            path_assignment = next(value for value in command if value.startswith("PATH="))
+            path_entries = path_assignment.removeprefix("PATH=").split(os.pathsep)
+            self.assertEqual(
+                path_entries,
+                [str(tool_directory.resolve()), str(system_directory.resolve())],
+            )
+            self.assertEqual(
+                command[-3:],
+                [str(tool_directory / "npm"), "run", "build"],
+            )
+            self.assertNotIn("PHASE6_SECRET", " ".join(command))
+
+            node = identity.resolve_executable(
+                "node",
+                source_environment=source_environment,
+            )
+            cargo = identity.resolve_executable(
+                "cargo",
+                source_environment=source_environment,
+            )
+            self.assertEqual(node, (tool_directory / "node").resolve())
+            self.assertEqual(cargo, (system_directory / "cargo").resolve())
+
+    def test_build_identity_rejects_missing_malformed_and_untrusted_tool_paths(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="xenoteer-tools-") as temporary:
+            root = Path(temporary)
+            trusted = root / "trusted"
+            untrusted = root / "world-writable"
+            missing = root / "missing"
+            self._write_executable(trusted / "npm")
+            self._write_executable(untrusted / "npm")
+            untrusted.chmod(0o777)
+            identity = MODULE.BuildIdentity(
+                os.getuid(),
+                os.getgid(),
+                Path.home(),
+                True,
+            )
+            invalid_environments = (
+                {"PATH": ""},
+                {"PATH": "relative/bin"},
+                {"PATH": os.pathsep.join((str(trusted), "", "/usr/bin"))},
+                {"PATH": str(missing)},
+                {"PATH": str(untrusted)},
+            )
+            for environment in invalid_environments:
+                with self.subTest(environment=environment):
+                    with self.assertRaises(MODULE.GateError):
+                        identity.command(
+                            ["npm", "run", "build"],
+                            source_environment=environment,
+                        )
+
+            command = identity.command(
+                ["npm", "run", "build"],
+                source_environment={
+                    "PATH": os.pathsep.join(
+                        (str(missing), str(untrusted), str(trusted))
+                    )
+                },
+            )
+            path_assignment = next(value for value in command if value.startswith("PATH="))
+            self.assertEqual(
+                path_assignment,
+                f"PATH={trusted.resolve()}",
+            )
+            self.assertNotIn(str(missing), " ".join(command))
+            self.assertNotIn(str(untrusted), " ".join(command))
+
+    def test_build_identity_validates_home_and_fixed_command_wrappers(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="xenoteer-tools-") as temporary:
+            root = Path(temporary)
+            tool_directory = root / "bin"
+            self._write_executable(tool_directory / "python")
+            source_environment = {"PATH": str(tool_directory)}
+
+            missing_home = MODULE.BuildIdentity(
+                os.getuid(),
+                os.getgid(),
+                root / "missing-home",
+                False,
+            )
+            with self.assertRaises(MODULE.GateError):
+                missing_home.command(
+                    ["python", "-m", "build"],
+                    source_environment=source_environment,
+                )
+
+            world_writable_home = root / "world-writable-home"
+            world_writable_home.mkdir()
+            world_writable_home.chmod(0o777)
+            untrusted_home = MODULE.BuildIdentity(
+                os.getuid(),
+                os.getgid(),
+                world_writable_home,
+                False,
+            )
+            with self.assertRaises(MODULE.GateError):
+                untrusted_home.command(
+                    ["python", "-m", "build"],
+                    source_environment=source_environment,
+                )
+
+            identity = MODULE.BuildIdentity(
+                os.getuid(),
+                os.getgid(),
+                Path.home(),
+                False,
+            )
+            with mock.patch.object(MODULE, "NICE_BINARY", root / "missing-nice"):
+                with self.assertRaisesRegex(
+                    MODULE.GateError,
+                    "wrapper is unavailable: missing-nice",
+                ):
+                    identity.command(
+                        ["python", "-m", "build"],
+                        source_environment=source_environment,
+                    )
+
+    def test_build_identity_checks_permissions_as_the_target_identity(self) -> None:
+        identity = MODULE.BuildIdentity(
+            12_345,
+            23_456,
+            Path("/unused"),
+            True,
+        )
+        root_only = mock.Mock(
+            st_uid=0,
+            st_gid=0,
+            st_mode=stat.S_IFREG | 0o700,
+        )
+        target_owned = mock.Mock(
+            st_uid=identity.uid,
+            st_gid=99,
+            st_mode=stat.S_IFREG | 0o700,
+        )
+        target_group = mock.Mock(
+            st_uid=99,
+            st_gid=identity.gid,
+            st_mode=stat.S_IFREG | 0o050,
+        )
+        world_executable = mock.Mock(
+            st_uid=0,
+            st_gid=0,
+            st_mode=stat.S_IFREG | 0o005,
+        )
+
+        self.assertFalse(identity._target_has_permission(root_only, 0o100, 0o010, 0o001))
+        self.assertTrue(identity._target_has_permission(target_owned, 0o100, 0o010, 0o001))
+        self.assertTrue(identity._target_has_permission(target_group, 0o100, 0o010, 0o001))
+        self.assertTrue(
+            identity._target_has_permission(world_executable, 0o100, 0o010, 0o001)
+        )
+
+        target_group_writable = mock.Mock(
+            st_uid=identity.uid,
+            st_gid=identity.gid,
+            st_mode=stat.S_IFREG | 0o770,
+        )
+        supplemental_group_writable = mock.Mock(
+            st_uid=identity.uid,
+            st_gid=99,
+            st_mode=stat.S_IFREG | 0o770,
+        )
+        other_writable = mock.Mock(
+            st_uid=identity.uid,
+            st_gid=identity.gid,
+            st_mode=stat.S_IFREG | 0o777,
+        )
+        self.assertTrue(identity._target_writers_are_trusted(target_group_writable))
+        self.assertFalse(identity._target_writers_are_trusted(supplemental_group_writable))
+        self.assertFalse(identity._target_writers_are_trusted(other_writable))
+
+    def test_build_identity_non_sudo_mode_is_still_explicit_and_sanitized(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="xenoteer-tools-") as temporary:
+            tool_directory = Path(temporary) / "bin"
+            self._write_executable(tool_directory / "python")
+            identity = MODULE.BuildIdentity(
+                os.getuid(),
+                os.getgid(),
+                Path.home(),
+                False,
+            )
+            command = identity.command(
+                ["python", "-m", "build"],
+                source_environment={
+                    "PATH": str(tool_directory),
+                    "PYTHONPATH": "/secret/source-tree",
+                },
+            )
+            self.assertNotIn("sudo", command)
+            self.assertEqual(command[0:2], [str(MODULE.ENV_BINARY), "-i"])
+            self.assertEqual(
+                command[-3:],
+                [str((tool_directory / "python").resolve()), "-m", "build"],
+            )
+            self.assertNotIn("PYTHONPATH", " ".join(command))
+
+    def test_build_identity_executes_an_env_node_shim_through_the_clean_path(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="xenoteer-tools-") as temporary:
+            tool_directory = Path(temporary) / "bin"
+            npm_cli = tool_directory / "npm-cli.js"
+            self._write_executable(npm_cli, "#!/usr/bin/env node\n")
+            self._write_executable(
+                tool_directory / "node",
+                "#!/bin/sh\nprintf '%s\\n' node-via-sanitized-path\n",
+            )
+            npm_cli.chmod(0o775)
+            tool_directory.chmod(0o775)
+            (tool_directory / "npm").symlink_to("npm-cli.js")
+            identity = MODULE.BuildIdentity(
+                os.getuid(),
+                os.getgid(),
+                Path.home(),
+                False,
+            )
+
+            completed = subprocess.run(
+                identity.command(
+                    ["npm", "--version"],
+                    source_environment={"PATH": str(tool_directory)},
+                ),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout, "node-via-sanitized-path\n")
+
+    def test_safe_command_redacts_clean_environment_home_and_path(self) -> None:
+        rendered = MODULE.safe_command(
+            (
+                str(MODULE.ENV_BINARY),
+                "-i",
+                "HOME=/home/private-user",
+                "PATH=/home/private-user/tools:/usr/bin",
+                "/usr/bin/node",
+                "--version",
+            )
+        )
+        self.assertIn("HOME=<redacted>", rendered)
+        self.assertIn("PATH=<redacted>", rendered)
+        self.assertNotIn("/home/private-user", rendered)
+
+    def test_sudo_quickstart_boundary_drops_user_group_and_supplemental_groups(
+        self,
+    ) -> None:
+        identity = MODULE.BuildIdentity(12_345, 23_456, Path("/home/builder"), True)
+        completed = subprocess.CompletedProcess(
+            ["/usr/bin/true"],
+            0,
+            stdout="",
+            stderr="",
+        )
+        environment = {
+            "HOME": "/home/builder",
+            "PATH": "/usr/bin",
+            "XENOTEER_TOKEN": "bearer-secret-that-must-stay-out-of-argv",
+        }
+
+        with (
+            mock.patch.object(MODULE.os, "geteuid", return_value=0),
+            mock.patch.object(MODULE.subprocess, "run", return_value=completed) as run,
+        ):
+            result = MODULE.CommandExecutor().run_as_identity(
+                ["/usr/bin/true"],
+                identity=identity,
+                timeout=5,
+                env=environment,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        arguments, keywords = run.call_args
+        self.assertEqual(arguments[0], ["/usr/bin/true"])
+        self.assertEqual(keywords["user"], identity.uid)
+        self.assertEqual(keywords["group"], identity.gid)
+        self.assertEqual(keywords["extra_groups"], ())
+        self.assertEqual(keywords["env"], environment)
+        self.assertNotIn(environment["XENOTEER_TOKEN"], " ".join(arguments[0]))
+        self.assertNotIn(
+            environment["XENOTEER_TOKEN"],
+            MODULE.safe_command(arguments[0]),
+        )
+
+    def test_non_sudo_quickstart_boundary_preserves_current_identity_and_exact_env(
+        self,
+    ) -> None:
+        if os.geteuid() == 0:
+            self.skipTest("the harmless rootless identity fixture requires non-root")
+        identity = MODULE.BuildIdentity(
+            os.geteuid(),
+            os.getegid(),
+            Path.home(),
+            False,
+        )
+        environment = {
+            "HOME": str(Path.home()),
+            "PATH": "/usr/bin",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "BOUNDARY_CANARY": "present",
+        }
+        program = (
+            "import json, os; "
+            "print(json.dumps({'uid': os.geteuid(), 'gid': os.getegid(), "
+            "'environment': dict(os.environ)}, sort_keys=True))"
+        )
+
+        result = MODULE.CommandExecutor().run_as_identity(
+            [sys.executable, "-c", program],
+            identity=identity,
+            timeout=5,
+            env=environment,
+        )
+
+        observed = json.loads(result.stdout)
+        self.assertEqual(observed["uid"], identity.uid)
+        self.assertEqual(observed["gid"], identity.gid)
+        self.assertEqual(observed["environment"], environment)
+
+    def test_quickstart_boundary_rejects_root_and_mismatched_rootless_identities(
+        self,
+    ) -> None:
+        executor = MODULE.CommandExecutor()
+        with self.assertRaisesRegex(MODULE.GateError, "cannot be root"):
+            executor.run_as_identity(
+                ["/usr/bin/true"],
+                identity=MODULE.BuildIdentity(0, 0, Path("/root"), False),
+                timeout=5,
+                env={},
+            )
+
+        for gid in (0, -1):
+            with self.subTest(gid=gid):
+                with self.assertRaisesRegex(MODULE.GateError, "target group is invalid"):
+                    executor.run_as_identity(
+                        ["/usr/bin/true"],
+                        identity=MODULE.BuildIdentity(
+                            max(os.geteuid(), 1),
+                            gid,
+                            Path.home(),
+                            True,
+                        ),
+                        timeout=5,
+                        env={},
+                    )
+
+        mismatched = MODULE.BuildIdentity(
+            os.geteuid() + 10_000,
+            os.getegid() + 10_000,
+            Path("/home/not-current"),
+            False,
+        )
+        with self.assertRaisesRegex(MODULE.GateError, "current process identity"):
+            executor.run_as_identity(
+                ["/usr/bin/true"],
+                identity=mismatched,
+                timeout=5,
+                env={},
+            )
+
+    def test_quickstart_boundary_timeout_never_renders_environment_secrets(
+        self,
+    ) -> None:
+        token = "timeout-bearer-secret"
+        identity = MODULE.BuildIdentity(
+            os.geteuid(),
+            os.getegid(),
+            Path.home(),
+            False,
+        )
+        timeout = subprocess.TimeoutExpired(
+            ["/usr/bin/true"],
+            5,
+            output=token,
+            stderr=token,
+        )
+        with mock.patch.object(MODULE.subprocess, "run", side_effect=timeout):
+            with self.assertRaises(MODULE.GateError) as raised:
+                MODULE.CommandExecutor().run_as_identity(
+                    ["/usr/bin/true"],
+                    identity=identity,
+                    timeout=5,
+                    env={"XENOTEER_TOKEN": token},
+                )
+        self.assertNotIn(token, str(raised.exception))
+
+    def test_quickstart_boundary_launch_error_never_renders_environment_secrets(
+        self,
+    ) -> None:
+        token = "launch-error-bearer-secret"
+        identity = MODULE.BuildIdentity(
+            os.geteuid(),
+            os.getegid(),
+            Path.home(),
+            False,
+        )
+        with mock.patch.object(
+            MODULE.subprocess,
+            "run",
+            side_effect=PermissionError(token),
+        ):
+            with self.assertRaises(MODULE.GateError) as raised:
+                MODULE.CommandExecutor().run_as_identity(
+                    ["/usr/bin/true"],
+                    identity=identity,
+                    timeout=5,
+                    env={"XENOTEER_TOKEN": token},
+                )
+        self.assertNotIn(token, str(raised.exception))
+
+    def test_every_quickstart_variant_uses_validated_run_as_boundary_and_exact_env(
+        self,
+    ) -> None:
+        token = "valid-bearer-secret"
+        wrong_token = "wrong-bearer-secret"
+        with tempfile.TemporaryDirectory(prefix="xenoteer-runtime-") as temporary:
+            root = Path(temporary)
+            executable = root / "installed-consumer"
+            self._write_executable(executable)
+            identity = MODULE.BuildIdentity(
+                os.geteuid(),
+                os.getegid(),
+                Path.home(),
+                True,
+            )
+            variants = (
+                ("rust-crate", (str(executable),), root / "rust"),
+                (
+                    "npm-tarball",
+                    (str(executable), str(root / "example.mjs")),
+                    root / "typescript",
+                ),
+                (
+                    "python-wheel",
+                    (str(executable), "-m", "wheel_example"),
+                    root / "wheel-site",
+                ),
+                (
+                    "python-sdist",
+                    (str(executable), "-m", "sdist_example"),
+                    root / "sdist-site",
+                ),
+            )
+            for _, _, installed_root in variants:
+                installed_root.mkdir(parents=True)
+            executor = mock.Mock()
+
+            for name, command, installed_root in variants:
+                with self.subTest(name=name):
+                    executor.reset_mock()
+                    output = "\n".join(
+                        [
+                            f"quickstart-ok language={name} behavior={behavior}"
+                            for behavior in MODULE.REQUIRED_BEHAVIORS
+                        ]
+                        + [f"quickstart-ok language={name} mode=success", ""]
+                    )
+                    executor.run_as_identity.return_value = MODULE.CommandResult(
+                        0,
+                        output,
+                        "",
+                    )
+                    with mock.patch.dict(
+                        os.environ,
+                        {
+                            "AMBIENT_CANARY": "must-not-cross",
+                            "HTTPS_PROXY": "http://ambient-proxy.invalid",
+                            "PYTHONPATH": "/ambient/source",
+                        },
+                        clear=False,
+                    ):
+                        MODULE.run_one_quickstart(
+                            executor,
+                            identity=identity,
+                            name=name,
+                            command=command,
+                            installed_root=installed_root,
+                            api_base="http://127.0.0.1:43210",
+                            token=token,
+                            expect_auth_failure=False,
+                            forbidden_tokens=(token, wrong_token),
+                        )
+
+                    executor.run.assert_not_called()
+                    executor.run_as_identity.assert_called_once()
+                    arguments, keywords = executor.run_as_identity.call_args
+                    argv = arguments[0]
+                    environment = keywords["env"]
+                    self.assertEqual(keywords["identity"], identity)
+                    self.assertEqual(keywords["cwd"], installed_root.resolve())
+                    self.assertEqual(
+                        argv[:6],
+                        [
+                            str(MODULE.NICE_BINARY),
+                            "-n",
+                            "15",
+                            str(MODULE.IONICE_BINARY),
+                            "-c",
+                            "3",
+                        ],
+                    )
+                    self.assertEqual(argv[6:], list(command))
+                    self.assertTrue(Path(argv[6]).is_absolute())
+                    self.assertNotIn(token, " ".join(argv))
+                    self.assertNotIn(token, MODULE.safe_command(argv))
+                    self.assertFalse(
+                        any(
+                            argument.startswith("XENOTEER_")
+                            or argument == str(MODULE.ENV_BINARY)
+                            for argument in argv
+                        )
+                    )
+                    expected = {
+                        "HOME": str(Path.home()),
+                        "PATH": os.pathsep.join(
+                            str(path) for path in identity._trusted_path()
+                        ),
+                        "LANG": "C.UTF-8",
+                        "LC_ALL": "C.UTF-8",
+                        "XENOTEER_API_BASE": "http://127.0.0.1:43210",
+                        "XENOTEER_TOKEN": token,
+                        "XENOTEER_EXPECTED_INSTALL_ROOT": str(installed_root),
+                        "XENOTEER_EXPECT_AUTH_FAILURE": "0",
+                        "XENOTEER_QUICKSTART_LANGUAGE": name,
+                        "PYTHONNOUSERSITE": "1",
+                        "RUST_BACKTRACE": "0",
+                    }
+                    if name.startswith("python-"):
+                        expected["PYTHONPATH"] = str(installed_root)
+                    self.assertEqual(environment, expected)
+                    self.assertNotIn("AMBIENT_CANARY", environment)
+                    self.assertNotIn("HTTPS_PROXY", environment)
+
+    def test_quickstart_failure_redacts_raw_bearer_output(self) -> None:
+        token = "stderr-bearer-secret"
+        with tempfile.TemporaryDirectory(prefix="xenoteer-runtime-") as temporary:
+            executable = Path(temporary) / "installed-consumer"
+            self._write_executable(executable)
+            identity = MODULE.BuildIdentity(
+                os.geteuid(),
+                os.getegid(),
+                Path.home(),
+                False,
+            )
+            executor = mock.Mock()
+            executor.run_as_identity.return_value = MODULE.CommandResult(
+                1,
+                "",
+                f"upstream accidentally printed {token}",
+            )
+
+            with self.assertRaises(MODULE.GateError) as raised:
+                MODULE.run_one_quickstart(
+                    executor,
+                    identity=identity,
+                    name="rust-crate",
+                    command=(str(executable),),
+                    installed_root=Path(temporary),
+                    api_base="http://127.0.0.1:43210",
+                    token=token,
+                    expect_auth_failure=False,
+                    forbidden_tokens=(token,),
+                )
+
+        self.assertIn("exposed a bearer canary", str(raised.exception))
+        self.assertNotIn(token, str(raised.exception))
+
+    def test_quickstart_runtime_rejects_relative_installed_executable(self) -> None:
+        executor = mock.Mock()
+        with tempfile.TemporaryDirectory(prefix="xenoteer-runtime-") as temporary:
+            with self.assertRaisesRegex(MODULE.GateError, "must be absolute"):
+                MODULE.run_one_quickstart(
+                    executor,
+                    identity=MODULE.BuildIdentity(
+                        os.geteuid(),
+                        os.getegid(),
+                        Path.home(),
+                        False,
+                    ),
+                    name="rust-crate",
+                    command=("relative-consumer",),
+                    installed_root=Path(temporary),
+                    api_base="http://127.0.0.1:43210",
+                    token="token",
+                    expect_auth_failure=False,
+                    forbidden_tokens=("token",),
+                )
+        executor.run.assert_not_called()
+        executor.run_as_identity.assert_not_called()
+
+    def test_quickstart_runtime_rejects_untrusted_or_inaccessible_installed_roots(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="xenoteer-runtime-") as temporary:
+            root = Path(temporary)
+            executable = root / "installed-consumer"
+            self._write_executable(executable)
+            missing = root / "missing"
+            regular_file = root / "regular-file"
+            regular_file.write_text("not a directory", encoding="utf-8")
+            world_writable = root / "world-writable"
+            world_writable.mkdir()
+            world_writable.chmod(0o777)
+            inaccessible = root / "inaccessible"
+            inaccessible.mkdir()
+            inaccessible.chmod(0o600)
+            identity = MODULE.BuildIdentity(
+                os.geteuid(),
+                os.getegid(),
+                Path.home(),
+                False,
+            )
+
+            for installed_root in (
+                missing,
+                regular_file,
+                world_writable,
+                inaccessible,
+            ):
+                with self.subTest(installed_root=installed_root):
+                    executor = mock.Mock()
+                    with self.assertRaisesRegex(
+                        MODULE.GateError,
+                        "installed root is unavailable, untrusted, or inaccessible",
+                    ):
+                        MODULE.run_one_quickstart(
+                            executor,
+                            identity=identity,
+                            name="rust-crate",
+                            command=(str(executable),),
+                            installed_root=installed_root,
+                            api_base="http://127.0.0.1:43210",
+                            token="token",
+                            expect_auth_failure=False,
+                            forbidden_tokens=("token",),
+                        )
+                    executor.run.assert_not_called()
+                    executor.run_as_identity.assert_not_called()
+
+    def test_quickstart_runtime_cwd_prevents_repository_source_shadowing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="xenoteer-runtime-") as temporary:
+            root = Path(temporary)
+            repository_shadow = root / "repository"
+            installed_root = root / "installed"
+            repository_shadow.mkdir()
+            installed_root.mkdir()
+            (repository_shadow / "shadow.py").write_text(
+                'ORIGIN = "repository"\n',
+                encoding="utf-8",
+            )
+            (installed_root / "shadow.py").write_text(
+                'ORIGIN = "installed"\n',
+                encoding="utf-8",
+            )
+            output = "\n".join(
+                [
+                    f"quickstart-ok language=rust-crate behavior={behavior}"
+                    for behavior in MODULE.REQUIRED_BEHAVIORS
+                ]
+                + ["quickstart-ok language=rust-crate mode=success", ""]
+            )
+            program = (
+                "import shadow, sys; "
+                "sys.exit(71) if shadow.ORIGIN != 'installed' else None; "
+                f"print({output!r}, end='')"
+            )
+            identity = MODULE.BuildIdentity(
+                os.geteuid(),
+                os.getegid(),
+                Path.home(),
+                False,
+            )
+            original_cwd = Path.cwd()
+            try:
+                os.chdir(repository_shadow)
+                MODULE.run_one_quickstart(
+                    MODULE.CommandExecutor(),
+                    identity=identity,
+                    name="rust-crate",
+                    command=(sys.executable, "-c", program),
+                    installed_root=installed_root,
+                    api_base="http://127.0.0.1:43210",
+                    token="token",
+                    expect_auth_failure=False,
+                    forbidden_tokens=("token",),
+                )
+            finally:
+                os.chdir(original_cwd)
+
+    def test_live_gate_routes_both_runs_of_all_variants_through_one_identity(
+        self,
+    ) -> None:
+        image_id = "sha256:" + ("a1" * 32)
+        identity = MODULE.BuildIdentity(12_345, 23_456, Path("/home/builder"), True)
+        installed = MODULE.InstalledQuickstarts(
+            ("/installed/rust",),
+            Path("/installed/rust-root"),
+            ("/installed/node", "/installed/example.mjs"),
+            Path("/installed/npm-root"),
+            ("/installed/python", "-m", "wheel"),
+            Path("/installed/wheel-root"),
+            ("/installed/python", "-m", "sdist"),
+            Path("/installed/sdist-root"),
+        )
+        artifacts = MODULE.PublicArtifacts(
+            Path("/artifact/protocol"),
+            Path("/artifact/sdk"),
+            Path("/artifact/npm"),
+            Path("/artifact/wheel"),
+            Path("/artifact/sdist"),
+            "b2" * 32,
+        )
+        image = MODULE.ExactFixtureImage(image_id, image_id, artifacts.source_tree_sha256)
+        executor = RecordingExecutor()
+
+        def inspect(
+            _: object,
+            arguments: list[str],
+        ) -> str:
+            if arguments[0] == "port":
+                return "127.0.0.1:43210"
+            if arguments[-1] == "{{.Image}}":
+                return image_id
+            if arguments[-1] == "{{.State.ExitCode}}":
+                return "0"
+            raise AssertionError(f"unexpected inspect: {arguments}")
+
+        with tempfile.TemporaryDirectory(prefix="xenoteer-live-route-") as temporary:
+            with (
+                mock.patch.object(MODULE, "_root_owned_token_supported", return_value=True),
+                mock.patch.object(MODULE, "_docker_inspect", side_effect=inspect),
+                mock.patch.object(MODULE, "wait_until_ready"),
+                mock.patch.object(MODULE, "run_one_quickstart") as run_one,
+                mock.patch.object(MODULE, "assert_container_logs_safe"),
+                mock.patch.object(
+                    MODULE,
+                    "current_source_tree_hash",
+                    return_value=artifacts.source_tree_sha256,
+                ),
+            ):
+                MODULE.run_live_gate(
+                    Path("/repository"),
+                    Path(temporary),
+                    artifacts,
+                    installed,
+                    image,
+                    executor,
+                    identity,
+                )
+
+        self.assertEqual(run_one.call_count, 8)
+        self.assertEqual(
+            [call.kwargs["name"] for call in run_one.call_args_list],
+            [
+                "rust-crate",
+                "rust-crate",
+                "npm-tarball",
+                "npm-tarball",
+                "python-wheel",
+                "python-wheel",
+                "python-sdist",
+                "python-sdist",
+            ],
+        )
+        self.assertTrue(
+            all(call.kwargs["identity"] == identity for call in run_one.call_args_list)
+        )
 
     @staticmethod
     def _write_runtime_parity_root(
@@ -1006,15 +1847,28 @@ class PublicQuickstartContractTests(unittest.TestCase):
 
     def test_installed_quickstarts_never_copy_repository_quickstart_sources(self) -> None:
         source = MODULE_PATH.read_text(encoding="utf-8")
+        function_start = source.index("def prepare_installed_quickstarts(")
         function = source[
-            source.index("def prepare_installed_quickstarts(") :
-            source.index("\ndef _docker_inspect(", source.index("def prepare_installed_quickstarts("))
+            function_start : source.index("\ndef _docker_inspect(", function_start)
         ]
         self.assertNotIn('"quickstarts"', function)
         self.assertNotIn("shutil.copyfile(", function)
         self.assertIn("examples/phase6_behaviors.rs", function)
         self.assertIn("examples/phase6-behaviors.mjs", function)
         self.assertIn("xenoteer.examples.phase6_behaviors", function)
+
+    def test_installed_quickstarts_do_not_pass_environment_discarded_by_env_i(
+        self,
+    ) -> None:
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        function = source[
+            source.index("def prepare_installed_quickstarts(") :
+            source.index("\ndef _docker_inspect(", source.index("def prepare_installed_quickstarts("))
+        ]
+        self.assertNotIn("CARGO_BUILD_JOBS", function)
+        self.assertNotIn("CARGO_TERM_COLOR", function)
+        self.assertNotIn("cargo_environment", function)
+        self.assertIn('"--jobs",\n                "2",', function)
 
     def test_each_artifact_variant_gets_fresh_fixture_and_explicit_viewer_policy(self) -> None:
         source = MODULE_PATH.read_text(encoding="utf-8")

@@ -191,7 +191,25 @@ Plan: `plans/15-phased-implementation.md`
         even though the controlled rerun and all other live lanes passed
   - [ ] Build the final coherent Phase 6 image, run the gate against its exact
         immutable ID, and record only that successful image/package identity
-    - [ ] Diagnose and close the first-run Phase-5 live `element_set_text`
+    - [x] Reject source `e63f52d` production `61a92b02` / fixture `79ef2dfe`
+          after the first public quick-start lane failed before package
+          acceptance because its nested unprivileged build lost the
+          user-installed Node toolchain
+      - [x] Reproduce the secure-`PATH` failure before changing the runner and
+            cover Cargo, npm/Node, and Python package commands under the same
+            explicit privilege-drop contract
+      - [x] Sanitize executable discovery without rejecting stale host `PATH`
+            entries or the target user's primary-group-writable NVM toolchain;
+            preserve npm/rustup proxy names and redact constructed HOME/PATH
+            diagnostics
+      - [x] Stop executing installed Rust/Node/Python quick-starts as root:
+            require a non-root UID/GID, clear supplementary groups, use an
+            exact environment, keep bearer secrets out of argv, and run from
+            the canonical installed artifact root
+      - [x] Prove the final boundary with 48 focused/contract tests, a real
+            nested-sudo npm/Node probe, a real UID/GID/group/environment probe,
+            repository-shadow isolation, and two independent reviews
+    - [x] Diagnose and close the first-run Phase-5 live `element_set_text`
           backend failure on fresh source `aff69fa`; do not accept or blindly
           rerun production `0fea36df` / fixture `7272c87b` until the failure
           class has a fail-first regression and verified disposition

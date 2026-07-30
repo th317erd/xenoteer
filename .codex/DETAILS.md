@@ -830,3 +830,35 @@
   Adding `PreDispatchConflict` is an intentional pre-1.0 source break in a
   `publish = false` server-side crate; no wire protocol or public SDK contract
   changed.
+- Source `e63f52d260490f64eb1deb36317227e9f7eb99d5` produced diagnostic
+  production image
+  `sha256:61a92b0283d8c91b15af572a184ae7481801c4c44f9d9fb0d27fd46f29f5becf`
+  and exact derived fixture
+  `sha256:79ef2dfef38d3cbe11ad3f2a797abc8e84831daadd85947f4c3daf6699fe8aa7`.
+  Their source-tree identity is
+  `ba14350aca3b32c7183837d768df5f79f349877b1e4d82f39415ec2b85a056e2`;
+  the fixture records the exact production ID and preserves its 28-layer
+  prefix. Phase-5 AT-SPI, production lifecycle, Phase-4 live/event-flood,
+  noVNC real-browser/RFB, and normal+hardened desktop-app lanes all passed on
+  their first run. The first public quick-start run failed before accepting
+  any package digest or live SDK result because nested
+  `sudo -H -u #1000` reset `PATH` and hid the user's NVM npm/Node tools.
+  Therefore both image identities are rejected release candidates despite
+  their runtime passes.
+- The public package runner now resolves every Cargo/npm/Node/Python executable
+  through a canonical, target-identity-aware `PATH`, filters unavailable or
+  untrusted host entries, preserves symlink proxy names needed by npm and
+  rustup, and launches package builds through a clean `HOME`/`PATH`
+  environment. Target-primary-group-writable tools are permitted because the
+  build already executes as that exact UID/GID; foreign, supplemental-group,
+  other-writable, inaccessible, or relative paths fail closed.
+- Installed Rust, npm, wheel, and sdist quick-starts no longer execute under
+  the root gate process. The subprocess boundary requires non-root UID and
+  GID, clears supplementary groups, passes only the explicit quick-start
+  environment, keeps bearer values out of argv and diagnostics, and uses the
+  strict-resolved installed artifact root as CWD (and Python path). This
+  prevents repository-source shadowing and preserves artifact-only evidence.
+  The boundary passed 48 focused/contract tests, actual nested-sudo npm/Node
+  discovery, and an actual root-to-UID/GID probe observing UID/GID 1000,
+  no supplementary groups, and only the allowlisted environment. Independent
+  reviews found no remaining package or privilege-boundary issue.
