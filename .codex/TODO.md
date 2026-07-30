@@ -191,6 +191,15 @@ Plan: `plans/15-phased-implementation.md`
         even though the controlled rerun and all other live lanes passed
   - [ ] Build the final coherent Phase 6 image, run the gate against its exact
         immutable ID, and record only that successful image/package identity
+    - [x] Reject source `b01405a` production `a650e129` / fixture `356225fe`
+          after lanes 1-3 passed first-run but the lane-4 host runner exited 77
+          before exercising the image because sudo's secure `PATH` hid Cargo
+      - [x] Reproduce the event-flood toolchain-ordering failure before editing,
+            map sibling Cargo/Rust host runners, and fix the failure class
+      - [x] Run focused/static source gates and independent security/portability
+            review, including the actual root-to-UID-1000 secure-`PATH` boundary
+      - [ ] Commit and push the repair, build a new coherent pair, and restart
+            qualification from lane 1
     - [x] Reject source `e63f52d` production `61a92b02` / fixture `79ef2dfe`
           after the first public quick-start lane failed before package
           acceptance because its nested unprivileged build lost the

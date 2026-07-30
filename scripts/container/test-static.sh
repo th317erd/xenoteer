@@ -75,6 +75,7 @@ required=(
   scripts/container/test-phase3-websocket.py
   scripts/container/test-phase4-event-flood.py
   scripts/container/test-phase4-event-flood.sh
+  scripts/container/tests/test_host_rust_toolchain.py
   scripts/container/test-phase4-live-fixtures.py
   scripts/container/test-phase5-atspi-live.py
   scripts/conformance/validate.py
@@ -196,6 +197,11 @@ timeout 10s env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
 bash -n scripts/container/test-phase4-event-flood.sh
 grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
   scripts/container/test-phase4-event-flood.sh
+python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/container/tests/test_host_rust_toolchain.py").read_text())'
+grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
+  scripts/container/tests/test_host_rust_toolchain.py
+timeout 20s env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
+  scripts/container/tests/test_host_rust_toolchain.py
 sh -n tests/platform/run-x11-spikes.sh
 grep -Fq -- '-nolisten tcp -noreset -auth' tests/platform/run-x11-spikes.sh
 bash -n scripts/container/test-viewer-denial.sh

@@ -862,3 +862,51 @@
   discovery, and an actual root-to-UID/GID probe observing UID/GID 1000,
   no supplementary groups, and only the allowlisted environment. Independent
   reviews found no remaining package or privilege-boundary issue.
+- Source `b01405a2633616c40caa88e59d0077016664dfde` produced production
+  `sha256:a650e129c80c203097db93c43370713fb202d2391bf58ebbe0507576f9a7bfc7`
+  and exact derived fixture
+  `sha256:356225fe5a1548cfd82f127863a529b45c9b6ef86d72541b55d30b38d0dc6180`.
+  Both record source-tree
+  `05a7a1afc0e485c8fe5c9a774a8ba5eab5e29b3151e29a7e086e4abdb973304b`,
+  dependency-lock
+  `0aecfd5eecdedf7a250f2d69a54d6b60aee506c4bc8f149ac4c7788dd6fe81d4`,
+  and `dirty=false`; the fixture records the exact production ID and preserves
+  its 28-layer prefix in 32 total layers.
+- The `b01405a` pair passed first-run Phase-5 AT-SPI (55 seconds), production
+  lifecycle/security (7 minutes 41 seconds), and Phase-4 live fixtures
+  (24 seconds). Lane 4 did not exercise the image: the prescribed root
+  invocation gave `test-phase4-event-flood.sh` sudo's secure `PATH`, but the
+  script required ambient `cargo`/`rustc` before its later `SUDO_UID` and
+  invoking-home toolchain resolution. It exited 77 with
+  `required command is unavailable: cargo`; lanes 5-7 were not run and lane 4
+  was not rerun. The pair is rejected because qualification is incomplete.
+  Failure log
+  `/tmp/codex/xenoteer-b01405a-phase4-event-flood.log` has SHA-256
+  `6abd13549ea6c903062a0b0d6a20db90d6e8f890670b2a5be372ffd326e044ce`.
+- Before the `b01405a` matrix, 13 documented obsolete/rejected Xenoteer image
+  tags with zero container references were removed explicitly (no prune,
+  cache, volume, builder, or unrelated image removal), recovering
+  10,876,547,072 bytes. The exact cleanup log is
+  `/tmp/codex/xenoteer-b01405a-obsolete-image-cleanup.log` with SHA-256
+  `f5d3d2345d3a03c79c630d462d8583e7550e27b21dee9be2426121e7ab300b58`.
+- The event-flood host runner now resolves the invoking account before Rust
+  tools, validates every selected home/tool path and ancestor for canonical
+  ownership/mode/traversal safety, preserves rustup proxy names, and crosses
+  root-to-user execution through trusted `sudo` plus `env -i`. Only HOME,
+  CARGO_HOME, RUSTUP_HOME, the validated absolute RUSTC proxy, explicit PATH,
+  and C.UTF-8 locale cross that boundary. Exactly one lowercase path-safe Linux
+  target triple is accepted before it becomes a Cargo target or path component.
+  The resolver works with invoking-user proxies and trusted custom absolute
+  Cargo/Rustc locations without admitting their directories into the clean
+  PATH.
+- The fail-first regression reproduced the exact lane-4
+  `required command is unavailable: cargo` result and separately proved that
+  ambient Rust overrides crossed the first implementation. The final dedicated
+  suite passes 21/21 as the normal user (including a real passwordless-sudo,
+  secure-PATH UID-1000 run) and 19 passes with two explicit integration skips
+  as root. It covers malformed identity/account/home/tool inputs, path and
+  permission trust, rustup proxies, ambient overrides and secret canaries,
+  custom absolute tools, ambiguous/malicious target output, direct/rootless
+  invocation, and all sibling discovery contracts. `bash -n`, ShellCheck,
+  Python AST parsing, the complete static container gate, diff checks, and
+  two independent review rounds are green.

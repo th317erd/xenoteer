@@ -3,6 +3,274 @@
 set -Eeuo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+
+# This focused boundary is intentionally local to the event-flood runner. The
+# sibling runners have different build layouts; sharing their partially similar
+# privilege logic would broaden this acceptance fix without one common contract.
+host_rust_directory_is_trusted() {
+  local path=$1 uid=$2 gid=$3 canonical component owner group mode permissions
+  local -a components
+  if [[ $path != /* || $path == *$'\n'* || ! -d $path || -L $path ]]; then
+    return 1
+  fi
+  canonical=$(readlink -e -- "$path") || return 1
+  if [[ $canonical != "$path" ]]; then
+    return 1
+  fi
+  IFS=/ read -r -a components <<<"${path#/}"
+  component=/
+  for path in "${components[@]}"; do
+    [[ -n $path ]] || continue
+    if [[ $component == / ]]; then
+      component="/$path"
+    else
+      component="$component/$path"
+    fi
+    read -r owner group mode < <(stat -Lc '%u %g %a' -- "$component") \
+      || return 1
+    if [[ ! $owner =~ ^[0-9]+$ || ! $group =~ ^[0-9]+$ \
+      || ! $mode =~ ^[0-7]{3,4}$ ]]; then
+      return 1
+    fi
+    permissions=$((8#$mode))
+    if ((owner != 0 && owner != uid)); then
+      return 1
+    fi
+    if ((permissions & 0002)); then
+      return 1
+    fi
+    if ((permissions & 0020)) \
+      && ((owner != uid || group != gid)); then
+      return 1
+    fi
+    if ((owner == uid)); then
+      ((permissions & 0100)) || return 1
+    elif ((group == gid)); then
+      ((permissions & 0010)) || return 1
+    else
+      ((permissions & 0001)) || return 1
+    fi
+  done
+}
+
+host_rust_user_tool_is_trusted() {
+  local path=$1 cargo_bin=$2 uid=$3 gid=$4
+  local canonical owner group mode permissions link_owner
+  if [[ $path != "$cargo_bin/cargo" && $path != "$cargo_bin/rustc" ]]; then
+    return 1
+  fi
+  host_rust_directory_is_trusted "$cargo_bin" "$uid" "$gid" || return 1
+  if [[ ! -e $path || ! -x $path ]]; then
+    return 1
+  fi
+  link_owner=$(stat -c '%u' -- "$path") || return 1
+  if [[ ! $link_owner =~ ^[0-9]+$ || $link_owner -ne $uid ]]; then
+    return 1
+  fi
+  canonical=$(readlink -e -- "$path") || return 1
+  if [[ ${canonical%/*} != "$cargo_bin" || ! -f $canonical || ! -x $canonical ]]; then
+    return 1
+  fi
+  read -r owner group mode < <(stat -Lc '%u %g %a' -- "$canonical") \
+    || return 1
+  if [[ ! $owner =~ ^[0-9]+$ || ! $group =~ ^[0-9]+$ \
+    || ! $mode =~ ^[0-7]{3,4}$ || $owner -ne $uid ]]; then
+    return 1
+  fi
+  permissions=$((8#$mode))
+  if ((permissions & 0022)) || ! ((permissions & 0100)); then
+    return 1
+  fi
+}
+
+host_rust_ambient_tool_is_trusted() {
+  local path=$1 uid=$2 gid=$3 canonical owner group mode permissions link_owner
+  if [[ $path != /* || $path == *$'\n'* || ! -e $path || ! -x $path ]]; then
+    return 1
+  fi
+  host_rust_directory_is_trusted "${path%/*}" "$uid" "$gid" || return 1
+  link_owner=$(stat -c '%u' -- "$path") || return 1
+  if [[ ! $link_owner =~ ^[0-9]+$ || ( $link_owner -ne 0 && $link_owner -ne $uid ) ]]; then
+    return 1
+  fi
+  canonical=$(readlink -e -- "$path") || return 1
+  host_rust_directory_is_trusted "${canonical%/*}" "$uid" "$gid" || return 1
+  if [[ ! -f $canonical || ! -x $canonical ]]; then
+    return 1
+  fi
+  read -r owner group mode < <(stat -Lc '%u %g %a' -- "$canonical") \
+    || return 1
+  if [[ ! $owner =~ ^[0-9]+$ || ! $group =~ ^[0-9]+$ \
+    || ! $mode =~ ^[0-7]{3,4}$ \
+    || ( $owner -ne 0 && $owner -ne $uid ) ]]; then
+    return 1
+  fi
+  permissions=$((8#$mode))
+  if ((permissions & 0022)); then
+    return 1
+  fi
+  if ((owner == uid)); then
+    ((permissions & 0100)) || return 1
+  elif ((group == gid)); then
+    ((permissions & 0010)) || return 1
+  else
+    ((permissions & 0001)) || return 1
+  fi
+}
+
+host_rust_toolchain_resolve() {
+  local current_uid passwd_record account_uid account_gid account_home
+  local cargo_bin cargo_output env_binary host_line rustc_output
+  local -a passwd_fields rust_host_lines
+  local sudo_context=0
+  current_uid=$(id -u)
+  if [[ ! $current_uid =~ ^(0|[1-9][0-9]{0,9})$ ]]; then
+    printf 'current UID was invalid\n' >&2
+    return 77
+  fi
+  if [[ ${SUDO_UID+x} ]]; then
+    sudo_context=1
+    invoking_uid=$SUDO_UID
+  else
+    invoking_uid=$current_uid
+  fi
+  if [[ ! $invoking_uid =~ ^(0|[1-9][0-9]{0,9})$ ]] \
+    || ((10#$invoking_uid > 4294967295)); then
+    printf 'invoking UID was invalid\n' >&2
+    return 77
+  fi
+  if ((current_uid != 0 && invoking_uid != current_uid)); then
+    printf 'only root may select a different invoking UID\n' >&2
+    return 77
+  fi
+  if ! passwd_record=$(getent passwd "$invoking_uid") || [[ -z $passwd_record ]] \
+    || [[ $passwd_record == *$'\n'* ]]; then
+    printf 'could not resolve the invoking user account\n' >&2
+    return 77
+  fi
+  IFS=: read -r -a passwd_fields <<<"$passwd_record"
+  if ((${#passwd_fields[@]} != 7)); then
+    printf 'invoking user account was malformed\n' >&2
+    return 77
+  fi
+  account_uid=${passwd_fields[2]}
+  account_gid=${passwd_fields[3]}
+  account_home=${passwd_fields[5]}
+  if [[ ! $account_uid =~ ^(0|[1-9][0-9]{0,9})$ \
+    || ! $account_gid =~ ^(0|[1-9][0-9]{0,9})$ \
+    || $account_uid -ne $invoking_uid ]]; then
+    printf 'invoking user account was malformed\n' >&2
+    return 77
+  fi
+  invoking_gid=$account_gid
+  if [[ $account_home != /* || ! -d $account_home || -L $account_home ]] \
+    || ! host_rust_directory_is_trusted \
+      "$account_home" "$invoking_uid" "$invoking_gid"; then
+    printf 'invoking user home is unavailable or untrusted\n' >&2
+    return 77
+  fi
+  invoking_home=$account_home
+  cargo_bin="$invoking_home/.cargo/bin"
+  cargo_binary="$cargo_bin/cargo"
+  rustc_binary="$cargo_bin/rustc"
+  if [[ -e $cargo_binary || -e $rustc_binary ]]; then
+    if [[ ! -x $cargo_binary || ! -x $rustc_binary ]]; then
+      printf 'invoking user Rust toolchain is unavailable\n' >&2
+      return 77
+    fi
+    if ! host_rust_user_tool_is_trusted \
+      "$cargo_binary" "$cargo_bin" "$invoking_uid" "$invoking_gid" \
+      || ! host_rust_user_tool_is_trusted \
+        "$rustc_binary" "$cargo_bin" "$invoking_uid" "$invoking_gid"; then
+      printf 'invoking user Rust toolchain is untrusted\n' >&2
+      return 77
+    fi
+  elif ((sudo_context)); then
+    printf 'invoking user Rust toolchain is unavailable\n' >&2
+    return 77
+  else
+    cargo_binary=$(command -v cargo || true)
+    rustc_binary=$(command -v rustc || true)
+    if [[ -z $cargo_binary || -z $rustc_binary ]]; then
+      printf 'Rust toolchain is unavailable\n' >&2
+      return 77
+    fi
+    if ! host_rust_ambient_tool_is_trusted \
+      "$cargo_binary" "$invoking_uid" "$invoking_gid" \
+      || ! host_rust_ambient_tool_is_trusted \
+        "$rustc_binary" "$invoking_uid" "$invoking_gid"; then
+      printf 'ambient Rust toolchain path is untrusted\n' >&2
+      return 77
+    fi
+  fi
+  env_binary=$(command -v env || true)
+  if [[ -z $env_binary ]] \
+    || ! host_rust_ambient_tool_is_trusted \
+      "$env_binary" "$current_uid" 0; then
+    printf 'trusted env is unavailable for the invoking user boundary\n' >&2
+    return 77
+  fi
+  rust_identity_runner=()
+  if ((invoking_uid != current_uid)); then
+    sudo_binary=$(command -v sudo || true)
+    if [[ -z $sudo_binary ]] \
+      || ! host_rust_ambient_tool_is_trusted \
+        "$sudo_binary" "$current_uid" 0; then
+      printf 'trusted sudo is unavailable for the invoking user boundary\n' >&2
+      return 77
+    fi
+    rust_identity_runner=("$sudo_binary" -H -u "#$invoking_uid")
+  fi
+  rust_identity_runner+=(
+    "$env_binary" -i
+    "HOME=$invoking_home"
+    "CARGO_HOME=$invoking_home/.cargo"
+    "RUSTUP_HOME=$invoking_home/.rustup"
+    "RUSTC=$rustc_binary"
+    "PATH=$cargo_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    "LANG=C.UTF-8"
+    "LC_ALL=C.UTF-8"
+  )
+  if ! rustc_output=$("${rust_identity_runner[@]}" "$rustc_binary" -vV); then
+    printf 'rustc failed for the invoking user\n' >&2
+    return 77
+  fi
+  if ! cargo_output=$("${rust_identity_runner[@]}" "$cargo_binary" --version) \
+    || [[ -z $cargo_output ]]; then
+    printf 'cargo failed for the invoking user\n' >&2
+    return 77
+  fi
+  rust_host_lines=()
+  while IFS= read -r host_line; do
+    if [[ $host_line == host:* ]]; then
+      rust_host_lines+=("$host_line")
+    fi
+  done <<<"$rustc_output"
+  if ((${#rust_host_lines[@]} != 1)) \
+    || [[ ! ${rust_host_lines[0]} =~ ^host:\ ([a-z0-9_]+(-[a-z0-9_]+)+)$ ]] \
+    || [[ ${BASH_REMATCH[1]:-} != *-linux-* ]]; then
+    printf 'rustc must report exactly one path-safe Linux host target\n' >&2
+    return 77
+  fi
+  rust_host=${BASH_REMATCH[1]}
+}
+
+if [[ ${1:-} == --self-test-host-rust-toolchain ]]; then
+  if [[ $# -ne 1 ]]; then
+    printf 'usage: test-phase4-event-flood.sh --self-test-host-rust-toolchain\n' >&2
+    exit 64
+  fi
+  for command in env getent id readlink stat; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+      printf 'required command is unavailable: %s\n' "$command" >&2
+      exit 77
+    fi
+  done
+  host_rust_toolchain_resolve
+  printf 'host=%s uid=%s\n' "$rust_host" "$invoking_uid"
+  exit 0
+fi
+
 if [[ $# -ne 1 || -z $1 ]]; then
   printf 'usage: test-phase4-event-flood.sh IMAGE\n' >&2
   exit 64
@@ -73,7 +341,8 @@ cleanup() {
 trap 'report_error $?' ERR
 trap cleanup EXIT
 
-for command in cargo curl docker flock getent ionice jq mktemp nice python3 rustc timeout; do
+for command in curl docker env flock getent id ionice jq mktemp nice \
+  python3 readlink stat timeout; do
   if ! command -v "$command" >/dev/null 2>&1; then
     printf 'required command is unavailable: %s\n' "$command" >&2
     exit 77
@@ -87,32 +356,7 @@ if [[ ! $image =~ ^sha256:[0-9a-f]{64}$ ]]; then
   exit 1
 fi
 
-invoking_uid=${SUDO_UID:-$(id -u)}
-if [[ ! $invoking_uid =~ ^[0-9]+$ ]]; then
-  printf 'invoking UID was invalid\n' >&2
-  exit 77
-fi
-invoking_home=$(getent passwd "$invoking_uid" | cut -d: -f6)
-if [[ -z $invoking_home || ! -d $invoking_home ]]; then
-  printf 'could not resolve the invoking user home\n' >&2
-  exit 77
-fi
-rustc_binary="$invoking_home/.cargo/bin/rustc"
-cargo_binary="$invoking_home/.cargo/bin/cargo"
-if [[ ! -x $rustc_binary || ! -x $cargo_binary ]]; then
-  rustc_binary=$(command -v rustc)
-  cargo_binary=$(command -v cargo)
-fi
-if [[ $invoking_uid -eq $(id -u) ]]; then
-  rust_host=$($rustc_binary -vV | awk '$1 == "host:" { print $2 }')
-else
-  rust_host=$(sudo -H -u "#$invoking_uid" "$rustc_binary" -vV \
-    | awk '$1 == "host:" { print $2 }')
-fi
-if [[ -z $rust_host || $rust_host != *-linux-* ]]; then
-  printf 'Rust did not report a supported Linux host target\n' >&2
-  exit 77
-fi
+host_rust_toolchain_resolve
 rust_arch=${rust_host%%-*}
 case "$rust_arch" in
   x86_64) expected_arch=amd64 ;;
@@ -142,14 +386,9 @@ cargo_args=(
   --bin x11-window-churn
   --target "$rust_host"
 )
-if [[ $invoking_uid -eq $(id -u) ]]; then
-  timeout --signal=TERM --kill-after=30s 300s flock "$build_lock" \
-    nice -n 15 ionice -c 3 "$cargo_binary" "${cargo_args[@]}"
-else
-  timeout --signal=TERM --kill-after=30s 300s flock "$build_lock" \
-    sudo -H -u "#$invoking_uid" nice -n 15 ionice -c 3 \
-    "$cargo_binary" "${cargo_args[@]}"
-fi
+timeout --signal=TERM --kill-after=30s 300s flock "$build_lock" \
+  "${rust_identity_runner[@]}" nice -n 15 ionice -c 3 \
+  "$cargo_binary" "${cargo_args[@]}"
 fixture_binary="$repo_root/fixtures/x11/target/$rust_host/release/x11-window-churn"
 if [[ ! -x $fixture_binary ]]; then
   printf 'fixture build did not produce x11-window-churn\n' >&2
