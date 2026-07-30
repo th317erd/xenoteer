@@ -24,12 +24,21 @@ official stable v43.1.1 Linux x64 release URL and SHA-256. The build verifies th
 official checksum before extraction and retains Electron's `LICENSE` and
 `LICENSES.chromium.html`; no Electron bytes enter the production image.
 
-The build wrapper resolves the production tag to an immutable `sha256:` image
-ID before invoking Docker, uses that ID in `FROM`, records it in the derived
-image label, then compares the exact rootfs-layer prefix. The live matrix again
-resolves the derived tag once, uses only its immutable ID, checks the recorded
-base is locally present, and repeats the ancestry proof. The test image inherits
-the production entrypoint, desktop graph, profiles, and seccomp contract.
+The build wrapper admits the production tag only when Docker reports an
+immutable `sha256:` image ID and a durable non-dangling tag or digest. It gives
+`FROM` a strongly random temporary local alias and anchors `--iidfile` in a
+private mode-0700 directory. The child path must be absent immediately before
+Docker creates it; the wrapper securely validates that child and reduces its
+permissions to mode 0600 before reading it. It records the base ID in the
+derived image label and compares the exact rootfs-layer prefix using only the
+IID-bound derived ID.
+Post-proof label checks never resolve the mutable output tag. The alias is
+collision-checked, continuously bound to the exact source, and removed only
+while it still has the expected identity and another durable source reference
+exists. The live matrix again resolves the derived tag once, uses only its
+immutable ID, checks the recorded base is locally present, and repeats the
+ancestry proof. The test image inherits the production entrypoint, desktop
+graph, profiles, and seccomp contract.
 
 The live gate boots `bare`, `standard`, restarted-persistent-HOME, and hardened
 read-only-root containers. It requires the exact XFCE process set for each

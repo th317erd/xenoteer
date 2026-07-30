@@ -206,6 +206,21 @@ Plan: `plans/15-phased-implementation.md`
         - [x] Commit and push the qualification repair
         - [ ] Build a new coherent production/fixture pair and restart the
               canonical seven-lane qualification at lane 1
+    - [x] Reject source `c1f5caf` production `424a5e9e` / fixture `7c8ea2bd`
+          after lanes 1-4 passed first-run but lane 5 passed the raw immutable
+          production ID into a Dockerfile `FROM`, which BuildKit interpreted as
+          a registry repository and rejected before noVNC runtime assertions
+      - [x] Reproduce the exact immutable-ID build-reference failure before
+            editing and map every local-image `FROM` consumer
+      - [x] Add a fail-closed ephemeral local-tag handoff that remains bound to
+            the exact inspected production ID and cleans up on every exit path
+      - [ ] Run focused/static gates and independent security/portability
+            review, commit/push, build a new pair, and restart at lane 1
+        - [x] Remove the deterministic exact-path `/tmp` residue from the
+              deliberate reservation-owner-mismatch regression without
+              weakening the production helper's fail-closed cleanup
+        - [x] Obtain a fresh independent High/Medium-zero review of the
+              corrected frozen patch
     - [x] Reject source `b01405a` production `a650e129` / fixture `356225fe`
           after lanes 1-3 passed first-run but the lane-4 host runner exited 77
           before exercising the image because sudo's secure `PATH` hid Cargo

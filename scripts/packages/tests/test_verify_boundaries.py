@@ -148,6 +148,9 @@ class PackageBoundaryTests(unittest.TestCase):
             },
         }
 
+    def test_subprocess_timeout_allows_low_priority_cargo_headroom(self) -> None:
+        self.assertEqual(verify_boundaries.COMMAND_TIMEOUT_SECONDS, 60)
+
     def test_clean_dependency_graph_and_package_listing_pass(self) -> None:
         metadata = self.valid_metadata()
         closures = verify_boundaries.validate_dependency_closures(

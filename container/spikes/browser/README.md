@@ -28,6 +28,19 @@ The retained Phase-0 choice is Debian Chromium plus PyQt6 QtWebEngine on X11.
 Both execute as the unprivileged desktop identity, UID/GID 1000, through the
 runtime's Xauthority-authenticated Xvfb display. The executable proof is
 [`scripts/container/test-browser-spike.sh`](../../../scripts/container/test-browser-spike.sh).
+The wrapper admits the chosen local runtime only when Docker reports an exact
+image ID plus a durable pre-existing tag or digest, then gives Dockerfile
+`FROM` a strongly random temporary alias. The wrapper anchors `--iidfile` in a
+private mode-0700 directory and requires the child path to be absent immediately
+before Docker creates it. It securely validates the created child and reduces
+its permissions to mode 0600 before reading it, binding derivation proof to this
+build invocation. After the complete base-layer prefix is proved, both runtime
+profiles use only the frozen exact derived ID.
+Each container name is recorded before `docker run`; signal cleanup terminates
+and reaps the active Docker client before removing any possibly created
+container. The temporary build alias is removed only while it remains owned
+and another durable source reference still exists.
+
 It starts each browser twice: once with the normal container profile and once
 with the hardened read-only profile.
 

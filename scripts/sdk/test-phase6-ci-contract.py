@@ -417,6 +417,43 @@ def validate_static_contract(static_gate: str) -> None:
     )
 
 
+def validate_container_python_test_partition(static_gate: str) -> None:
+    """Require all container Python modules under explicit bounded commands."""
+
+    static_gate = uncommented(static_gate)
+    package_boundary_command = (
+        "timeout 90s env PYTHONDONTWRITEBYTECODE=1 python3 \\\n"
+        "  scripts/packages/verify-boundaries.py"
+    )
+    if package_boundary_command not in static_gate:
+        raise AssertionError(package_boundary_command)
+    local_image_command = (
+        "timeout 90s env PYTHONDONTWRITEBYTECODE=1 python3 \\\n"
+        "  scripts/container/tests/test_local_image_build_references.py"
+    )
+    if local_image_command not in static_gate:
+        raise AssertionError(local_image_command)
+    bounded_loop = (
+        "for bounded_container_python_test in \\\n"
+        "  scripts/container/tests/test_host_rust_toolchain.py \\\n"
+        "  scripts/container/tests/test_phase5_atspi_live.py \\\n"
+        "  scripts/container/tests/test_phase6_qualification.py; do"
+    )
+    if bounded_loop not in static_gate:
+        raise AssertionError(bounded_loop)
+    bounded_command = (
+        "timeout 10s env PYTHONDONTWRITEBYTECODE=1 \\\n"
+        '    python3 "$bounded_container_python_test"'
+    )
+    if bounded_command not in static_gate:
+        raise AssertionError(bounded_command)
+    broad_discovery = (
+        "python3 -m unittest discover \\\n  -s scripts/container/tests"
+    )
+    if broad_discovery in static_gate:
+        raise AssertionError(broad_discovery)
+
+
 def validate_python_wheel_artifacts(
     artifacts: dict[str, tuple[tuple[str, str], ...]],
 ) -> None:
@@ -685,11 +722,52 @@ class PhaseSixCiContractTests(unittest.TestCase):
         self,
     ) -> None:
         validate_static_contract(self.static_gate)
-        self.assertIn(
-            "python3 -m unittest discover \\\n  -s scripts/container/tests",
-            uncommented(self.static_gate),
-        )
+        validate_container_python_test_partition(self.static_gate)
         self.assertNotIn("scripts/container/qualify-phase6.py", self.workflow)
+
+    def test_container_python_partition_mutations_are_rejected(self) -> None:
+        timeout_mutations = (
+            self.static_gate.replace(
+                "timeout 90s env PYTHONDONTWRITEBYTECODE=1 python3 \\\n"
+                "  scripts/packages/verify-boundaries.py",
+                "timeout 91s env PYTHONDONTWRITEBYTECODE=1 python3 \\\n"
+                "  scripts/packages/verify-boundaries.py",
+                1,
+            ),
+            self.static_gate.replace(
+                "timeout 90s env PYTHONDONTWRITEBYTECODE=1 python3 \\\n"
+                "  scripts/container/tests/test_local_image_build_references.py",
+                "timeout 91s env PYTHONDONTWRITEBYTECODE=1 python3 \\\n"
+                "  scripts/container/tests/test_local_image_build_references.py",
+                1,
+            ),
+            self.static_gate.replace(
+                "timeout 10s env PYTHONDONTWRITEBYTECODE=1 \\\n"
+                '    python3 "$bounded_container_python_test"',
+                "timeout 11s env PYTHONDONTWRITEBYTECODE=1 \\\n"
+                '    python3 "$bounded_container_python_test"',
+                1,
+            ),
+        )
+        for incomplete in timeout_mutations:
+            with self.subTest(mutation="timeout"):
+                self.assertNotEqual(incomplete, self.static_gate)
+                with self.assertRaises(AssertionError):
+                    validate_container_python_test_partition(incomplete)
+
+        marker = "for bounded_container_python_test in \\\n"
+        partition_index = self.static_gate.index(marker)
+        for path in (
+            "scripts/container/tests/test_host_rust_toolchain.py",
+            "scripts/container/tests/test_phase5_atspi_live.py",
+            "scripts/container/tests/test_phase6_qualification.py",
+        ):
+            with self.subTest(path=path):
+                prefix = self.static_gate[:partition_index]
+                partition = self.static_gate[partition_index:]
+                incomplete = prefix + partition.replace(path, "", 1)
+                with self.assertRaisesRegex(AssertionError, re.escape(path)):
+                    validate_container_python_test_partition(incomplete)
 
     def test_missing_phase6_runner_contract_is_rejected(self) -> None:
         for path in (

@@ -148,6 +148,21 @@ sudo env \
   scripts/container/test-novnc-spike.sh
 ```
 
+The gate admits the selected local base only when Docker reports both one exact
+lowercase image ID and a durable pre-existing non-dangling tag or digest. It
+reserves a strongly random temporary local tag for Dockerfile `FROM` and a
+private mode-0700 IID directory. The IID path must be absent immediately before
+the build; Docker creates it inside that anchored directory, and the gate
+validates the child before reducing its permissions to mode 0600 and reading it.
+The IID file binds the proof to this build invocation; after proving a distinct
+exact ID with the complete base layer prefix, every inspect and run uses only
+that exact ID. The temporary alias is
+removed only after Docker again proves another durable source reference. A
+validated container name is recorded before launch so HUP, INT, or TERM can
+terminate and reap the Docker client, remove the runtime container, and clean
+the alias. Collision, identity drift, source-reference loss, malformed IID
+state, or cleanup failure makes the gate fail closed.
+
 ## Rejected measured alternative: x11vnc
 
 The initial spike evaluated Debian x11vnc `0.9.17-1` with LibVNCServer

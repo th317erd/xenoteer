@@ -78,8 +78,13 @@ required=(
   fixtures/phase3-sdk-smoke/src/main.rs
   scripts/container/test-phase4-event-flood.py
   scripts/container/test-phase4-event-flood.sh
+  scripts/container/build-desktop-app-fixture.sh
+  scripts/container/local-image-build-reference.sh
   scripts/container/qualify-phase6.py
+  scripts/container/test-browser-spike.sh
+  scripts/container/test-novnc-spike.sh
   scripts/container/tests/test_host_rust_toolchain.py
+  scripts/container/tests/test_local_image_build_references.py
   scripts/container/tests/test_phase5_atspi_live.py
   scripts/container/tests/test_phase6_qualification.py
   scripts/container/test-phase4-live-fixtures.py
@@ -165,7 +170,10 @@ for package_boundary_python in \
 done
 timeout 10s env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
   -s scripts/packages/tests -p 'test_*.py'
-timeout 30s env PYTHONDONTWRITEBYTECODE=1 python3 \
+# The verifier runs several independently bounded Cargo commands; its 90-second
+# aggregate ceiling accommodates each 60-second low-priority child without
+# weakening the child-level hang guard.
+timeout 90s env PYTHONDONTWRITEBYTECODE=1 python3 \
   scripts/packages/verify-boundaries.py
 for conformance_python in \
   scripts/conformance/validate.py \
@@ -225,17 +233,46 @@ grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
   scripts/container/test-phase4-event-flood.sh
 for container_python_test in \
   scripts/container/tests/test_host_rust_toolchain.py \
+  scripts/container/tests/test_local_image_build_references.py \
   scripts/container/tests/test_phase5_atspi_live.py \
   scripts/container/tests/test_phase6_qualification.py; do
   python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \
     "$container_python_test"
   grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' "$container_python_test"
 done
+sh -n scripts/container/local-image-build-reference.sh
+sh -n scripts/container/test-novnc-spike.sh
+for local_image_bash_wrapper in \
+  scripts/container/build-desktop-app-fixture.sh \
+  scripts/container/test-browser-spike.sh; do
+  bash -n "$local_image_bash_wrapper"
+  # This is a literal source-line contract, not shell expansion.
+  # shellcheck disable=SC2016
+  grep -Fq '. "$repo_root/scripts/container/local-image-build-reference.sh"' \
+    "$local_image_bash_wrapper"
+done
+# This is a literal source-line contract, not shell expansion.
+# shellcheck disable=SC2016
+grep -Fq \
+  '. "$repository_root/scripts/container/local-image-build-reference.sh"' \
+  scripts/container/test-novnc-spike.sh
+grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
+  scripts/container/local-image-build-reference.sh
 python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/container/qualify-phase6.py").read_text())'
 grep -Fxq '# SPDX-License-Identifier: BUSL-1.1' \
   scripts/container/qualify-phase6.py
-timeout 20s env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
-  -s scripts/container/tests -p 'test_*.py'
+# The 37 subprocess-heavy cases measured 43 seconds under the required
+# low-priority scheduling on a busy host. Each child keeps its own 8-second
+# bound; 90 seconds gives the aggregate watchdog real scheduling headroom.
+timeout 90s env PYTHONDONTWRITEBYTECODE=1 python3 \
+  scripts/container/tests/test_local_image_build_references.py
+for bounded_container_python_test in \
+  scripts/container/tests/test_host_rust_toolchain.py \
+  scripts/container/tests/test_phase5_atspi_live.py \
+  scripts/container/tests/test_phase6_qualification.py; do
+  timeout 10s env PYTHONDONTWRITEBYTECODE=1 \
+    python3 "$bounded_container_python_test"
+done
 sh -n tests/platform/run-x11-spikes.sh
 grep -Fq -- '-nolisten tcp -noreset -auth' tests/platform/run-x11-spikes.sh
 bash -n scripts/container/test-viewer-denial.sh
@@ -362,6 +399,17 @@ for workflow_state in .codex/TODO.md .codex/DETAILS.md; do
   if ! awk -F '\t' -v path="$workflow_state" '$1 == path && $3 == "BUSL-1.1" { found = 1 } END { exit !found }' \
     /tmp/xenoteer-first-party.tsv; then
     printf 'tracked implementation state is absent from source inventory: %s\n' "$workflow_state" >&2
+    exit 1
+  fi
+done
+for local_image_source in \
+  scripts/container/local-image-build-reference.sh \
+  scripts/container/tests/test_local_image_build_references.py; do
+  if ! awk -F '\t' -v path="$local_image_source" \
+      '$1 == path && $3 == "BUSL-1.1" { found = 1 } END { exit !found }' \
+      /tmp/xenoteer-first-party.tsv; then
+    printf 'local-image admission source is absent from license inventory: %s\n' \
+      "$local_image_source" >&2
     exit 1
   fi
 done

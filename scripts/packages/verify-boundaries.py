@@ -19,7 +19,9 @@ from typing import Any
 
 
 APACHE_LICENSE = "Apache-2.0"
-COMMAND_TIMEOUT_SECONDS = 30
+# Fresh offline package-resolution checks take about 37 seconds when the
+# repository's required low-priority/two-job resource policy is active.
+COMMAND_TIMEOUT_SECONDS = 60
 GENERATED_PACKAGE_ENTRIES = frozenset(
     {
         ".cargo_vcs_info.json",

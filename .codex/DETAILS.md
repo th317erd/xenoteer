@@ -1317,3 +1317,117 @@
   `e323d21afa1ba0fa3101beb95c144d3ddc64c0e38b8818ba1f71ad6046675f4d`.
   The complete post-repair static gate passes with log SHA-256
   `b1105509e2c7c0de9d729000afcaf81be26f07052fac550a42acb7cbc7186bb3`.
+- Clean source commit `c1f5caf5b78fc993555fdcbacfe24b786e326035`
+  produced production image
+  `sha256:424a5e9e35f64c1f8cba24d70e0dad8ac4f9f72dd403662c8142311d3d48231e`
+  and exact derived fixture
+  `sha256:7c8ea2bd948f9905fa86c2c6ea7dd022507a8fa46030fd8bc3406f674032156d`.
+  Both record clean source tree
+  `8d67f0b46d785ee192e231c7b40dded063b3d38f8eab5e80393c6075976a610c`
+  and dependency lock
+  `b7db3b0586412ff866441664a8ce11eaee23cc3172f1d9733e41e3d5f2524151`.
+  Production and fixture build logs have SHA-256
+  `8d007f6ba364b16e511fb8864a71085f1c918ff87852ca6b78b9e0539c6fb903`
+  and
+  `d1f4ab52b8d83ce21efa14c48eceb6b0ceb8a60d3cb92c6d3977fa94c0b6bcf1`.
+- The canonical first run against that pair passed lanes 1-4, then rejected
+  lane 5 before runtime assertions. The noVNC spike Dockerfile received the raw
+  production `sha256:<64hex>` as its `FROM`; BuildKit treated it as
+  `docker.io/library/sha256:<digest>` and failed with registry pull
+  `insufficient_scope`. The pair is permanently rejected and lanes 6-7 were
+  not started. Lane hashes are respectively
+  `28ef8088296cea1f7fb32eeb47b42dab0f807125f2373f184f9bbba2321854d6`,
+  `049f7c4927d49e1ce9c29f4188540c85cd09bd0740fa69d1e92c12e5543c176c`,
+  `8120aa31a608be5db7cd85384cf5ffc5bff6ff0107a8aa1c32b819a62cdb6ea7`,
+  `9b3e5a18a0612733db14f37ca57d8245b0181b48d408805dc8e92831f59d08b1`,
+  and rejected-lane
+  `e3d32c78a6ec17e5715bbc6d8c4a1ce7ff003ac5cd74201f2191fe0e867d3d0d`.
+  The rejected attempt manifest has SHA-256
+  `5c8966201ec7275b8fb1a03ff59b482f9b948df1b47905b62e82c7a0bcf22d25`;
+  canonical stdout has SHA-256
+  `17d5789c21f573957efa27e34ce32c8999ffa07b97e1740dfea960bb41bfc435`.
+- The lane-5 failure class reaches exactly three Dockerfile consumers:
+  `scripts/container/test-novnc-spike.sh`,
+  `scripts/container/test-browser-spike.sh`, and
+  `scripts/container/build-desktop-app-fixture.sh`. They now share
+  `scripts/container/local-image-build-reference.sh`: the helper admits an
+  exact durable source, reserves a random owned alias and private mode-0700
+  directory, requires the IID child path absent immediately before Docker,
+  securely reads Docker's created IID child relative to the anchored
+  directory, reduces safe umask-derived permissions to 0600, proves distinct
+  full base-layer ancestry, freezes the derived ID for every downstream
+  consumer, and cleans up or fails closed on signal and identity drift.
+- The first real-Docker IID smoke rejected the pre-created-inode design after a
+  successful build because current Docker/Buildx intentionally unlinks and
+  recreates `--iidfile`. Its log SHA-256 is
+  `78c0a40a6ca20f7017938706ce4d8a7c9f13f5c2804c19fbd27db113a1b689cc`;
+  retained diagnostic tag `xenoteer:iid-smoke-3749016` has exact ID
+  `sha256:58325d7ac5e9443d5c246e97cbfa14382711ecd95cdf1ddfeff7f4d0d4fe7b8b`
+  and must not be deleted before the repair milestone is accepted.
+- After the directory-anchored repair, focused fake-Docker coverage passes
+  37/37 (log SHA-256
+  `316af2eb3f6224c391c1c0b568ce18900a89e2c7d23ba86cd3a9700acde50d84`)
+  and aggregate container Python coverage passes 132/132 (log SHA-256
+  `36cad4d05cf1d8240eeebcd08e52040ebca0bcc04392ab5c5983b758c13901e0`).
+  The locked real-Docker/default-builder smoke passes with exact derived ID
+  `sha256:b9da3011a11eb546ced9b9e8e589b6c8f5ddb0b14ed25ce60ab4a7a287275b7c`
+  and log SHA-256
+  `763c71d7e9b06be25024fd9522fa1f9dbbe2b320cf35bf6b3153e793b816425c`.
+- The complete low-priority static gate passes with SHA-256
+  `5d31c63e84515af7eef86a3f1e854620ab1e9438cc65dc75368df81b455ea839`.
+  To remain reliable under `nice 15` scheduling, exact mutation-protected
+  ceilings are 60 seconds per packaged Cargo command, 90 seconds for the whole
+  package verifier, 90 seconds for the local-image Python module, and 10
+  seconds for each smaller container Python module. All Cargo-indirect gates
+  remain serialized by `/tmp/codex/xenoteer-heavy-build.lock`, use
+  `CARGO_BUILD_JOBS=2`, and run at `nice 15` with idle-class I/O.
+- The first independent review of the directory-anchored repair found zero
+  High findings and one Medium confined to the test harness: the deliberate
+  reservation-owner-record mismatch correctly makes production cleanup fail
+  closed, but the Python regression did not remove its exact test-created
+  reservation afterward. Repeated focused runs therefore left a mode-0700
+  directory plus its mode-0644 IID child in `/tmp`. The correction must remain
+  parent-side and exact-path, validate the residue before removal, run even
+  when an assertion fails, and must not weaken the production helper or use a
+  glob.
+- The test-harness residue correction records the exact random reservation
+  before corrupting the helper's recorded UID, then registers an idempotent
+  parent-side cleanup before its production-behavior assertions. That cleanup
+  accepts only the exact `/tmp/xenoteer-local-image-<32 lowercase hex>` path,
+  anchors the current-UID mode-0700 directory without following links, accepts
+  only the expected regular current-UID single-link mode-0644 IID containing
+  the exact derived ID, removes it relative to the open directory, verifies
+  unchanged identity and emptiness, removes that exact directory, and proves
+  absence. RED comparison SHA-256
+  `1549c03a666bf28b839bc5ab1a5e433073011a01330a3068147c2a305f40c028`
+  proved the original test added one residue; the corrected targeted and
+  timeout-contract log SHA-256 is
+  `f8fc95c21927b189efb4785e9605fff5cecdd037ad21cc1b170f7df80e3d79d7`,
+  aggregate container coverage passes 132/132 with log SHA-256
+  `87c83373c6ea41bc0a2cc7ea63496ffa1764e45f2ec5bc8e945fe7cff9143664`,
+  and CI contracts pass 31/31 with log SHA-256
+  `6e3250de04059e6f43aee3698ab0476b10738aea63c54b2818728dd898223943`.
+  A separate required-low-priority focused run took 42.985
+  seconds, so the local-image module's mutation-protected aggregate watchdog is
+  90 seconds; every child command remains independently bounded to eight
+  seconds.
+- The fresh independent review of the corrected 12-file snapshot reports zero
+  High and zero Medium findings. Its separate targeted owner-mismatch run
+  passed 1/1 while leaving the exact 15-path pre-test residue inventory
+  unchanged, and its independent updated CI-contract run passed 31/31. The
+  remaining lower-severity observations are accepted for this boundary:
+  inspect metadata capture is not independently size-bounded; cleanup has an
+  inspect-to-remove concurrency window against unrelated same-Docker writers;
+  cleanup inspect/remove calls have no separate local watchdog or complete
+  signal coverage; TERM grace is about 200 milliseconds; and production
+  intentionally retains a private reservation when its provenance can no
+  longer be proven.
+- The complete post-review, post-timeout-calibration static gate passes under
+  the shared heavy-build lock, `nice 15`, idle-class I/O, two Cargo jobs, and
+  two Rust test threads; its log SHA-256 is
+  `cf41ec7fe1fb1dc41b6912c408d022f52d4e34f73f76535a315342456732f121`.
+  Fifteen exact stale `/tmp/xenoteer-local-image-<nonce>` reservations created
+  by earlier pre-fix adverse regression runs were individually validated and
+  removed without globs. No reservation remains. Retained diagnostic image
+  `xenoteer:iid-smoke-3749016` remains untouched at
+  `sha256:58325d7ac5e9443d5c246e97cbfa14382711ecd95cdf1ddfeff7f4d0d4fe7b8b`.
