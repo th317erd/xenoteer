@@ -113,6 +113,9 @@ Plan: `plans/15-phased-implementation.md`
     - [x] Make the regression fail closed for every transport constructor,
           every server wait, and unsafe overall-deadline changes rather than
           counting only today's configured timeout expressions
+  - [x] Fix the recurring viewer monitor's incomplete RFB negotiation, which
+        makes TigerVNC blacklist loopback after five probes and intermittently
+        degrades readiness/fails the immutable-image viewer gate
   - [x] Add the staged crate/npm/wheel/sdist installation gate, exact
       source-tree/image identity fence, no-override admission, per-variant
       typed-auth failure proof, and bounded cleanup contracts

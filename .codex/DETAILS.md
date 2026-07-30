@@ -227,6 +227,28 @@
   aliased/computed waits, lowered internal/external bounds, client aliases, and
   extracted wait receivers. Independent re-review reported no high/medium
   findings; the full container static gate also passes.
+- The first clean `421f321` production candidate was
+  `sha256:fa89405ca365dcf47b6ed1b80090f840fabcac1902cf7ced4dfc377e5af318f9`
+  and its exact desktop fixture was
+  `sha256:cf5ab62c433f726783906ffd95c3e25fd9f0f77e6c10cf3c30dd57821403feac`.
+  The production lifecycle gate exposed a second real defect before either
+  identity could be accepted: the daemon's five-second transport-only viewer
+  monitor upgraded through websockify and read the RFB banner, then disconnected
+  before sending the client version/security exchange. TigerVNC counted each as
+  a security failure and, after five, returned `RFB 003.003` with the safe reason
+  `Too many security failures`, intermittently degrading viewer readiness and
+  failing the viewer-denial gate. A fresh diagnostic container reproduced the
+  exact bytes and logs. Those image IDs are therefore rejected and must be
+  rebuilt after the fail-first full-negotiation monitor fix. The regression
+  models TigerVNC's threshold: under the old transport-only path the first five
+  probes passed while accumulating incomplete security handshakes and the sixth
+  received the blacklist banner. The recurring monitor now uses the sole
+  bounded full RFB 3.8 probe through None-security selection, `ClientInit`, and
+  bounded `ServerInit`; six consecutive handshakes leave zero incomplete
+  attempts. Malformed and blacklist banners remain fail-closed, and the
+  immediately following input probe preserves the X0tigervnc/XKB ordering.
+  Focused tests passed 9/9, strict xenoteerd Clippy and Rustfmt passed, and an
+  independent review found no high- or medium-severity issue.
 - The Phase-6 example audit found that semantic text previously proved only
   character counts. Closure adds a content-private AT-SPI backend comparison
   that returns only exact-match boolean evidence for unprotected fields, keeps

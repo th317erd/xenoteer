@@ -245,7 +245,7 @@ async fn run_supervisor(
                     cleanup?;
                     return Err(DesktopSupervisorError::RequiredCapability(failure.code()));
                 }
-                let viewer_available = probe_viewer_transport_if_enabled(&spec).await.is_ok();
+                let viewer_available = probe_viewer_if_enabled(&spec).await.is_ok();
                 if spec.viewer_required && !viewer_available {
                     let failure = ProbeFailure::Viewer;
                     tracing::error!(probe = failure.code(), "required desktop capability was lost");
@@ -446,20 +446,6 @@ async fn probe_viewer_if_enabled(spec: &DesktopProbeSpec) -> Result<(), ProbeFai
     probe_websocket_rfb(
         "127.0.0.1:6080".parse().map_err(|_| ProbeFailure::Viewer)?,
         deadline,
-        ViewerProbeDepth::Full,
-    )
-    .await
-}
-
-async fn probe_viewer_transport_if_enabled(spec: &DesktopProbeSpec) -> Result<(), ProbeFailure> {
-    if !spec.viewer_enabled {
-        return Ok(());
-    }
-    let deadline = Instant::now() + OPERATION_TIMEOUT;
-    probe_websocket_rfb(
-        "127.0.0.1:6080".parse().map_err(|_| ProbeFailure::Viewer)?,
-        deadline,
-        ViewerProbeDepth::Transport,
     )
     .await
 }
@@ -507,17 +493,7 @@ fn publish_operational_readiness(
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ViewerProbeDepth {
-    Transport,
-    Full,
-}
-
-async fn probe_websocket_rfb(
-    address: SocketAddr,
-    deadline: Instant,
-    depth: ViewerProbeDepth,
-) -> Result<(), ProbeFailure> {
+async fn probe_websocket_rfb(address: SocketAddr, deadline: Instant) -> Result<(), ProbeFailure> {
     const MAX_RESPONSE_HEADER_BYTES: usize = 4_096;
     const MAX_FRAME_PAYLOAD_BYTES: u64 = 1_048_576;
     const MAX_FRAMES: usize = 32;
@@ -567,9 +543,6 @@ Sec-WebSocket-Protocol: binary\r\n\r\n",
     .await?;
     if greeting.as_slice() != b"RFB 003.008\n" {
         return Err(ProbeFailure::Viewer);
-    }
-    if depth == ViewerProbeDepth::Transport {
-        return Ok(());
     }
     write_websocket_binary(&mut web, deadline, b"RFB 003.008\n").await?;
 
@@ -853,8 +826,8 @@ mod tests {
 
     use super::{
         DesktopProbeExpectation, DesktopProbeSpec, DesktopRuntime, DesktopSupervisorError,
-        ProbeFailure, ViewerProbeDepth, parse_binary_setting, probe_websocket_rfb,
-        publish_operational_readiness, spawn, valid_websocket_upgrade,
+        ProbeFailure, parse_binary_setting, probe_websocket_rfb, publish_operational_readiness,
+        spawn, valid_websocket_upgrade,
     };
 
     async fn read_client_binary(stream: &mut tokio::net::TcpStream) -> std::io::Result<Vec<u8>> {
@@ -1018,60 +991,130 @@ Sec-WebSocket-Protocol: binary\r\n\r\n\
         });
 
         assert!(
-            probe_websocket_rfb(
-                address,
-                Instant::now() + Duration::from_secs(2),
-                ViewerProbeDepth::Full,
-            )
-            .await
-            .is_ok()
+            probe_websocket_rfb(address, Instant::now() + Duration::from_secs(2),)
+                .await
+                .is_ok()
         );
         server.await??;
         Ok(())
     }
 
     #[tokio::test]
-    async fn recurring_viewer_probe_stops_before_rfb_negotiation()
+    async fn viewer_probe_rejects_malformed_and_blacklisted_rfb_banners()
     -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await?;
-            let mut request = Vec::with_capacity(512);
-            while !request.ends_with(b"\r\n\r\n") {
-                let mut byte = [0_u8; 1];
-                stream.read_exact(&mut byte).await?;
-                request.push(byte[0]);
-            }
-            stream
-                .write_all(
-                    b"HTTP/1.1 101 Switching Protocols\r\n\
+            for banner in [
+                b"RFB 999.999\n".as_slice(),
+                b"RFB 003.003\nToo many security failures".as_slice(),
+            ] {
+                let (mut stream, _) = listener.accept().await?;
+                let mut request = Vec::with_capacity(512);
+                while !request.ends_with(b"\r\n\r\n") {
+                    if request.len() == 4_096 {
+                        return Err(std::io::Error::other("request header exceeded test bound"));
+                    }
+                    let mut byte = [0_u8; 1];
+                    stream.read_exact(&mut byte).await?;
+                    request.push(byte[0]);
+                }
+                stream
+                    .write_all(
+                        b"HTTP/1.1 101 Switching Protocols\r\n\
 Upgrade: websocket\r\n\
 Connection: Upgrade\r\n\
 Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\
 Sec-WebSocket-Protocol: binary\r\n\r\n",
-                )
-                .await?;
-            write_server_binary(&mut stream, b"RFB 003.008\n").await?;
-            let mut client_version = [0_u8; 1];
-            if stream.read(&mut client_version).await? != 0 {
-                return Err(std::io::Error::other(
-                    "transport-only probe advanced the RFB handshake",
-                ));
+                    )
+                    .await?;
+                write_server_binary(&mut stream, banner).await?;
             }
             Ok::<(), std::io::Error>(())
         });
 
-        assert!(
-            probe_websocket_rfb(
-                address,
-                Instant::now() + Duration::from_secs(2),
-                ViewerProbeDepth::Transport,
-            )
-            .await
-            .is_ok()
-        );
+        for _ in 0..2 {
+            assert!(matches!(
+                probe_websocket_rfb(address, Instant::now() + Duration::from_millis(500)).await,
+                Err(ProbeFailure::Viewer)
+            ));
+        }
         server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recurring_viewer_probe_never_triggers_security_failure_blacklisting()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let mut incomplete_security_handshakes = 0_usize;
+            for _ in 0..6 {
+                let (mut stream, _) = listener.accept().await?;
+                let mut request = Vec::with_capacity(512);
+                while !request.ends_with(b"\r\n\r\n") {
+                    if request.len() == 4_096 {
+                        return Err(std::io::Error::other("request header exceeded test bound"));
+                    }
+                    let mut byte = [0_u8; 1];
+                    stream.read_exact(&mut byte).await?;
+                    request.push(byte[0]);
+                }
+                stream
+                    .write_all(
+                        b"HTTP/1.1 101 Switching Protocols\r\n\
+Upgrade: websocket\r\n\
+Connection: Upgrade\r\n\
+Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\
+Sec-WebSocket-Protocol: binary\r\n\r\n",
+                    )
+                    .await?;
+                if incomplete_security_handshakes >= 5 {
+                    write_server_binary(&mut stream, b"RFB 003.003\nToo many security failures")
+                        .await?;
+                    continue;
+                }
+                write_server_binary(&mut stream, b"RFB 003.008\n").await?;
+                let client_version = read_client_binary(&mut stream).await;
+                if !client_version.is_ok_and(|version| version == b"RFB 003.008\n") {
+                    incomplete_security_handshakes += 1;
+                    continue;
+                }
+                write_server_binary(&mut stream, &[1, 1]).await?;
+                if read_client_binary(&mut stream).await? != [1] {
+                    return Err(std::io::Error::other("unexpected RFB security choice"));
+                }
+                write_server_binary(&mut stream, &[0, 0, 0, 0]).await?;
+                if read_client_binary(&mut stream).await? != [1] {
+                    return Err(std::io::Error::other("unexpected RFB ClientInit"));
+                }
+                let desktop_name = b"recurring-probe";
+                let mut server_init = Vec::with_capacity(24 + desktop_name.len());
+                server_init.extend_from_slice(&1_920_u16.to_be_bytes());
+                server_init.extend_from_slice(&1_080_u16.to_be_bytes());
+                server_init.extend_from_slice(&[0_u8; 16]);
+                server_init.extend_from_slice(
+                    &u32::try_from(desktop_name.len())
+                        .map_err(|_| std::io::Error::other("test name length overflow"))?
+                        .to_be_bytes(),
+                );
+                server_init.extend_from_slice(desktop_name);
+                write_server_binary(&mut stream, &server_init).await?;
+            }
+            Ok::<usize, std::io::Error>(incomplete_security_handshakes)
+        });
+
+        let mut probe_results = Vec::with_capacity(6);
+        for _ in 0..6 {
+            probe_results.push(
+                probe_websocket_rfb(address, Instant::now() + Duration::from_millis(500))
+                    .await
+                    .is_ok(),
+            );
+        }
+        assert_eq!(probe_results, vec![true; 6]);
+        assert_eq!(server.await??, 0);
         Ok(())
     }
 
