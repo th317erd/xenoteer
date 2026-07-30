@@ -1501,3 +1501,75 @@
   The fresh independent frozen-source review reports zero High, zero Medium,
   and zero Low findings after independently passing the same 70/72/33 focused
   suites and verifying every supplied source hash before and after review.
+- Clean source commit `eb743701ad37ba40548d07edfad2cc6b1c737e3a`
+  produced production image
+  `sha256:47f986ed974560b62f73c0dde2ff44bf9f3aa22699e35bdca19be295e2f61dc2`
+  and exact derived fixture
+  `sha256:883069425841de22aaa893e6be6355a2cb24dc3c08bd04c2e398b1c9e90424b3`.
+  Both record clean source tree
+  `2e8472be6114840794067f2a3b77ef4013effad111ae9e622faeb2fe2ca8d9be`
+  and dependency lock
+  `b7db3b0586412ff866441664a8ce11eaee23cc3172f1d9733e41e3d5f2524151`.
+  Production and fixture build logs have SHA-256
+  `4da4bfb17a548deac1090f093b8fa77d22efd4ab8c16e21451cc55a15a9e8e09`
+  and
+  `0da80243bde119e67cb3f37fe39c60e4325cb770ff2c166a1e4f000909527e5b`.
+- That pair is permanently rejected after its only canonical qualification
+  attempt. Lanes 1-6 passed: Phase-5 AT-SPI live, production lifecycle,
+  Phase-4 live fixtures, Phase-4 event flood, exact-ID noVNC, and the desktop
+  application matrix. Their log SHA-256 values are respectively
+  `28ef8088296cea1f7fb32eeb47b42dab0f807125f2373f184f9bbba2321854d6`,
+  `78d2622a131ac09685f9d414e35585a6771d77adb1ca3f546070cfdad595708a`,
+  `8120aa31a608be5db7cd85384cf5ffc5bff6ff0107a8aa1c32b819a62cdb6ea7`,
+  `92d252f7f37bf703a6f8a8f2f6fa01f265f695567970c7b84e1fee4338dd3a19`,
+  `42aff3a319a94d96a44d76b6442c1eeea770a10b24baa8b533fadf2a8bb1247f`,
+  and
+  `4b82abb7b286f68dffbe72eb477c2614b72b46274815d3c019079f039b6bab1a`.
+  Lane 7 rejected in 629 milliseconds before Docker image inspection with
+  Git's user-owned-checkout `dubious ownership` error while running
+  `git rev-parse --verify HEAD`; its log SHA-256 is
+  `7bc9570cc2406ced7a9d40658e1f306b03aa82ac7cb9315af5784b8e7da58ef8`.
+  Attempt-manifest SHA-256 is
+  `9eebaa41ab66b9694cec398f3640e5a7e746ddef889615d5359cbabbceaedf78`.
+  The repair must execute repository Git identity/hash reads as the validated
+  invoking user and retain the fixed root/system environment for Docker; a
+  root-global or per-command `safe.directory` exception is not acceptable.
+- The accepted Git source-identity repair resolves one root-owned Git
+  executable from the fixed system path and runs only the four source-tree Git
+  fences as the validated invoking UID/primary GID with no supplemental groups
+  and an exact six-key password-database environment. Docker remains on the
+  root fixed-system executor. The final frozen source hashes are runner
+  `1ae7ae2b540596d26269a5284ccbc9ca210b573e346b2c9130425b7353c97d58`,
+  tests
+  `6b993480477594f5dc2350df2781c2cb3732c7302b4182d279ba7c66c77804fa`,
+  and README
+  `85d31658d15aed636b6f9e6740de055de78d5ad3084f9af0f618aa318dee8032`.
+  A test-only UID-0 portability defect failed first with log SHA-256
+  `3afec80ab35a44284b53d844e86585bcc43f685d1170741322d540e572b325b3`
+  and was corrected without weakening the production root rejection.
+  Independent corrected-snapshot review reports zero High, Medium, or Low
+  findings; its ordinary and UID-0 targeted tests each pass 2/2.
+- Coordinator post-review evidence passes public quick-start 77/77, shared
+  identity 8/8, CI contract 33/33, and qualifier 72/72 with combined log
+  SHA-256
+  `ca95094223dd2070d20db1950d49789d6183f9c91c74496447caa34dccfdfe54`.
+  The complete low-priority static gate passes under the shared heavy-build
+  lock, two Cargo jobs, two Rust test threads, `nice 15`, and idle-class I/O;
+  its log SHA-256 is
+  `8df2d5806d533cd2e97d41abfe8d1544168dd781394368cebfc6e75a8f0f0313`.
+  No generated Python cache remains. The next valid action is to commit/push
+  this repair, build exactly one new coherent production/fixture pair from that
+  clean commit, and run the canonical seven lanes exactly once.
+- The read-only Phase-7.1 transport design artifact is
+  `/tmp/codex/xenoteer-phase7-wave1-design.md`, SHA-256
+  `414641146e2cddeb7edd6855c3f3b1c75410a9614fb5e9522d8b6615970960b6`.
+  It is **not implementation-ready** despite its internal status line. Fresh
+  adversarial review found that Hyper's proposed 10-second header timer can
+  overlap and truncate a still-streaming response, loopback TCP is reachable
+  by the explicitly untrusted desktop UID and therefore is not reserved
+  operations capacity, the end-to-end transport/actor/supervisor shutdown
+  budget is not reconciled against actual container supervision ceilings, its
+  raw-head tests omit Hyper's historical segmented-write `max_buf_size`
+  bypass, and its `-j 4` commands violate the current strict two-job resource
+  ceiling. Correct and independently re-review the design before Phase 7.1
+  implementation.

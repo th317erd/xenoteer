@@ -812,6 +812,12 @@ class PublicQuickstartContractTests(unittest.TestCase):
             stdout="",
             stderr="",
         )
+        completed_bytes = subprocess.CompletedProcess(
+            ["git", "status"],
+            0,
+            stdout=b"",
+            stderr=b"",
+        )
         hostile_environment = {
             "PATH": "/home/builder/.nvm/versions/node/v24.18.0/bin",
             "XENOTEER_PACKAGE_BUILD_PATH": (
@@ -832,7 +838,7 @@ class PublicQuickstartContractTests(unittest.TestCase):
             mock.patch.object(
                 MODULE.subprocess,
                 "run",
-                return_value=completed,
+                side_effect=(completed, completed_bytes),
             ) as run,
         ):
             MODULE.CommandExecutor().run(
@@ -859,6 +865,403 @@ class PublicQuickstartContractTests(unittest.TestCase):
                 "XENOTEER_PACKAGE_BUILD_PATH",
                 environment,
             )
+
+    def test_source_identity_executor_routes_text_and_binary_git_as_invoking_identity(
+        self,
+    ) -> None:
+        identity = MODULE.BuildIdentity(
+            12_345,
+            23_456,
+            Path("/home/builder"),
+            True,
+        )
+        text_result = subprocess.CompletedProcess(
+            ["/usr/bin/git", "rev-parse", "--verify", "HEAD"],
+            0,
+            stdout=("a1" * 20) + "\n",
+            stderr="",
+        )
+        binary_output = b"\xff\x00diff --git a/file b/file\n"
+        binary_result = subprocess.CompletedProcess(
+            ["/usr/bin/git", "diff"],
+            0,
+            stdout=binary_output,
+            stderr=b"",
+        )
+        hostile_environment = {
+            "HOME": "/root",
+            "PATH": "/tmp/attacker-bin",
+            "GIT_CONFIG": "/tmp/attacker.gitconfig",
+            "GIT_CONFIG_GLOBAL": "/tmp/attacker-global.gitconfig",
+            "GIT_CONFIG_SYSTEM": "/tmp/attacker-system.gitconfig",
+            "GIT_DIR": "/tmp/attacker-repository",
+            "GIT_WORK_TREE": "/tmp/attacker-worktree",
+            "XENOTEER_TOKEN": "must-not-cross",
+        }
+        account = SimpleNamespace(
+            pw_uid=identity.uid,
+            pw_gid=identity.gid,
+            pw_dir=str(identity.home),
+            pw_name="builder",
+        )
+
+        with (
+            mock.patch.dict(MODULE.os.environ, hostile_environment, clear=True),
+            mock.patch.object(MODULE.os, "geteuid", return_value=0),
+            mock.patch.object(MODULE.pwd, "getpwuid", return_value=account),
+            mock.patch.object(
+                MODULE.subprocess,
+                "run",
+                side_effect=(text_result, binary_result),
+            ) as run,
+        ):
+            source_executor = MODULE.SourceIdentityExecutor(
+                identity,
+                MODULE.CommandExecutor(),
+                Path("/usr/bin/git"),
+            )
+            text = source_executor.run(
+                ["git", "rev-parse", "--verify", "HEAD"],
+                timeout=5,
+                cwd=Path("/repository"),
+            )
+            binary = source_executor.run_bytes(
+                ["git", "diff"],
+                timeout=5,
+                cwd=Path("/repository"),
+            )
+
+        self.assertEqual(text.stdout, text_result.stdout)
+        self.assertEqual(binary, binary_output)
+        self.assertEqual(run.call_count, 2)
+        expected_environment = {
+            "HOME": str(identity.home),
+            "LANG": "C",
+            "LC_ALL": "C",
+            "LOGNAME": account.pw_name,
+            "PATH": MODULE.TRUSTED_SYSTEM_PATH,
+            "USER": account.pw_name,
+        }
+        for invocation in run.call_args_list:
+            arguments, keywords = invocation
+            self.assertEqual(arguments[0][0], "/usr/bin/git")
+            self.assertNotIn("-c", arguments[0])
+            self.assertNotIn("safe.directory", arguments[0])
+            self.assertEqual(keywords["cwd"], Path("/repository"))
+            self.assertEqual(keywords["env"], expected_environment)
+            self.assertEqual(keywords["user"], identity.uid)
+            self.assertEqual(keywords["group"], identity.gid)
+            self.assertEqual(keywords["extra_groups"], ())
+            self.assertNotIn("XENOTEER_TOKEN", keywords["env"])
+            self.assertFalse(
+                any(key.startswith("GIT_") for key in keywords["env"])
+            )
+        self.assertTrue(run.call_args_list[0].kwargs["text"])
+        self.assertFalse(run.call_args_list[1].kwargs["text"])
+
+    def test_source_identity_executor_rejects_invalid_identity_command_and_bounds(
+        self,
+    ) -> None:
+        identity = MODULE.BuildIdentity(
+            12_345,
+            23_456,
+            Path("/home/builder"),
+            True,
+        )
+        account = SimpleNamespace(
+            pw_uid=identity.uid,
+            pw_gid=identity.gid,
+            pw_dir=str(identity.home),
+            pw_name="builder",
+        )
+        with mock.patch.object(MODULE.pwd, "getpwuid", return_value=account):
+            source_executor = MODULE.SourceIdentityExecutor(
+                identity,
+                MODULE.CommandExecutor(),
+                Path("/usr/bin/git"),
+            )
+        invalid_calls = (
+            lambda: source_executor.run([], timeout=5, cwd=Path("/repository")),
+            lambda: source_executor.run(
+                ["docker", "version"],
+                timeout=5,
+                cwd=Path("/repository"),
+            ),
+            lambda: source_executor.run(
+                ["git", "status"],
+                timeout=0,
+                cwd=Path("/repository"),
+            ),
+            lambda: source_executor.run(
+                ["git", "status"],
+                timeout=5,
+                cwd=None,
+            ),
+            lambda: source_executor.run(
+                ["git", "status"],
+                timeout=5,
+                cwd=Path("relative"),
+            ),
+            lambda: source_executor.run(
+                ["git", "status\0--short"],
+                timeout=5,
+                cwd=Path("/repository"),
+            ),
+        )
+        for invalid_call in invalid_calls:
+            with self.subTest(call=invalid_call):
+                with self.assertRaises(MODULE.GateError):
+                    invalid_call()
+
+    def test_source_identity_executor_rejects_root_and_mismatched_local_accounts(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(MODULE.GateError, "non-root"):
+            MODULE.SourceIdentityExecutor(
+                MODULE.BuildIdentity(0, 0, Path("/root"), False),
+                MODULE.CommandExecutor(),
+                Path("/usr/bin/git"),
+            )
+
+        identity = MODULE.BuildIdentity(
+            max(os.geteuid(), 1),
+            max(os.getegid(), 1),
+            Path("/home/builder"),
+            False,
+        )
+        mismatches = (
+            SimpleNamespace(
+                pw_uid=identity.uid + 1,
+                pw_gid=identity.gid,
+                pw_dir=str(identity.home),
+                pw_name="builder",
+            ),
+            SimpleNamespace(
+                pw_uid=identity.uid,
+                pw_gid=identity.gid + 1,
+                pw_dir=str(identity.home),
+                pw_name="builder",
+            ),
+            SimpleNamespace(
+                pw_uid=identity.uid,
+                pw_gid=identity.gid,
+                pw_dir="/root",
+                pw_name="builder",
+            ),
+            SimpleNamespace(
+                pw_uid=identity.uid,
+                pw_gid=identity.gid,
+                pw_dir=str(identity.home),
+                pw_name="",
+            ),
+        )
+        for account in mismatches:
+            with (
+                self.subTest(account=account),
+                mock.patch.object(MODULE.pwd, "getpwuid", return_value=account),
+                self.assertRaises(MODULE.GateError),
+            ):
+                MODULE.SourceIdentityExecutor(
+                    identity,
+                    MODULE.CommandExecutor(),
+                    Path("/usr/bin/git"),
+                )
+
+        with (
+            mock.patch.object(MODULE.pwd, "getpwuid", side_effect=KeyError),
+            self.assertRaisesRegex(MODULE.GateError, "no local account"),
+        ):
+            MODULE.SourceIdentityExecutor(
+                identity,
+                MODULE.CommandExecutor(),
+                Path("/usr/bin/git"),
+            )
+
+    def test_source_identity_binary_boundary_has_typed_failure_paths(self) -> None:
+        identity = MODULE.BuildIdentity(
+            12_345,
+            23_456,
+            Path("/home/builder"),
+            True,
+        )
+        account = SimpleNamespace(
+            pw_uid=identity.uid,
+            pw_gid=identity.gid,
+            pw_dir=str(identity.home),
+            pw_name="builder",
+        )
+        with mock.patch.object(MODULE.pwd, "getpwuid", return_value=account):
+            source_executor = MODULE.SourceIdentityExecutor(
+                identity,
+                MODULE.CommandExecutor(),
+                Path("/usr/bin/git"),
+            )
+        failures = (
+            FileNotFoundError("missing"),
+            PermissionError("denied"),
+            OSError("launch failed"),
+            ValueError("embedded null byte"),
+            subprocess.TimeoutExpired(["/usr/bin/git"], 5),
+            subprocess.CompletedProcess(["/usr/bin/git"], 1, b"", b"\xff"),
+            subprocess.CompletedProcess(["/usr/bin/git"], 0, "not bytes", b""),
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                with (
+                    mock.patch.object(MODULE.os, "geteuid", return_value=0),
+                    mock.patch.object(
+                        MODULE.subprocess,
+                        "run",
+                        side_effect=failure
+                        if isinstance(failure, BaseException)
+                        else None,
+                        return_value=None
+                        if isinstance(failure, BaseException)
+                        else failure,
+                    ),
+                    self.assertRaises(MODULE.GateError),
+                ):
+                    source_executor.run_bytes(
+                        ["git", "diff"],
+                        timeout=5,
+                        cwd=Path("/repository"),
+                    )
+
+    def test_system_git_resolution_ignores_the_package_build_path(self) -> None:
+        identity = MODULE.BuildIdentity(
+            os.geteuid(),
+            os.getegid(),
+            Path.home(),
+            False,
+        )
+        with tempfile.TemporaryDirectory(prefix="xenoteer-fake-git-") as temporary:
+            fake_git = Path(temporary) / "git"
+            self._write_executable(fake_git, "#!/bin/sh\nexit 99\n")
+            resolved = identity.resolve_system_executable(
+                "git",
+                source_environment={
+                    "PATH": str(fake_git.parent),
+                    "XENOTEER_PACKAGE_BUILD_PATH": str(fake_git.parent),
+                },
+            )
+
+        self.assertEqual(resolved, Path("/usr/bin/git"))
+
+    def test_system_git_resolution_has_no_untrusted_fallback(self) -> None:
+        identity = MODULE.BuildIdentity(
+            os.geteuid(),
+            os.getegid(),
+            Path.home(),
+            False,
+        )
+        with tempfile.TemporaryDirectory(prefix="xenoteer-untrusted-git-") as temporary:
+            directory = Path(temporary)
+            fake_git = directory / "git"
+            self._write_executable(fake_git, "#!/bin/sh\nexit 0\n")
+            fake_git.chmod(0o777)
+            with (
+                mock.patch.object(
+                    MODULE,
+                    "TRUSTED_SYSTEM_PATH",
+                    str(directory),
+                ),
+                self.assertRaisesRegex(
+                    MODULE.GateError,
+                    "required system executable is unavailable",
+                ),
+            ):
+                identity.resolve_system_executable(
+                    "git",
+                    source_environment={
+                        "PATH": str(directory),
+                        "XENOTEER_PACKAGE_BUILD_PATH": str(directory),
+                    },
+                )
+
+    def test_real_source_identity_boundary_preserves_binary_and_untracked_inputs(
+        self,
+    ) -> None:
+        if os.geteuid() == 0:
+            self.skipTest("the harmless real boundary seam requires non-root")
+        with tempfile.TemporaryDirectory(prefix="xenoteer-git-boundary-") as temporary:
+            repository = Path(temporary)
+            subprocess.run(
+                ["/usr/bin/git", "init", "--quiet", str(repository)],
+                check=True,
+                timeout=5,
+            )
+            tracked = repository / "tracked.bin"
+            tracked.write_bytes(b"baseline\n")
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(repository), "add", "tracked.bin"],
+                check=True,
+                timeout=5,
+            )
+            commit_environment = dict(os.environ)
+            commit_environment.update(
+                {
+                    "GIT_AUTHOR_NAME": "Xenoteer Test",
+                    "GIT_AUTHOR_EMAIL": "xenoteer@example.invalid",
+                    "GIT_COMMITTER_NAME": "Xenoteer Test",
+                    "GIT_COMMITTER_EMAIL": "xenoteer@example.invalid",
+                }
+            )
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(repository), "commit", "--quiet", "-m", "base"],
+                check=True,
+                env=commit_environment,
+                timeout=5,
+            )
+            tracked.write_bytes(b"baseline\n\x00\xffchanged\n")
+            untracked = repository / "untracked.bin"
+            untracked.write_bytes(b"\x00\xffuntracked\n")
+            untracked.chmod(0o600)
+            identity = MODULE.BuildIdentity.current()
+            source_executor = MODULE.SourceIdentityExecutor(
+                identity,
+                MODULE.CommandExecutor(),
+                identity.resolve_system_executable("git"),
+            )
+
+            observed = MODULE.current_source_tree_hash(
+                repository,
+                source_executor,
+            )
+            expected_diff = subprocess.run(
+                [
+                    "/usr/bin/git",
+                    "-C",
+                    str(repository),
+                    "diff",
+                    "--binary",
+                    "--no-ext-diff",
+                    "HEAD",
+                    "--",
+                ],
+                check=True,
+                capture_output=True,
+                timeout=5,
+            ).stdout
+            head = subprocess.run(
+                ["/usr/bin/git", "-C", str(repository), "rev-parse", "--verify", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout.strip()
+            expected = MODULE.source_snapshot_digest(
+                head,
+                expected_diff,
+                (
+                    MODULE.UntrackedSource(
+                        "untracked.bin",
+                        "600",
+                        MODULE.file_sha256(untracked),
+                    ),
+                ),
+            )
+
+        self.assertEqual(observed, expected)
 
     def test_fake_docker_in_package_path_cannot_execute_at_root_boundary(
         self,
@@ -1826,10 +2229,12 @@ class PublicQuickstartContractTests(unittest.TestCase):
         toolchain = MODULE.PackageToolchain(
             Path("/installed/node"),
             Path("/installed/npm"),
+            Path("/usr/bin/git"),
             (Path("/trusted/package-bin"),),
             (24, 18, 0),
         )
         executor = RecordingExecutor()
+        source_executor = object()
 
         def inspect(
             _: object,
@@ -1854,7 +2259,7 @@ class PublicQuickstartContractTests(unittest.TestCase):
                     MODULE,
                     "current_source_tree_hash",
                     return_value=artifacts.source_tree_sha256,
-                ),
+                ) as source_hash,
             ):
                 MODULE.run_live_gate(
                     Path("/repository"),
@@ -1865,9 +2270,14 @@ class PublicQuickstartContractTests(unittest.TestCase):
                     executor,
                     identity,
                     toolchain,
+                    source_executor,
                 )
 
         self.assertEqual(run_one.call_count, 8)
+        source_hash.assert_called_once_with(
+            Path("/repository"),
+            source_executor,
+        )
         self.assertEqual(
             [call.kwargs["name"] for call in run_one.call_args_list],
             [
@@ -2568,7 +2978,8 @@ class PublicQuickstartContractTests(unittest.TestCase):
         self,
     ) -> None:
         identity = object()
-        toolchain = object()
+        toolchain = SimpleNamespace(git=Path("/usr/bin/git"))
+        source_executor = object()
         source_tree = "a1" * 32
         image = SimpleNamespace(
             fixture_id="sha256:" + ("b2" * 32),
@@ -2589,12 +3000,17 @@ class PublicQuickstartContractTests(unittest.TestCase):
                 "resolve_package_toolchain",
                 return_value=toolchain,
             ) as resolve,
+            mock.patch.object(
+                MODULE,
+                "SourceIdentityExecutor",
+                return_value=source_executor,
+            ) as source_executor_factory,
             mock.patch.object(MODULE, "resolve_exact_image", return_value=image),
             mock.patch.object(
                 MODULE,
                 "current_source_tree_hash",
                 return_value=source_tree,
-            ),
+            ) as source_hash,
             mock.patch.object(MODULE, "chown_tree"),
             mock.patch.object(MODULE, "validate_fixture_runtime_parity"),
             mock.patch.object(
@@ -2612,9 +3028,22 @@ class PublicQuickstartContractTests(unittest.TestCase):
             MODULE.qualify(image.production_id)
 
         self.assertIs(resolve.call_args.args[0], identity)
+        source_executor_factory.assert_called_once_with(
+            identity,
+            mock.ANY,
+            toolchain.git,
+        )
+        self.assertEqual(source_hash.call_count, 3)
+        self.assertTrue(
+            all(
+                call.args[1] is source_executor
+                for call in source_hash.call_args_list
+            )
+        )
         self.assertIs(stage.call_args.args[-1], toolchain)
         self.assertIs(prepare.call_args.args[-1], toolchain)
-        self.assertIs(live.call_args.args[-1], toolchain)
+        self.assertIs(live.call_args.args[-2], toolchain)
+        self.assertIs(live.call_args.args[-1], source_executor)
 
     def test_installed_quickstarts_do_not_pass_environment_discarded_by_env_i(
         self,

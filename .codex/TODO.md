@@ -199,12 +199,12 @@ Plan: `plans/15-phased-implementation.md`
             seven-lane order without wrapping the three self-locking lanes
         - [x] Close the real sudo-to-invoking-user util-linux `flock` permission
               boundary; mocked/read-descriptor locking is not sufficient
-      - [ ] Commit and push the qualification repair, build a new coherent
+      - [x] Commit and push the qualification repair, build a new coherent
             pair, and restart at lane 1
         - [x] Run focused/static source gates, the real shared-lock boundary,
               and independent security/portability review
         - [x] Commit and push the qualification repair
-        - [ ] Build a new coherent production/fixture pair and restart the
+        - [x] Build a new coherent production/fixture pair and restart the
               canonical seven-lane qualification at lane 1
     - [x] Reject source `c1f5caf` production `424a5e9e` / fixture `7c8ea2bd`
           after lanes 1-4 passed first-run but lane 5 passed the raw immutable
@@ -238,6 +238,22 @@ Plan: `plans/15-phased-implementation.md`
       - [x] Run focused/static gates, a real root-to-invoking-user npm build
             probe, and independent security/portability review before committing
             and building one new coherent pair
+    - [x] Reject source `eb74370` production `47f986ed` / fixture `88306942`
+          after lanes 1-6 passed first-run but lane 7 rejected before image
+          inspection because the fixed root command environment no longer
+          inherited a Git `safe.directory` exception for the user-owned checkout
+      - [x] Reproduce the exact dubious-ownership failure before editing and map
+            every Git/source-identity producer, executor, fence, and Docker
+            boundary
+      - [x] Run Git source-identity reads as the validated invoking user without
+            root/global `safe.directory`, ambient Git configuration, a shell, or
+            weakening the fixed root Docker environment
+      - [x] Prove text/binary Git output, root/non-root identity, hostile
+            environment, missing tools, timeouts, all four source fences, and
+            root-only Docker separation
+      - [x] Run focused/static gates, a real root-to-invoking-user Git proof,
+            and independent security/portability review before committing and
+            building one replacement coherent pair
     - [x] Reject source `b01405a` production `a650e129` / fixture `356225fe`
           after lanes 1-3 passed first-run but the lane-4 host runner exited 77
           before exercising the image because sudo's secure `PATH` hid Cargo

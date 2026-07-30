@@ -168,6 +168,7 @@ class PackageToolchain:
 
     node: Path
     npm: Path
+    git: Path
     path: tuple[Path, ...]
     version: tuple[int, int, int]
 
@@ -407,6 +408,45 @@ class BuildIdentity:
                 return candidate
         raise GateError(f"required package build executable is unavailable: {requested.name}")
 
+    def resolve_system_executable(
+        self,
+        executable: str,
+        *,
+        source_environment: Mapping[str, str] | None = None,
+    ) -> Path:
+        """Resolve one root-owned executable only from the fixed system path."""
+
+        del source_environment
+        requested = Path(executable)
+        if (
+            not executable
+            or "\0" in executable
+            or requested.is_absolute()
+            or requested.parent != Path(".")
+            or requested.name != executable
+        ):
+            raise GateError("system executable must be one bare name")
+        for raw_directory in TRUSTED_SYSTEM_PATH.split(os.pathsep):
+            directory = Path(raw_directory)
+            if not raw_directory or not directory.is_absolute():
+                raise GateError("trusted system PATH is malformed")
+            try:
+                resolved_directory = directory.resolve(strict=True)
+            except OSError:
+                continue
+            if not self._is_trusted_directory(
+                resolved_directory,
+                allowed_owners={0},
+            ):
+                continue
+            candidate = resolved_directory / executable
+            if self._is_trusted_executable(
+                candidate,
+                allowed_owners={0},
+            ):
+                return candidate
+        raise GateError(f"required system executable is unavailable: {requested.name}")
+
     def command(
         self,
         command: Sequence[str],
@@ -505,6 +545,41 @@ class CommandExecutor:
             "USER": account.pw_name,
         }
 
+    @staticmethod
+    def _credential_options(
+        identity: BuildIdentity | None,
+    ) -> dict[str, object]:
+        if identity is None:
+            return {}
+        if identity.uid <= 0:
+            raise GateError("quick-start target identity cannot be root")
+        if identity.gid <= 0:
+            raise GateError("quick-start target group is invalid")
+        if identity.use_sudo:
+            if os.geteuid() != 0:
+                raise GateError(
+                    "sudo quick-start boundary requires a root outer process"
+                )
+            return {
+                "user": identity.uid,
+                "group": identity.gid,
+                "extra_groups": (),
+            }
+        if os.geteuid() != identity.uid or os.getegid() != identity.gid:
+            raise GateError(
+                "rootless quick-start identity differs from current process identity"
+            )
+        return {}
+
+    def _child_environment(
+        self,
+        source_environment: Mapping[str, str] | None,
+        identity: BuildIdentity | None,
+    ) -> dict[str, str]:
+        if identity is None:
+            return self._root_environment(source_environment)
+        return {} if source_environment is None else dict(source_environment)
+
     def _run(
         self,
         command: Sequence[str],
@@ -519,39 +594,12 @@ class CommandExecutor:
             raise GateError(f"invalid subprocess timeout: {timeout}")
         if not command:
             raise GateError("subprocess command is empty")
-        credential_options: dict[str, object] = {}
-        if identity is not None:
-            if identity.uid <= 0:
-                raise GateError("quick-start target identity cannot be root")
-            if identity.gid <= 0:
-                raise GateError("quick-start target group is invalid")
-            if identity.use_sudo:
-                if os.geteuid() != 0:
-                    raise GateError(
-                        "sudo quick-start boundary requires a root outer process"
-                    )
-                credential_options = {
-                    "user": identity.uid,
-                    "group": identity.gid,
-                    "extra_groups": (),
-                }
-            elif (
-                os.geteuid() != identity.uid
-                or os.getegid() != identity.gid
-            ):
-                raise GateError(
-                    "rootless quick-start identity differs from current process identity"
-                )
+        credential_options = self._credential_options(identity)
         try:
-            child_environment = (
-                self._root_environment(env)
-                if identity is None
-                else dict(env or {})
-            )
             completed = subprocess.run(
                 list(command),
                 cwd=cwd,
-                env=child_environment,
+                env=self._child_environment(env, identity),
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -572,6 +620,21 @@ class CommandExecutor:
             raise GateError(
                 f"command returned invalid UTF-8: {safe_command(command)}"
             ) from error
+        except ValueError as error:
+            raise GateError(
+                f"could not launch command: {safe_command(command)}"
+            ) from error
+        except OSError as error:
+            raise GateError(
+                f"could not launch command: {safe_command(command)}"
+            ) from error
+        if not isinstance(completed.stdout, str) or not isinstance(
+            completed.stderr,
+            str,
+        ):
+            raise GateError(
+                f"command returned invalid text output: {safe_command(command)}"
+            )
         result = CommandResult(completed.returncode, completed.stdout, completed.stderr)
         if check and result.returncode != 0:
             detail = safe_diagnostic(result.stderr or result.stdout)
@@ -793,26 +856,185 @@ class CommandExecutor:
         timeout: int,
         cwd: Path | None = None,
     ) -> bytes:
+        return self._run_bytes(
+            command,
+            timeout=timeout,
+            cwd=cwd,
+            env=None,
+            identity=None,
+        )
+
+    def run_bytes_as_identity(
+        self,
+        command: Sequence[str],
+        *,
+        identity: BuildIdentity,
+        timeout: int,
+        env: Mapping[str, str],
+        cwd: Path | None = None,
+    ) -> bytes:
+        """Run a byte-exact command as the validated non-root build identity."""
+
+        return self._run_bytes(
+            command,
+            timeout=timeout,
+            cwd=cwd,
+            env=env,
+            identity=identity,
+        )
+
+    def _run_bytes(
+        self,
+        command: Sequence[str],
+        *,
+        timeout: int,
+        cwd: Path | None,
+        env: Mapping[str, str] | None,
+        identity: BuildIdentity | None,
+    ) -> bytes:
         if timeout <= 0 or timeout > DEFAULT_COMMAND_TIMEOUT_SECONDS:
             raise GateError(f"invalid binary subprocess timeout: {timeout}")
+        if not command:
+            raise GateError("binary subprocess command is empty")
+        credential_options = self._credential_options(identity)
         try:
             completed = subprocess.run(
                 list(command),
                 cwd=cwd,
-                env=self._root_environment(None),
+                env=self._child_environment(env, identity),
                 capture_output=True,
+                text=False,
                 timeout=timeout,
                 check=False,
+                **credential_options,
             )
         except FileNotFoundError as error:
             raise GateError(f"required command is unavailable: {command[0]}") from error
+        except PermissionError as error:
+            raise GateError(
+                f"could not launch command: {safe_command(command)}"
+            ) from error
+        except ValueError as error:
+            raise GateError(
+                f"could not launch command: {safe_command(command)}"
+            ) from error
         except subprocess.TimeoutExpired as error:
             raise GateError(
                 f"command exceeded its {timeout}s bound: {safe_command(command)}"
             ) from error
+        except OSError as error:
+            raise GateError(
+                f"could not launch command: {safe_command(command)}"
+            ) from error
         if completed.returncode != 0:
             raise GateError(f"command failed: {safe_command(command)}")
+        if not isinstance(completed.stdout, bytes):
+            raise GateError(
+                f"command returned invalid binary output: {safe_command(command)}"
+            )
         return completed.stdout
+
+
+@dataclasses.dataclass(frozen=True)
+class SourceIdentityExecutor:
+    """Run shared source-identity Git reads as the validated invoking user."""
+
+    identity: BuildIdentity
+    executor: CommandExecutor
+    git: Path
+    _environment: tuple[tuple[str, str], ...] = dataclasses.field(
+        init=False,
+        repr=False,
+    )
+
+    def __post_init__(self) -> None:
+        if self.identity.uid <= 0 or self.identity.gid <= 0:
+            raise GateError("source identity target must be a non-root user")
+        try:
+            account = pwd.getpwuid(self.identity.uid)
+        except KeyError as error:
+            raise GateError("source identity target has no local account") from error
+        if (
+            account.pw_uid != self.identity.uid
+            or account.pw_gid != self.identity.gid
+            or account.pw_dir != str(self.identity.home)
+            or not account.pw_dir.startswith("/")
+            or not account.pw_name
+            or "\0" in account.pw_name
+            or "\0" in account.pw_dir
+        ):
+            raise GateError("source identity target differs from its local account")
+        if (
+            not self.git.is_absolute()
+            or not self.identity._is_trusted_executable(  # noqa: SLF001
+                self.git,
+                allowed_owners={0},
+            )
+        ):
+            raise GateError("source identity Git executable is unavailable or untrusted")
+        object.__setattr__(
+            self,
+            "_environment",
+            (
+                ("HOME", account.pw_dir),
+                ("LANG", "C"),
+                ("LC_ALL", "C"),
+                ("LOGNAME", account.pw_name),
+                ("PATH", TRUSTED_SYSTEM_PATH),
+                ("USER", account.pw_name),
+            ),
+        )
+
+    def _git_command(
+        self,
+        command: Sequence[str],
+        *,
+        timeout: int,
+        cwd: Path | None,
+    ) -> list[str]:
+        if timeout <= 0 or timeout > DEFAULT_COMMAND_TIMEOUT_SECONDS:
+            raise GateError("source identity command has an invalid execution bound")
+        if cwd is None or not cwd.is_absolute():
+            raise GateError("source identity command requires an absolute repository")
+        if (
+            not command
+            or command[0] != "git"
+            or any(not isinstance(value, str) or "\0" in value for value in command)
+        ):
+            raise GateError("source identity executor accepts only valid Git commands")
+        return [str(self.git), *command[1:]]
+
+    def run(
+        self,
+        command: Sequence[str],
+        *,
+        timeout: int,
+        cwd: Path | None = None,
+    ) -> CommandResult:
+        lowered = self._git_command(command, timeout=timeout, cwd=cwd)
+        return self.executor.run_as_identity(
+            lowered,
+            identity=self.identity,
+            timeout=timeout,
+            env=dict(self._environment),
+            cwd=cwd,
+        )
+
+    def run_bytes(
+        self,
+        command: Sequence[str],
+        *,
+        timeout: int,
+        cwd: Path | None = None,
+    ) -> bytes:
+        lowered = self._git_command(command, timeout=timeout, cwd=cwd)
+        return self.executor.run_bytes_as_identity(
+            lowered,
+            identity=self.identity,
+            timeout=timeout,
+            env=dict(self._environment),
+            cwd=cwd,
+        )
 
 
 def _stable_node_version(value: str) -> tuple[int, int, int] | None:
@@ -1086,7 +1308,14 @@ def resolve_package_toolchain(
         node,
         npm,
     )
-    toolchain = PackageToolchain(node, npm, trusted_path, (0, 0, 0))
+    git = identity.resolve_system_executable("git")
+    toolchain = PackageToolchain(
+        node,
+        npm,
+        git,
+        trusted_path,
+        (0, 0, 0),
+    )
     result = executor.run_probe(
         identity.command(
             (str(node), "--version"),
@@ -2313,6 +2542,7 @@ def run_live_gate(
     executor: CommandExecutor,
     identity: BuildIdentity,
     toolchain: PackageToolchain,
+    source_executor: SourceIdentityExecutor,
 ) -> None:
     """Exercise every archive variant in fresh exact-fixture state."""
 
@@ -2465,7 +2695,10 @@ def run_live_gate(
                 (token, wrong_token),
             )
 
-    final_source_tree_sha256 = current_source_tree_hash(repository_root, executor)
+    final_source_tree_sha256 = current_source_tree_hash(
+        repository_root,
+        source_executor,
+    )
     if final_source_tree_sha256 != artifacts.source_tree_sha256:
         raise GateError("source tree changed while the public quick-start gate was running")
 
@@ -2478,8 +2711,9 @@ def qualify(image_reference: str) -> dict[str, str]:
     executor = CommandExecutor()
     identity = BuildIdentity.current()
     toolchain = resolve_package_toolchain(identity, executor)
+    source_executor = SourceIdentityExecutor(identity, executor, toolchain.git)
     image = resolve_exact_image(executor, image_reference)
-    current_hash = current_source_tree_hash(repository_root, executor)
+    current_hash = current_source_tree_hash(repository_root, source_executor)
     if current_hash != image.source_tree_sha256:
         raise GateError(
             "production image source identity differs from the current package tree"
@@ -2504,7 +2738,10 @@ def qualify(image_reference: str) -> dict[str, str]:
             identity,
             toolchain,
         )
-        after_staging_hash = current_source_tree_hash(repository_root, executor)
+        after_staging_hash = current_source_tree_hash(
+            repository_root,
+            source_executor,
+        )
         if after_staging_hash != image.source_tree_sha256:
             raise GateError(
                 "source tree changed after the release-candidate image or during packaging"
@@ -2517,7 +2754,10 @@ def qualify(image_reference: str) -> dict[str, str]:
             identity,
             toolchain,
         )
-        before_live_hash = current_source_tree_hash(repository_root, executor)
+        before_live_hash = current_source_tree_hash(
+            repository_root,
+            source_executor,
+        )
         if before_live_hash != image.source_tree_sha256:
             raise GateError(
                 "source tree changed while installed quick-start consumers were prepared"
@@ -2531,6 +2771,7 @@ def qualify(image_reference: str) -> dict[str, str]:
             executor,
             identity,
             toolchain,
+            source_executor,
         )
         return {
             "fixture_image": image.fixture_id,

@@ -42,18 +42,32 @@ orchestration boundary. When no supported NVM entry exists, fallback is allowed
 only when one fixed trusted system directory contains both Node and npm.
 
 The selected directory is carried into lane 7 through the dedicated
-`XENOTEER_PACKAGE_BUILD_PATH` channel while every root Docker/Git subprocess
+`XENOTEER_PACKAGE_BUILD_PATH` channel while every root Docker subprocess
 retains the fixed `/usr/sbin:/usr/bin:/sbin:/bin` PATH and a minimal
-password-database-derived environment. At the start of package use, the public
-runner binds only the first selected directory—deletion, replacement, or a raw
-PATH alias cannot fall through to Cargo or a later system directory. For NVM,
-it additionally requires a regular non-symlink `node`, one reviewed `npm`
-symlink, non-symlinked trusted path components to its in-root regular target,
-and an exact bounded `#!/usr/bin/env node` wrapper. It then drops to the
-invoking build identity for one output-bounded, process-group-bounded
-`node --version` probe and requires the runtime to equal the selected NVM
-directory. That same immutable node/npm pair and PATH snapshot reaches package
-assembly, archive installation, and installed quick-start verification.
+password-database-derived environment. Git is resolved separately, exactly
+once, from that fixed system PATH and must be a root-owned trusted executable;
+neither the package path nor caller `PATH` can supply it. One source-identity
+adapter then runs that exact Git as the validated invoking UID, primary GID,
+and no supplemental groups. Its environment contains only the invoking
+account's `HOME`, `USER`/`LOGNAME`, the fixed system `PATH`, and the C locale,
+so ambient `GIT_*`, loader, shell, credential, and root configuration variables
+cannot cross the boundary. It never adds `safe.directory` or reads root's Git
+configuration. Invoking-user and repository Git configuration can therefore
+execute only with that user's existing authority, never as root. The same
+adapter preserves byte-exact binary diff and NUL-delimited untracked output at
+all four source-tree fences: before image comparison, after staging, before
+live consumers, and after the live gate.
+
+At the start of package use, the public runner binds only the first selected
+Node/npm directory—deletion, replacement, or a raw PATH alias cannot fall
+through to Cargo or a later system directory. For NVM, it additionally requires
+a regular non-symlink `node`, one reviewed `npm` symlink, non-symlinked trusted
+path components to its in-root regular target, and an exact bounded
+`#!/usr/bin/env node` wrapper. It then drops to the invoking build identity for
+one output-bounded, process-group-bounded `node --version` probe and requires
+the runtime to equal the selected NVM directory. That same immutable node/npm
+pair and PATH snapshot reaches package assembly, archive installation, and
+installed quick-start verification.
 
 The shared heavy-build lock is the one intentional ownership exception:
 after validating `SUDO_UID`/`SUDO_GID` against the checkout and local account,
