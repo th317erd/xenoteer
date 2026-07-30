@@ -1431,3 +1431,73 @@
   removed without globs. No reservation remains. Retained diagnostic image
   `xenoteer:iid-smoke-3749016` remains untouched at
   `sha256:58325d7ac5e9443d5c246e97cbfa14382711ecd95cdf1ddfeff7f4d0d4fe7b8b`.
+- Clean source commit `439d45e1d736ecf3e657e2625207ee4215780cbe`
+  produced production image
+  `sha256:0c50f668030caaa403668efd619a82d1c3af17deb2faf3b25e63658ae60747b7`
+  and exact derived fixture
+  `sha256:0784d251d85c4240f2a24e5dc5b9464daa648afb1c0936320ae4b6b7e9ab8b9b`.
+  Both record clean source tree
+  `e4855a78e8534cd4e85bb5281ee4dfc3245a0d1e1ff3035fd3226add24f19525`
+  and dependency lock
+  `b7db3b0586412ff866441664a8ce11eaee23cc3172f1d9733e41e3d5f2524151`.
+  Production and fixture build logs have SHA-256
+  `a552628eeb0f97be23f74bd861ded07cbfc60c9248a2530b065fe1e6153332f5`
+  and
+  `d6eeda88fa2e58e7ddf7f53549fdc3184ec8607bca6aff31a2219e37c52e76c2`.
+- That pair is permanently rejected after its only canonical qualification
+  attempt. Lanes 1-6 passed: Phase-5 AT-SPI live, production lifecycle,
+  Phase-4 live fixtures, Phase-4 event flood, exact-ID noVNC, and the desktop
+  application matrix. Their log SHA-256 values are respectively
+  `28ef8088296cea1f7fb32eeb47b42dab0f807125f2373f184f9bbba2321854d6`,
+  `47629c46fbbfa7cf7f69a6a1da2706ff9cf8624193d72fd338672be631cd1fb7`,
+  `8120aa31a608be5db7cd85384cf5ffc5bff6ff0107a8aa1c32b819a62cdb6ea7`,
+  `a816cd4e817e6e23760e90d174fbfad28bfa253e4ae4eb557d02373c71f14b1e`,
+  `83f7908c73b03e93943365b6234bf5366ac36fe8b70aea06dac434e1ea3e9533`,
+  and
+  `521218f5a16f0e54b03712376603a7e9110ca1c1d71426546da46f2c2746be43`.
+  Lane 7 rejected in 1.787 seconds with
+  `required package build executable is unavailable: npm`; its log SHA-256 is
+  `45c7e3e9be0a69d10a4cff6832a7c61313d2d92d7569e393908ffc44a3606ad0`.
+  Attempt-manifest SHA-256 is
+  `2a70d194ce729b98e40594794f49dfce728cde459467af07f29787e05ed6948a`
+  and canonical stdout SHA-256 is
+  `62a3cddd3896e917ea1b4ebf6e3a3318383f13f1b1bdbf8c7c428cd967434aac`.
+- The rejected source's immediate cause is deterministic: its root runner's
+  `_package_tool_path` produced only
+  `/home/wyatt/.cargo/bin:/usr/sbin:/usr/bin:/sbin:/bin`, while this host's
+  supported Node 24/npm installation exists only at
+  `/home/wyatt/.nvm/versions/node/v24.18.0/bin`. The fix must not source
+  user-controlled shell initialization or forward the caller's ambient
+  `PATH`; it must preserve the existing post-sudo ownership, primary-group,
+  traversal, symlink-target, executable, and clean-environment validation.
+- The corrected lane-7 boundary discovers supported Node 22/24 installations
+  without executing user shell initialization or forwarding the caller's
+  ambient environment. The qualifier performs a deterministic, filesystem-only
+  scan of at most 64 NVM version entries, otherwise admits only a coherent
+  same-directory root-owned system pair, and passes the result solely through
+  `XENOTEER_PACKAGE_BUILD_PATH`. Root Docker/Git operations retain the fixed
+  `/usr/sbin:/usr/bin:/sbin:/bin` environment.
+- The public package runner consumes only the first exact selected path entry,
+  rejects aliases and replacement fallback, validates a canonical regular NVM
+  `node` plus the in-root `npm` symlink target component-by-component with
+  no-follow descriptors, and requires the exact bounded
+  `#!/usr/bin/env node` wrapper. It then runs one output-, time-, and
+  process-group-bounded version probe after dropping to the invoking identity
+  and threads the same immutable toolchain through staging, installation, and
+  live execution.
+- Coordinator focused evidence is public quick-starts 70/70, qualifier 72/72,
+  and CI contract 33/33. Their log SHA-256 values are respectively
+  `1b58a876f931ad5c885161232890cc6c3cd70d1ecde108f9e9c199d1a2fa4c7e`,
+  `51d032514a2f4a33d006bdfa4d567fdd31ebf08ba42f5b56bbbd1767946987c7`,
+  and
+  `c5cb0cd52790b4159711a56a0f0cdaea819127a718ed847b451c56f975819c0c`.
+  The complete low-priority static gate also passes; its log SHA-256 is
+  `a9a1e7e773412694365e6fb4a7d5ac82fa0921c51690a3122ad9ec2f5a2ba861`.
+- A real root-to-invoking-user proof ran with a deliberately hostile root
+  `PATH`, retained the fixed system-only root command boundary, selected exact
+  Node 24.18.0/npm 12.0.1 from the invoking user's NVM tree, and executed the
+  package tools as UID/GID 1000. Its log SHA-256 is
+  `b5ad21e9d415731f5da4079ef7e338f6b613c062609ebe1dccc6ec8a217b65f9`.
+  The fresh independent frozen-source review reports zero High, zero Medium,
+  and zero Low findings after independently passing the same 70/72/33 focused
+  suites and verifying every supplied source hash before and after review.

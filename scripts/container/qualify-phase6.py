@@ -39,6 +39,10 @@ from qualification_identity import (  # noqa: E402
     validate_exact_image_ids,
     validate_release_image_metadata,
 )
+from public_quickstarts import (  # noqa: E402
+    BuildIdentity as PublicQuickstartBuildIdentity,
+    GateError as PublicQuickstartError,
+)
 
 
 IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -52,6 +56,17 @@ IONICE = Path("/usr/bin/ionice")
 DOCKER = Path("/usr/bin/docker")
 GIT = Path("/usr/bin/git")
 TRUSTED_SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+SUPPORTED_NODE_MAJORS = frozenset({22, 24})
+SUPPORTED_NODE_MAJOR_NAMES = frozenset(
+    str(major) for major in SUPPORTED_NODE_MAJORS
+)
+NODE_VERSION_DECIMAL = r"(?:0|[1-9][0-9]{0,9})"
+STABLE_NODE_VERSION = re.compile(
+    rf"v(?P<major>{NODE_VERSION_DECIMAL})"
+    rf"\.(?P<minor>{NODE_VERSION_DECIMAL})"
+    rf"\.(?P<patch>{NODE_VERSION_DECIMAL})\Z"
+)
+MAX_NVM_NODE_ENTRIES = 64
 TRUSTED_PROBE_ENVIRONMENT = {
     "LANG": "C",
     "LC_ALL": "C",
@@ -217,15 +232,275 @@ def _package_tool_path(
     repository_root: Path,
     source_environment: Mapping[str, str],
 ) -> str:
-    invoking_uid, _ = _validated_invoking_identity(
+    invoking_uid, invoking_gid = _validated_invoking_identity(
         repository_root,
         source_environment,
     )
     try:
-        invoking_home = pwd.getpwuid(invoking_uid).pw_dir
+        account = pwd.getpwuid(invoking_uid)
     except KeyError as error:
         raise QualificationError("invoking build identity has no local account") from error
-    return f"{invoking_home}/.cargo/bin:{TRUSTED_SYSTEM_PATH}"
+    invoking_home = Path(account.pw_dir)
+    if (
+        account.pw_gid != invoking_gid
+        or not invoking_home.is_absolute()
+        or any(character in account.pw_dir for character in ("\0", "\n", os.pathsep))
+    ):
+        raise QualificationError("invoking build identity is inconsistent")
+    identity = PublicQuickstartBuildIdentity(
+        invoking_uid,
+        invoking_gid,
+        invoking_home,
+        os.geteuid() == 0 and invoking_uid != 0,
+    )
+    nvm_bin = _trusted_nvm_toolchain_bin(identity, invoking_home)
+    selected_bin = (
+        nvm_bin
+        if nvm_bin is not None
+        else _trusted_system_toolchain_bin(identity)
+    )
+    if selected_bin is None:
+        raise QualificationError(
+            "supported Node 22 or 24 with coherent npm is unavailable"
+        )
+    return os.pathsep.join(
+        (
+            str(selected_bin),
+            str(invoking_home / ".cargo/bin"),
+            TRUSTED_SYSTEM_PATH,
+        )
+    )
+
+
+def _trusted_non_symlink_directory(
+    identity: PublicQuickstartBuildIdentity,
+    directory: Path,
+    *,
+    root_owned: bool = False,
+) -> bool:
+    try:
+        metadata = directory.lstat()
+        resolved = directory.resolve(strict=True)
+    except OSError:
+        return False
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or resolved != directory
+        or stat.S_ISLNK(metadata.st_mode)
+        or (
+            root_owned
+            and not _root_owned_without_nonroot_writes(metadata)
+        )
+    ):
+        return False
+    allowed_owners = {0} if root_owned else {0, identity.uid}
+    return identity._is_trusted_directory(  # noqa: SLF001
+        directory,
+        allowed_owners=allowed_owners,
+    )
+
+
+def _trusted_toolchain_pair(
+    identity: PublicQuickstartBuildIdentity,
+    toolchain_bin: Path,
+    *,
+    required_root: Path | None,
+    root_owned_targets: bool = False,
+) -> tuple[Path, Path] | None:
+    source_environment = {"PATH": str(toolchain_bin)}
+    try:
+        node_executable = identity.resolve_executable(
+            "node",
+            source_environment=source_environment,
+        )
+        npm_executable = identity.resolve_executable(
+            "npm",
+            source_environment=source_environment,
+        )
+        resolved_bin = toolchain_bin.resolve(strict=True)
+        node_target = node_executable.resolve(strict=True)
+        npm_target = npm_executable.resolve(strict=True)
+        node_parent = node_executable.parent.resolve(strict=True)
+        npm_parent = npm_executable.parent.resolve(strict=True)
+    except (OSError, PublicQuickstartError):
+        return None
+    if node_parent != resolved_bin or npm_parent != resolved_bin:
+        return None
+    if required_root is not None:
+        try:
+            resolved_root = required_root.resolve(strict=True)
+        except OSError:
+            return None
+        if (
+            not node_target.is_relative_to(resolved_root)
+            or not npm_target.is_relative_to(resolved_root)
+        ):
+            return None
+    if root_owned_targets and (
+        not _strict_root_owned_system_executable(identity, node_executable)
+        or not _strict_root_owned_system_executable(identity, npm_executable)
+    ):
+        return None
+    return node_executable, npm_executable
+
+
+def _strict_root_owned_system_executable(
+    identity: PublicQuickstartBuildIdentity,
+    executable: Path,
+) -> bool:
+    try:
+        target = executable.resolve(strict=True)
+        metadata = target.stat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and _root_owned_without_nonroot_writes(metadata)
+        and all(
+            _trusted_non_symlink_directory(
+                identity,
+                directory,
+                root_owned=True,
+            )
+            for directory in (target.parent, *target.parent.parents)
+        )
+    )
+
+
+def _root_owned_without_nonroot_writes(metadata: os.stat_result) -> bool:
+    return (
+        metadata.st_uid == 0
+        and not metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    )
+
+
+def _nvm_version(
+    name: str,
+) -> tuple[int, int, int] | None:
+    match = STABLE_NODE_VERSION.fullmatch(name)
+    if match is None:
+        return None
+    return tuple(
+        int(match.group(component))
+        for component in ("major", "minor", "patch")
+    )
+
+
+def _purports_supported_node_major(name: str) -> bool:
+    if not name.startswith("v"):
+        return False
+    end = 1
+    while end < len(name) and "0" <= name[end] <= "9":
+        end += 1
+    if end == 1:
+        return False
+    normalized = name[1:end].lstrip("0") or "0"
+    return normalized in SUPPORTED_NODE_MAJOR_NAMES
+
+
+def _trusted_nvm_toolchain_bin(
+    identity: PublicQuickstartBuildIdentity,
+    invoking_home: Path,
+) -> Path | None:
+    versions_root = invoking_home / ".nvm/versions/node"
+    try:
+        versions_root.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise QualificationError(
+            "supported NVM Node installation is untrusted or incomplete"
+        ) from error
+    layout_directories = (
+        invoking_home,
+        invoking_home / ".nvm",
+        invoking_home / ".nvm/versions",
+        versions_root,
+    )
+    if any(
+        not _trusted_non_symlink_directory(identity, directory)
+        for directory in layout_directories
+    ):
+        raise QualificationError(
+            "supported NVM Node installation is untrusted or incomplete"
+        )
+    entries: list[Path] = []
+    try:
+        for entry in versions_root.iterdir():
+            if len(entries) >= MAX_NVM_NODE_ENTRIES:
+                raise QualificationError("too many NVM Node entries")
+            entries.append(entry)
+    except OSError as error:
+        raise QualificationError(
+            "supported NVM Node installation is untrusted or incomplete"
+        ) from error
+    entries.sort(key=lambda path: path.name)
+    supported: list[tuple[tuple[int, int, int], Path]] = []
+    for entry in entries:
+        version = _nvm_version(entry.name)
+        if version is None:
+            if _purports_supported_node_major(entry.name):
+                raise QualificationError(
+                    "malformed supported NVM Node version"
+                )
+            continue
+        if version[0] not in SUPPORTED_NODE_MAJORS:
+            continue
+        bin_directory = entry / "bin"
+        if (
+            not _trusted_non_symlink_directory(identity, entry)
+            or not _trusted_non_symlink_directory(identity, bin_directory)
+        ):
+            raise QualificationError(
+                "supported NVM Node installation is untrusted or incomplete"
+            )
+        pair = _trusted_toolchain_pair(
+            identity,
+            bin_directory,
+            required_root=entry,
+        )
+        if pair is None:
+            raise QualificationError(
+                "supported NVM Node installation is untrusted or incomplete"
+            )
+        supported.append((version, bin_directory))
+    if not supported:
+        return None
+    return max(supported, key=lambda candidate: candidate[0])[1]
+
+
+def _trusted_system_toolchain_bin(
+    identity: PublicQuickstartBuildIdentity,
+) -> Path | None:
+    observed: set[Path] = set()
+    for raw_directory in TRUSTED_SYSTEM_PATH.split(os.pathsep):
+        directory = Path(raw_directory)
+        if (
+            not directory.is_absolute()
+            or not _trusted_non_symlink_directory(
+                identity,
+                directory,
+                root_owned=True,
+            )
+        ):
+            continue
+        try:
+            resolved = directory.resolve(strict=True)
+        except OSError:
+            continue
+        if resolved in observed:
+            continue
+        observed.add(resolved)
+        pair = _trusted_toolchain_pair(
+            identity,
+            directory,
+            required_root=None,
+            root_owned_targets=True,
+        )
+        if pair is None:
+            continue
+        return directory
+    return None
 
 
 def qualification_lanes(
@@ -308,7 +583,7 @@ def qualification_lanes(
             "public-quickstarts",
             fixture,
             (str(python), str(sdk / "test-public-quickstarts.py"), fixture),
-            (("PATH", package_tool_path),),
+            (("XENOTEER_PACKAGE_BUILD_PATH", package_tool_path),),
             LockMode.INNER,
             20 * 60,
             (15, 3),

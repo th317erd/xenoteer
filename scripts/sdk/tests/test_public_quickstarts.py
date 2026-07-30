@@ -11,14 +11,17 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -380,6 +383,99 @@ class PublicQuickstartContractTests(unittest.TestCase):
         path.write_text(contents, encoding="utf-8")
         path.chmod(0o755)
 
+    @staticmethod
+    def _node_probe_processes() -> set[int]:
+        observed: set[int] = set()
+        for process in Path("/proc").iterdir():
+            if not process.name.isdigit():
+                continue
+            try:
+                command = (process / "cmdline").read_bytes()
+            except OSError:
+                continue
+            arguments = command.split(b"\0")
+            if any(
+                argument.startswith(b"/tmp/xenoteer-node-probe-")
+                and argument.endswith(b"/node")
+                for argument in arguments
+            ):
+                observed.add(int(process.name))
+        return observed
+
+    @staticmethod
+    def _cleanup_probe_process_group(pid_file: Path, expected_root: Path) -> None:
+        try:
+            pid = int(pid_file.read_text(encoding="ascii"))
+            command = Path(f"/proc/{pid}/cmdline").read_bytes()
+            process_group = os.getpgid(pid)
+        except (OSError, ValueError):
+            return
+        if (
+            str(expected_root).encode() not in command
+            or process_group <= 1
+            or process_group == os.getpgrp()
+        ):
+            return
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        deadline = time.monotonic() + 1
+        while Path(f"/proc/{pid}").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+    def _install_canonical_nvm_toolchain(
+        self,
+        root: Path,
+        *,
+        version: str = "v24.18.0",
+    ) -> SimpleNamespace:
+        home = root / "home"
+        version_root = home / ".nvm/versions/node" / version
+        bin_directory = version_root / "bin"
+        bin_directory.mkdir(parents=True)
+        for directory in (
+            home,
+            home / ".nvm",
+            home / ".nvm/versions",
+            home / ".nvm/versions/node",
+            version_root,
+        ):
+            directory.chmod(0o775)
+        node = bin_directory / "node"
+        self._write_executable(
+            node,
+            f"#!/bin/sh\nprintf '%s\\n' {version}\n",
+        )
+        npm_target = version_root / "lib/node_modules/npm/bin/npm-cli.js"
+        npm_target.parent.mkdir(parents=True)
+        npm_target.write_bytes(b"#!/usr/bin/env node\nprocess.exitCode = 0;\n")
+        npm_target.chmod(0o775)
+        npm = bin_directory / "npm"
+        npm.symlink_to(os.path.relpath(npm_target, bin_directory))
+        identity = MODULE.BuildIdentity(
+            os.getuid(),
+            os.getgid(),
+            home,
+            False,
+        )
+        environment = {
+            "PATH": MODULE.TRUSTED_SYSTEM_PATH,
+            "XENOTEER_PACKAGE_BUILD_PATH": os.pathsep.join(
+                (str(bin_directory), MODULE.TRUSTED_SYSTEM_PATH)
+            ),
+        }
+        return SimpleNamespace(
+            home=home,
+            version_root=version_root,
+            bin=bin_directory,
+            node=node,
+            npm=npm,
+            npm_target=npm_target,
+            identity=identity,
+            environment=environment,
+        )
+
     def test_build_identity_preserves_a_sanitized_user_toolchain_across_sudo(
         self,
     ) -> None:
@@ -668,6 +764,577 @@ class PublicQuickstartContractTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(completed.stdout, "node-via-sanitized-path\n")
+
+    def test_package_build_path_channel_is_isolated_from_root_path(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="xenoteer-tools-") as temporary:
+            root = Path(temporary)
+            package_bin = root / "package-bin"
+            system_bin = root / "system-bin"
+            self._write_executable(package_bin / "node")
+            self._write_executable(package_bin / "npm")
+            self._write_executable(system_bin / "node")
+            identity = MODULE.BuildIdentity(
+                os.getuid(),
+                os.getgid(),
+                Path.home(),
+                False,
+            )
+            environment = {
+                "PATH": str(system_bin),
+                "XENOTEER_PACKAGE_BUILD_PATH": str(package_bin),
+            }
+
+            node = identity.resolve_executable(
+                "node",
+                source_environment=environment,
+            )
+            npm = identity.resolve_executable(
+                "npm",
+                source_environment=environment,
+            )
+
+            self.assertEqual(node, package_bin / "node")
+            self.assertEqual(npm, package_bin / "npm")
+            self.assertEqual(
+                identity.resolve_executable(
+                    "node",
+                    source_environment={"PATH": str(system_bin)},
+                ),
+                system_bin / "node",
+            )
+
+    def test_root_default_executor_forces_system_path_and_drops_package_path(
+        self,
+    ) -> None:
+        completed = subprocess.CompletedProcess(
+            ["docker", "version"],
+            0,
+            stdout="",
+            stderr="",
+        )
+        hostile_environment = {
+            "PATH": "/home/builder/.nvm/versions/node/v24.18.0/bin",
+            "XENOTEER_PACKAGE_BUILD_PATH": (
+                "/home/builder/.nvm/versions/node/v24.18.0/bin"
+            ),
+            "BASH_ENV": "/tmp/attacker.sh",
+            "DOCKER_CONFIG": "/tmp/docker",
+            "DOCKER_HOST": "tcp://attacker.invalid:2375",
+            "ENV": "/tmp/attacker.sh",
+            "GIT_CONFIG_GLOBAL": "/tmp/attacker.gitconfig",
+            "LD_PRELOAD": "/tmp/attacker.so",
+            "PYTHONPATH": "/tmp/attacker-python",
+            "ROOT_NON_PATH_CANARY": "must-not-cross",
+            "TMPDIR": "/tmp/attacker-tmp",
+        }
+        with (
+            mock.patch.dict(MODULE.os.environ, hostile_environment, clear=True),
+            mock.patch.object(
+                MODULE.subprocess,
+                "run",
+                return_value=completed,
+            ) as run,
+        ):
+            MODULE.CommandExecutor().run(
+                ["docker", "version"],
+                timeout=5,
+            )
+            MODULE.CommandExecutor().run_bytes(
+                ["git", "status"],
+                timeout=5,
+            )
+
+        self.assertEqual(run.call_count, 2)
+        for invocation in run.call_args_list:
+            environment = invocation.kwargs["env"]
+            self.assertEqual(
+                environment["PATH"],
+                MODULE.TRUSTED_SYSTEM_PATH,
+            )
+            self.assertEqual(
+                set(environment),
+                {"HOME", "LANG", "LC_ALL", "LOGNAME", "PATH", "USER"},
+            )
+            self.assertNotIn(
+                "XENOTEER_PACKAGE_BUILD_PATH",
+                environment,
+            )
+
+    def test_fake_docker_in_package_path_cannot_execute_at_root_boundary(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="xenoteer-root-path-") as temporary:
+            root = Path(temporary)
+            package_bin = root / "package-bin"
+            system_bin = root / "system-bin"
+            marker = root / "hijacked"
+            self._write_executable(
+                package_bin / "docker",
+                f"#!/bin/sh\n/usr/bin/touch {marker}\n",
+            )
+            system_bin.mkdir()
+            environment = {
+                "PATH": str(package_bin),
+                "XENOTEER_PACKAGE_BUILD_PATH": str(package_bin),
+            }
+
+            with (
+                mock.patch.dict(MODULE.os.environ, environment, clear=True),
+                mock.patch.object(
+                    MODULE,
+                    "TRUSTED_SYSTEM_PATH",
+                    str(system_bin),
+                ),
+                self.assertRaisesRegex(
+                    MODULE.GateError,
+                    "required command is unavailable: docker",
+                ),
+            ):
+                MODULE.CommandExecutor().run(
+                    ["docker", "version"],
+                    timeout=5,
+                )
+
+            self.assertFalse(marker.exists())
+
+    def test_canonical_nvm_toolchain_is_revalidated_once_at_package_use(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="xenoteer-nvm-use-") as temporary:
+            installed = self._install_canonical_nvm_toolchain(Path(temporary))
+
+            toolchain = MODULE.resolve_package_toolchain(
+                installed.identity,
+                MODULE.CommandExecutor(),
+                source_environment=installed.environment,
+            )
+
+            self.assertEqual(toolchain.node, installed.node)
+            self.assertEqual(toolchain.npm, installed.npm)
+            self.assertEqual(toolchain.version, (24, 18, 0))
+            self.assertEqual(
+                toolchain.path,
+                tuple(
+                    installed.identity._trusted_path(installed.environment)
+                ),
+            )
+
+    def test_post_qualifier_node_runtime_mutation_fails_at_package_use(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="xenoteer-nvm-use-") as temporary:
+            installed = self._install_canonical_nvm_toolchain(Path(temporary))
+            self._write_executable(
+                installed.node,
+                "#!/bin/sh\nprintf '%s\\n' v22.19.1\n",
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.GateError,
+                "does not match selected NVM version",
+            ):
+                MODULE.resolve_package_toolchain(
+                    installed.identity,
+                    MODULE.CommandExecutor(),
+                    source_environment=installed.environment,
+                )
+
+    def test_selected_package_toolchain_never_falls_back_after_mutation(
+        self,
+    ) -> None:
+        for case in ("delete-node", "replace-bin-with-alias"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(
+                prefix="xenoteer-nvm-use-"
+            ) as temporary:
+                root = Path(temporary)
+                installed = self._install_canonical_nvm_toolchain(root)
+                fallback = root / "fallback/bin"
+                self._write_executable(
+                    fallback / "node",
+                    "#!/bin/sh\nprintf '%s\\n' v22.19.1\n",
+                )
+                self._write_executable(fallback / "npm")
+                installed.environment["XENOTEER_PACKAGE_BUILD_PATH"] = (
+                    f"{installed.bin}{os.pathsep}{fallback}"
+                )
+                if case == "delete-node":
+                    installed.node.unlink()
+                else:
+                    replacement = installed.version_root / "original-bin"
+                    installed.bin.rename(replacement)
+                    installed.bin.symlink_to(fallback, target_is_directory=True)
+
+                with self.assertRaisesRegex(
+                    MODULE.GateError,
+                    "selected package toolchain",
+                ):
+                    MODULE.resolve_package_toolchain(
+                        installed.identity,
+                        MODULE.CommandExecutor(),
+                        source_environment=installed.environment,
+                    )
+
+    def test_nvm_selection_rejects_a_raw_path_alias(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="xenoteer-nvm-use-") as temporary:
+            root = Path(temporary)
+            installed = self._install_canonical_nvm_toolchain(root)
+            alias = root / "nvm-bin-alias"
+            alias.symlink_to(installed.bin, target_is_directory=True)
+            installed.environment["XENOTEER_PACKAGE_BUILD_PATH"] = str(alias)
+
+            with self.assertRaisesRegex(MODULE.GateError, "alias"):
+                MODULE.resolve_package_toolchain(
+                    installed.identity,
+                    MODULE.CommandExecutor(),
+                    source_environment=installed.environment,
+                )
+
+    def test_canonical_nvm_node_must_be_a_regular_executable(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="xenoteer-nvm-use-") as temporary:
+            installed = self._install_canonical_nvm_toolchain(Path(temporary))
+            node_target = installed.version_root / "node-target"
+            installed.node.rename(node_target)
+            installed.node.symlink_to(node_target)
+
+            with self.assertRaisesRegex(
+                MODULE.GateError,
+                "NVM node must be a regular executable",
+            ):
+                MODULE.resolve_package_toolchain(
+                    installed.identity,
+                    MODULE.CommandExecutor(),
+                    source_environment=installed.environment,
+                )
+
+    def test_canonical_nvm_npm_requires_a_trusted_in_root_symlink(self) -> None:
+        cases = ("regular", "dangling", "outside")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory(
+                prefix="xenoteer-nvm-use-"
+            ) as temporary:
+                installed = self._install_canonical_nvm_toolchain(Path(temporary))
+                installed.npm.unlink()
+                if case == "regular":
+                    self._write_executable(
+                        installed.npm,
+                        "#!/usr/bin/env node\n",
+                    )
+                elif case == "dangling":
+                    installed.npm.symlink_to("../missing/npm-cli.js")
+                else:
+                    outside = Path(temporary) / "outside/npm-cli.js"
+                    self._write_executable(
+                        outside,
+                        "#!/usr/bin/env node\n",
+                    )
+                    installed.npm.symlink_to(outside)
+
+                with self.assertRaisesRegex(
+                    MODULE.GateError,
+                    "NVM npm must be a trusted in-root symlink",
+                ):
+                    MODULE.resolve_package_toolchain(
+                        installed.identity,
+                        MODULE.CommandExecutor(),
+                        source_environment=installed.environment,
+                    )
+
+    def test_canonical_nvm_npm_rejects_an_in_root_intermediate_symlink(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="xenoteer-nvm-use-") as temporary:
+            installed = self._install_canonical_nvm_toolchain(Path(temporary))
+            npm_bin = installed.npm_target.parent
+            npm_target_contents = installed.npm_target.read_bytes()
+            installed.npm_target.unlink()
+            npm_bin.rmdir()
+            actual_bin = installed.version_root / "actual-npm-bin"
+            actual_bin.mkdir()
+            (actual_bin / "npm-cli.js").write_bytes(npm_target_contents)
+            (actual_bin / "npm-cli.js").chmod(0o775)
+            npm_bin.symlink_to(
+                os.path.relpath(actual_bin, npm_bin.parent),
+                target_is_directory=True,
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.GateError,
+                "NVM npm target path components",
+            ):
+                MODULE.resolve_package_toolchain(
+                    installed.identity,
+                    MODULE.CommandExecutor(),
+                    source_environment=installed.environment,
+                )
+
+    def test_canonical_nvm_npm_rejects_an_intermediate_component_race(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="xenoteer-nvm-use-") as temporary:
+            installed = self._install_canonical_nvm_toolchain(Path(temporary))
+            original_open = os.open
+            lib = installed.version_root / "lib"
+            raced_lib = installed.version_root / "lib-before-race"
+            raced = False
+
+            def racing_open(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                nonlocal raced
+                descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+                if Path(path) == installed.version_root and not raced:
+                    raced = True
+                    lib.rename(raced_lib)
+                    lib.symlink_to(raced_lib, target_is_directory=True)
+                return descriptor
+
+            with (
+                mock.patch.object(MODULE.os, "open", side_effect=racing_open),
+                self.assertRaisesRegex(
+                    MODULE.GateError,
+                    "NVM npm target path components",
+                ),
+            ):
+                MODULE.resolve_package_toolchain(
+                    installed.identity,
+                    MODULE.CommandExecutor(),
+                    source_environment=installed.environment,
+                )
+            self.assertTrue(raced)
+
+    def test_canonical_nvm_npm_requires_exact_bounded_env_node_shebang(
+        self,
+    ) -> None:
+        invalid_targets = (
+            b"#!/usr/bin/node\n",
+            b"#!/usr/bin/env node\r\n",
+            b"\xef\xbb\xbf#!/usr/bin/env node\n",
+            b"#!/usr/bin/env node --no-warnings\n",
+            b"#!/usr/bin/env node",
+            b"#!/usr/bin/env node\n" + (b"x" * (64 * 1024)),
+        )
+        for contents in invalid_targets:
+            with self.subTest(prefix=contents[:32]), tempfile.TemporaryDirectory(
+                prefix="xenoteer-nvm-use-"
+            ) as temporary:
+                installed = self._install_canonical_nvm_toolchain(Path(temporary))
+                installed.npm_target.write_bytes(contents)
+                installed.npm_target.chmod(0o775)
+
+                with self.assertRaisesRegex(
+                    MODULE.GateError,
+                    "NVM npm wrapper",
+                ):
+                    MODULE.resolve_package_toolchain(
+                        installed.identity,
+                        MODULE.CommandExecutor(),
+                        source_environment=installed.environment,
+                    )
+
+    def test_canonical_nvm_npm_special_target_fails_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="xenoteer-nvm-use-") as temporary:
+            installed = self._install_canonical_nvm_toolchain(Path(temporary))
+            installed.npm_target.unlink()
+            os.mkfifo(installed.npm_target, mode=0o700)
+
+            started = time.monotonic()
+            with self.assertRaisesRegex(
+                MODULE.GateError,
+                "NVM npm wrapper",
+            ):
+                MODULE.resolve_package_toolchain(
+                    installed.identity,
+                    MODULE.CommandExecutor(),
+                    source_environment=installed.environment,
+                )
+            self.assertLess(time.monotonic() - started, 1)
+
+    def test_node_probe_rejects_stdout_stderr_floods_and_invalid_utf8(self) -> None:
+        scripts = {
+            "stdout": "#!/bin/sh\nwhile :; do printf 'xxxxxxxxxxxxxxxx'; done\n",
+            "stderr": (
+                "#!/bin/sh\nwhile :; do "
+                "printf 'xxxxxxxxxxxxxxxx' >&2; done\n"
+            ),
+            "invalid-utf8": "#!/bin/sh\nprintf '\\377'\n",
+        }
+        for case, contents in scripts.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory(
+                prefix="xenoteer-node-probe-"
+            ) as temporary:
+                executable = Path(temporary) / "node"
+                self._write_executable(executable, contents)
+                message = "output limit" if case != "invalid-utf8" else "invalid UTF-8"
+                with self.assertRaisesRegex(MODULE.GateError, message):
+                    MODULE.CommandExecutor().run_probe(
+                        [str(executable)],
+                        timeout=1,
+                        output_limit=128,
+                    )
+
+    def test_node_probe_converts_exec_race_oserror_to_typed_failure(self) -> None:
+        with mock.patch.object(
+            MODULE.subprocess,
+            "Popen",
+            side_effect=OSError(8, "injected executable replacement race"),
+        ):
+            with self.assertRaisesRegex(
+                MODULE.GateError,
+                "node version probe",
+            ):
+                MODULE.CommandExecutor().run_probe(
+                    ["/tmp/replaced-node"],
+                    timeout=1,
+                    output_limit=128,
+                )
+
+    def test_node_probe_rejects_invalid_bounds_and_empty_commands(self) -> None:
+        cases = (
+            ((), 1, 128, "empty"),
+            (("/usr/bin/true",), 0, 128, "timeout"),
+            (
+                ("/usr/bin/true",),
+                MODULE.DEFAULT_COMMAND_TIMEOUT_SECONDS + 1,
+                128,
+                "timeout",
+            ),
+            (("/usr/bin/true",), 1, 0, "output limit"),
+            (
+                ("/usr/bin/true",),
+                1,
+                MODULE.NODE_PROBE_OUTPUT_LIMIT_BYTES + 1,
+                "output limit",
+            ),
+        )
+        for command, timeout, output_limit, message in cases:
+            with self.subTest(
+                command=command,
+                timeout=timeout,
+                output_limit=output_limit,
+            ), self.assertRaisesRegex(MODULE.GateError, message):
+                MODULE.CommandExecutor().run_probe(
+                    command,
+                    timeout=timeout,
+                    output_limit=output_limit,
+                )
+
+    def test_package_toolchain_rejects_bad_node_probe_results(self) -> None:
+        cases = (
+            (
+                "#!/bin/sh\nprintf '%s\\n' v24.18.0 >&2\n",
+                "unexpected stderr",
+            ),
+            ("#!/bin/sh\nexit 7\n", "probe failed"),
+            ("#!/bin/sh\nprintf '%s\\n' not-a-version\n", "unsupported"),
+            ("#!/bin/sh\nprintf '%s\\n' v20.18.0\n", "unsupported"),
+            (
+                "#!/bin/sh\nprintf 'v24.18.0\\nextra\\n'\n",
+                "unsupported",
+            ),
+        )
+        for contents, message in cases:
+            with self.subTest(message=message), tempfile.TemporaryDirectory(
+                prefix="xenoteer-nvm-use-"
+            ) as temporary:
+                installed = self._install_canonical_nvm_toolchain(Path(temporary))
+                self._write_executable(installed.node, contents)
+                with self.assertRaisesRegex(MODULE.GateError, message):
+                    MODULE.resolve_package_toolchain(
+                        installed.identity,
+                        MODULE.CommandExecutor(),
+                        source_environment=installed.environment,
+                    )
+
+    def test_node_probe_kills_term_ignoring_pipe_holding_descendants(
+        self,
+    ) -> None:
+        root = Path(tempfile.mkdtemp(prefix="xenoteer-node-probe-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        child_pid = root / "child.pid"
+        self.addCleanup(self._cleanup_probe_process_group, child_pid, root)
+        executable = root / "node"
+        self._write_executable(
+            executable,
+            "#!/bin/sh\n"
+            "trap '' TERM\n"
+            "(trap '' TERM; while :; do /usr/bin/sleep 1; done) &\n"
+            f"printf '%s' \"$!\" > {child_pid}\n"
+            "wait\n",
+        )
+
+        started = time.monotonic()
+        with self.assertRaisesRegex(MODULE.GateError, "exceeded"):
+            MODULE.CommandExecutor().run_probe(
+                [str(executable)],
+                timeout=1,
+                output_limit=128,
+            )
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertTrue(child_pid.is_file())
+        pid = int(child_pid.read_text(encoding="ascii"))
+        deadline = time.monotonic() + 1
+        while Path(f"/proc/{pid}").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertFalse(Path(f"/proc/{pid}").exists())
+
+    def test_successful_node_probe_reaps_descendants_that_close_their_pipes(
+        self,
+    ) -> None:
+        before = self._node_probe_processes()
+        root = Path(tempfile.mkdtemp(prefix="xenoteer-node-probe-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        child_pid = root / "child.pid"
+        self.addCleanup(self._cleanup_probe_process_group, child_pid, root)
+        executable = root / "node"
+        self._write_executable(
+            executable,
+            "#!/bin/sh\n"
+            "(trap '' TERM; exec >/dev/null 2>/dev/null; "
+            "while :; do /usr/bin/sleep 1; done) &\n"
+            f"printf '%s' \"$!\" > {child_pid}\n"
+            "printf '%s\\n' v24.18.0\n",
+        )
+
+        result = MODULE.CommandExecutor().run_probe(
+            [str(executable)],
+            timeout=1,
+            output_limit=128,
+        )
+
+        self.assertEqual(result.stdout, "v24.18.0\n")
+        self.assertTrue(child_pid.is_file())
+        pid = int(child_pid.read_text(encoding="ascii"))
+        deadline = time.monotonic() + 1
+        while Path(f"/proc/{pid}").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertFalse(Path(f"/proc/{pid}").exists())
+        self.assertEqual(
+            self._node_probe_processes(),
+            before,
+            "successful probe leaked a /tmp/xenoteer-node-probe-* process",
+        )
+
+    def test_invalid_text_from_default_command_is_typed(self) -> None:
+        with mock.patch.object(
+            MODULE.subprocess,
+            "run",
+            side_effect=UnicodeDecodeError(
+                "utf-8",
+                b"\xff",
+                0,
+                1,
+                "invalid start byte",
+            ),
+        ):
+            with self.assertRaisesRegex(MODULE.GateError, "invalid UTF-8"):
+                MODULE.CommandExecutor().run(
+                    ["/usr/bin/true"],
+                    timeout=5,
+                )
 
     def test_safe_command_redacts_clean_environment_home_and_path(self) -> None:
         rendered = MODULE.safe_command(
@@ -1156,6 +1823,12 @@ class PublicQuickstartContractTests(unittest.TestCase):
             "b2" * 32,
         )
         image = MODULE.ExactFixtureImage(image_id, image_id, artifacts.source_tree_sha256)
+        toolchain = MODULE.PackageToolchain(
+            Path("/installed/node"),
+            Path("/installed/npm"),
+            (Path("/trusted/package-bin"),),
+            (24, 18, 0),
+        )
         executor = RecordingExecutor()
 
         def inspect(
@@ -1191,6 +1864,7 @@ class PublicQuickstartContractTests(unittest.TestCase):
                     image,
                     executor,
                     identity,
+                    toolchain,
                 )
 
         self.assertEqual(run_one.call_count, 8)
@@ -1209,6 +1883,13 @@ class PublicQuickstartContractTests(unittest.TestCase):
         )
         self.assertTrue(
             all(call.kwargs["identity"] == identity for call in run_one.call_args_list)
+        )
+        self.assertTrue(
+            all(
+                call.kwargs["source_environment"]
+                == toolchain.source_environment()
+                for call in run_one.call_args_list
+            )
         )
 
     @staticmethod
@@ -1856,6 +2537,84 @@ class PublicQuickstartContractTests(unittest.TestCase):
         self.assertIn("examples/phase6_behaviors.rs", function)
         self.assertIn("examples/phase6-behaviors.mjs", function)
         self.assertIn("xenoteer.examples.phase6_behaviors", function)
+
+    def test_one_resolved_package_toolchain_reaches_every_node_npm_call_site(
+        self,
+    ) -> None:
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        stage_start = source.index("def stage_public_artifacts(")
+        prepare_start = source.index("def prepare_installed_quickstarts(")
+        live_start = source.index("def run_live_gate(")
+        qualify_start = source.index("def qualify(")
+        stage = source[stage_start:prepare_start]
+        prepare = source[prepare_start:source.index("\ndef _docker_inspect(", prepare_start)]
+        live = source[live_start:qualify_start]
+        qualify = source[qualify_start:]
+
+        for name, function in (("stage", stage), ("prepare", prepare)):
+            with self.subTest(function=name):
+                self.assertIn("toolchain: PackageToolchain", function)
+                self.assertIn("str(toolchain.npm)", function)
+                self.assertNotIn('resolve_executable("npm"', function)
+                self.assertNotIn('resolve_executable("node"', function)
+        self.assertIn("str(toolchain.node)", prepare)
+        self.assertIn("toolchain: PackageToolchain", live)
+        self.assertIn("source_environment=toolchain.source_environment()", live)
+        self.assertEqual(qualify.count("resolve_package_toolchain("), 1)
+        self.assertIn("toolchain = resolve_package_toolchain(", qualify)
+        self.assertGreaterEqual(qualify.count("toolchain,"), 3)
+
+    def test_qualify_threads_the_same_toolchain_object_through_every_consumer(
+        self,
+    ) -> None:
+        identity = object()
+        toolchain = object()
+        source_tree = "a1" * 32
+        image = SimpleNamespace(
+            fixture_id="sha256:" + ("b2" * 32),
+            production_id="sha256:" + ("c3" * 32),
+            source_tree_sha256=source_tree,
+        )
+        artifacts = SimpleNamespace(
+            source_tree_sha256=source_tree,
+            digests=lambda: {"npm": "d4" * 32},
+        )
+        installed = object()
+
+        with (
+            mock.patch.object(MODULE, "reject_daemon_overrides"),
+            mock.patch.object(MODULE.BuildIdentity, "current", return_value=identity),
+            mock.patch.object(
+                MODULE,
+                "resolve_package_toolchain",
+                return_value=toolchain,
+            ) as resolve,
+            mock.patch.object(MODULE, "resolve_exact_image", return_value=image),
+            mock.patch.object(
+                MODULE,
+                "current_source_tree_hash",
+                return_value=source_tree,
+            ),
+            mock.patch.object(MODULE, "chown_tree"),
+            mock.patch.object(MODULE, "validate_fixture_runtime_parity"),
+            mock.patch.object(
+                MODULE,
+                "stage_public_artifacts",
+                return_value=artifacts,
+            ) as stage,
+            mock.patch.object(
+                MODULE,
+                "prepare_installed_quickstarts",
+                return_value=installed,
+            ) as prepare,
+            mock.patch.object(MODULE, "run_live_gate") as live,
+        ):
+            MODULE.qualify(image.production_id)
+
+        self.assertIs(resolve.call_args.args[0], identity)
+        self.assertIs(stage.call_args.args[-1], toolchain)
+        self.assertIs(prepare.call_args.args[-1], toolchain)
+        self.assertIs(live.call_args.args[-1], toolchain)
 
     def test_installed_quickstarts_do_not_pass_environment_discarded_by_env_i(
         self,

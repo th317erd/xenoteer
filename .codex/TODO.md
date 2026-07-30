@@ -214,13 +214,30 @@ Plan: `plans/15-phased-implementation.md`
             editing and map every local-image `FROM` consumer
       - [x] Add a fail-closed ephemeral local-tag handoff that remains bound to
             the exact inspected production ID and cleans up on every exit path
-      - [ ] Run focused/static gates and independent security/portability
+      - [x] Run focused/static gates and independent security/portability
             review, commit/push, build a new pair, and restart at lane 1
         - [x] Remove the deterministic exact-path `/tmp` residue from the
               deliberate reservation-owner-mismatch regression without
               weakening the production helper's fail-closed cleanup
         - [x] Obtain a fresh independent High/Medium-zero review of the
               corrected frozen patch
+    - [x] Reject source `439d45e` production `0c50f668` / fixture `0784d251`
+          after lanes 1-6 passed first-run but lane 7 rejected before package
+          assembly because its sanitized package-tool `PATH` contained Cargo
+          and system directories but not the invoking user's only npm/Node
+          installation under NVM
+      - [x] Reproduce the exact root-runner-to-invoking-user npm discovery
+            failure before editing and map every package-tool path producer,
+            sanitizer, resolver, caller, test, and documented host prerequisite
+      - [x] Admit a deterministic supported Node/npm toolchain without sourcing
+            user shell code, trusting arbitrary path input, or weakening the
+            existing owner/group/traversal/executable checks
+      - [x] Prove Node 22/24 selection, ambiguity, malformed layouts, symlink
+            targets, permissions, root/non-root execution, missing tools,
+            hostile environment, and exact privilege-drop behavior
+      - [x] Run focused/static gates, a real root-to-invoking-user npm build
+            probe, and independent security/portability review before committing
+            and building one new coherent pair
     - [x] Reject source `b01405a` production `a650e129` / fixture `356225fe`
           after lanes 1-3 passed first-run but the lane-4 host runner exited 77
           before exercising the image because sudo's secure `PATH` hid Cargo

@@ -29,6 +29,32 @@ free to acquire it themselves. The canonical orchestrator is deliberately
 root-only; rootless support for individual development gates does not make a
 rootless seven-lane run release qualification.
 
+Lane 7 discovers its host Node/npm pair from the invoking account recorded in
+the local password database, never from caller-supplied `HOME`, `PATH`,
+`NVM_DIR`, `NVM_BIN`, shell initialization, or NVM aliases. If
+`~/.nvm/versions/node` exists, every entry claiming supported Node major 22 or
+24 must be a canonical, non-symlinked `vMAJOR.MINOR.PATCH` installation with a
+trusted `bin/node` and `bin/npm`; npm's reviewed symlink target must remain
+inside that same version root. The orchestrator bounds the NVM inventory to 64
+entries, performs only filesystem shape/trust checks, then selects the highest
+semantic version; it never executes invoking-user Node code at the root
+orchestration boundary. When no supported NVM entry exists, fallback is allowed
+only when one fixed trusted system directory contains both Node and npm.
+
+The selected directory is carried into lane 7 through the dedicated
+`XENOTEER_PACKAGE_BUILD_PATH` channel while every root Docker/Git subprocess
+retains the fixed `/usr/sbin:/usr/bin:/sbin:/bin` PATH and a minimal
+password-database-derived environment. At the start of package use, the public
+runner binds only the first selected directory—deletion, replacement, or a raw
+PATH alias cannot fall through to Cargo or a later system directory. For NVM,
+it additionally requires a regular non-symlink `node`, one reviewed `npm`
+symlink, non-symlinked trusted path components to its in-root regular target,
+and an exact bounded `#!/usr/bin/env node` wrapper. It then drops to the
+invoking build identity for one output-bounded, process-group-bounded
+`node --version` probe and requires the runtime to equal the selected NVM
+directory. That same immutable node/npm pair and PATH snapshot reaches package
+assembly, archive installation, and installed quick-start verification.
+
 The shared heavy-build lock is the one intentional ownership exception:
 after validating `SUDO_UID`/`SUDO_GID` against the checkout and local account,
 the root orchestrator opens the sticky parent through an anchored directory

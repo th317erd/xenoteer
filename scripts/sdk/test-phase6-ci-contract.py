@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import shlex
 import unittest
@@ -13,6 +14,12 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
 STATIC_GATE_PATH = REPOSITORY_ROOT / "scripts" / "container" / "test-static.sh"
+QUALIFICATION_RUNNER_PATH = (
+    REPOSITORY_ROOT / "scripts" / "container" / "qualify-phase6.py"
+)
+PUBLIC_QUICKSTART_RUNNER_PATH = (
+    REPOSITORY_ROOT / "scripts" / "sdk" / "public_quickstarts.py"
+)
 PYTHON_LOCK_PATH = REPOSITORY_ROOT / "packages" / "python" / "requirements-test.lock"
 PINNED_ACTION = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 SUPPORTED_NODE_VERSIONS = ("22", "24")
@@ -379,6 +386,54 @@ def require_runtime_matrix(
         )
 
 
+def require_qualification_node_policy(
+    source: str,
+    expected: tuple[str, ...],
+    *,
+    component: str = "qualification",
+) -> None:
+    """Keep every package gate on the same explicit Node majors as CI."""
+
+    tree = ast.parse(source)
+    values: list[object] = []
+    for statement in tree.body:
+        if not isinstance(statement, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name)
+            and target.id == "SUPPORTED_NODE_MAJORS"
+            for target in statement.targets
+        ):
+            continue
+        if (
+            not isinstance(statement.value, ast.Call)
+            or not isinstance(statement.value.func, ast.Name)
+            or statement.value.func.id != "frozenset"
+            or len(statement.value.args) != 1
+            or statement.value.keywords
+        ):
+            raise AssertionError(
+                f"{component} Node policy must be one literal frozenset"
+            )
+        values.append(ast.literal_eval(statement.value.args[0]))
+    if len(values) != 1 or not isinstance(values[0], set):
+        raise AssertionError(
+            f"{component} Node policy must be one literal frozenset"
+        )
+    observed_values = values[0]
+    if any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for value in observed_values
+    ):
+        raise AssertionError(f"{component} Node majors must be integers")
+    observed = tuple(str(value) for value in sorted(observed_values))
+    if observed != expected:
+        raise AssertionError(
+            f"{component} Node policy must exactly match the CI matrix: "
+            f"expected {expected!r}, observed {observed!r}"
+        )
+
+
 def required_static_paths(static_gate: str) -> set[str]:
     """Read the literal static-gate required-file array."""
 
@@ -561,6 +616,12 @@ class PhaseSixCiContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         cls.static_gate = STATIC_GATE_PATH.read_text(encoding="utf-8")
+        cls.qualification_runner = QUALIFICATION_RUNNER_PATH.read_text(
+            encoding="utf-8"
+        )
+        cls.public_quickstart_runner = PUBLIC_QUICKSTART_RUNNER_PATH.read_text(
+            encoding="utf-8"
+        )
         cls.python_lock = PYTHON_LOCK_PATH.read_text(encoding="utf-8")
 
     def test_every_third_party_action_is_immutable(self) -> None:
@@ -636,6 +697,37 @@ class PhaseSixCiContractTests(unittest.TestCase):
             "python",
             SUPPORTED_PYTHON_VERSIONS,
         )
+
+    def test_host_qualification_node_policy_matches_the_ci_matrix(self) -> None:
+        for component, source in (
+            ("qualification", self.qualification_runner),
+            ("public quick-start", self.public_quickstart_runner),
+        ):
+            with self.subTest(component=component):
+                require_qualification_node_policy(
+                    source,
+                    SUPPORTED_NODE_VERSIONS,
+                    component=component,
+                )
+
+    def test_host_qualification_node_policy_drift_is_rejected(self) -> None:
+        for component, source in (
+            ("qualification", self.qualification_runner),
+            ("public quick-start", self.public_quickstart_runner),
+        ):
+            with self.subTest(component=component), self.assertRaisesRegex(
+                AssertionError,
+                "must exactly match the CI matrix",
+            ):
+                require_qualification_node_policy(
+                    source.replace(
+                        "frozenset({22, 24})",
+                        "frozenset({24})",
+                        1,
+                    ),
+                    SUPPORTED_NODE_VERSIONS,
+                    component=component,
+                )
 
     def test_missing_runtime_matrix_member_is_rejected(self) -> None:
         with self.assertRaisesRegex(AssertionError, "runtime matrix must be exactly"):

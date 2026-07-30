@@ -11,6 +11,7 @@ import os
 import pwd
 import re
 import secrets
+import selectors
 import signal
 import shutil
 import stat
@@ -62,6 +63,20 @@ ENV_BINARY = Path("/usr/bin/env")
 NICE_BINARY = Path("/usr/bin/nice")
 IONICE_BINARY = Path("/usr/bin/ionice")
 SUDO_BINARY = Path("/usr/bin/sudo")
+TRUSTED_SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+PACKAGE_BUILD_PATH_ENVIRONMENT = "XENOTEER_PACKAGE_BUILD_PATH"
+SUPPORTED_NODE_MAJORS = frozenset({22, 24})
+NODE_VERSION_DECIMAL = r"(?:0|[1-9][0-9]{0,9})"
+STABLE_NODE_VERSION = re.compile(
+    rf"v(?P<major>{NODE_VERSION_DECIMAL})"
+    rf"\.(?P<minor>{NODE_VERSION_DECIMAL})"
+    rf"\.(?P<patch>{NODE_VERSION_DECIMAL})\Z"
+)
+NODE_PROBE_TIMEOUT_SECONDS = 5.0
+NODE_PROBE_OUTPUT_LIMIT_BYTES = 4 * 1024
+NODE_PROBE_CLEANUP_GRACE_SECONDS = 0.25
+NPM_WRAPPER_MAX_BYTES = 64 * 1024
+NPM_ENV_NODE_SHEBANG = b"#!/usr/bin/env node\n"
 LOOPBACK_PORT = re.compile(r"127\.0\.0\.1:([0-9]{1,5})\Z")
 DAEMON_OVERRIDE_ENVIRONMENTS = _qualification_identity.DAEMON_OVERRIDE_ENVIRONMENTS
 REQUIRED_BEHAVIORS = (
@@ -148,6 +163,24 @@ class CommandResult:
 
 
 @dataclasses.dataclass(frozen=True)
+class PackageToolchain:
+    """One immutable, at-use-validated Node/npm selection."""
+
+    node: Path
+    npm: Path
+    path: tuple[Path, ...]
+    version: tuple[int, int, int]
+
+    def source_environment(self) -> dict[str, str]:
+        return {
+            "PATH": TRUSTED_SYSTEM_PATH,
+            PACKAGE_BUILD_PATH_ENVIRONMENT: os.pathsep.join(
+                str(directory) for directory in self.path
+            ),
+        }
+
+
+@dataclasses.dataclass(frozen=True)
 class BuildIdentity:
     """Original non-root caller used for package assembly under sudo."""
 
@@ -184,7 +217,9 @@ class BuildIdentity:
         source_environment: Mapping[str, str] | None = None,
     ) -> tuple[Path, ...]:
         environment = os.environ if source_environment is None else source_environment
-        raw_path = environment.get("PATH")
+        raw_path = environment.get(PACKAGE_BUILD_PATH_ENVIRONMENT)
+        if raw_path is None:
+            raw_path = environment.get("PATH")
         if not isinstance(raw_path, str) or not raw_path:
             raise GateError("package build PATH is missing")
         directories: list[Path] = []
@@ -450,6 +485,26 @@ class BuildIdentity:
 class CommandExecutor:
     """Timeout-enforcing subprocess boundary."""
 
+    @staticmethod
+    def _root_environment(
+        source_environment: Mapping[str, str] | None,
+    ) -> dict[str, str]:
+        del source_environment
+        try:
+            account = pwd.getpwuid(os.geteuid())
+        except KeyError as error:
+            raise GateError("root subprocess identity has no local account") from error
+        if not account.pw_dir.startswith("/"):
+            raise GateError("root subprocess identity has an invalid home")
+        return {
+            "HOME": account.pw_dir,
+            "LANG": "C",
+            "LC_ALL": "C",
+            "LOGNAME": account.pw_name,
+            "PATH": TRUSTED_SYSTEM_PATH,
+            "USER": account.pw_name,
+        }
+
     def _run(
         self,
         command: Sequence[str],
@@ -488,10 +543,15 @@ class CommandExecutor:
                     "rootless quick-start identity differs from current process identity"
                 )
         try:
+            child_environment = (
+                self._root_environment(env)
+                if identity is None
+                else dict(env or {})
+            )
             completed = subprocess.run(
                 list(command),
                 cwd=cwd,
-                env=None if env is None else dict(env),
+                env=child_environment,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -507,6 +567,10 @@ class CommandExecutor:
         except subprocess.TimeoutExpired as error:
             raise GateError(
                 f"command exceeded its {timeout}s bound: {safe_command(command)}"
+            ) from error
+        except UnicodeError as error:
+            raise GateError(
+                f"command returned invalid UTF-8: {safe_command(command)}"
             ) from error
         result = CommandResult(completed.returncode, completed.stdout, completed.stderr)
         if check and result.returncode != 0:
@@ -555,6 +619,173 @@ class CommandExecutor:
             identity=identity,
         )
 
+    @staticmethod
+    def _terminate_probe_group(process: subprocess.Popen[bytes]) -> None:
+        """Terminate and reap one probe session, including pipe-holding children."""
+
+        termination_error: GateError | None = None
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except OSError as error:
+            termination_error = GateError(
+                "node version probe group could not receive TERM"
+            )
+            termination_error.__cause__ = error
+        time.sleep(NODE_PROBE_CLEANUP_GRACE_SECONDS)
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError as error:
+            if termination_error is None:
+                termination_error = GateError(
+                    "node version probe group could not receive KILL"
+                )
+                termination_error.__cause__ = error
+            try:
+                process.kill()
+            except OSError:
+                pass
+        try:
+            process.wait(timeout=NODE_PROBE_CLEANUP_GRACE_SECONDS)
+        except subprocess.TimeoutExpired as error:
+            raise GateError("node version probe could not be reaped") from error
+        except OSError as error:
+            raise GateError("node version probe leader could not be reaped") from error
+        if termination_error is not None:
+            raise termination_error
+
+    @staticmethod
+    def _drain_probe_pipes(
+        selector: selectors.BaseSelector,
+    ) -> None:
+        """Drain only a small, post-kill window so inherited pipes cannot hang."""
+
+        deadline = time.monotonic() + NODE_PROBE_CLEANUP_GRACE_SECONDS
+        while selector.get_map() and time.monotonic() < deadline:
+            events = selector.select(max(0.0, deadline - time.monotonic()))
+            if not events:
+                break
+            for key, _ in events:
+                try:
+                    chunk = os.read(key.fd, 4_096)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    try:
+                        selector.unregister(key.fileobj)
+                    except KeyError:
+                        pass
+
+    def run_probe(
+        self,
+        command: Sequence[str],
+        *,
+        timeout: float,
+        output_limit: int,
+        cwd: Path | None = None,
+    ) -> CommandResult:
+        """Run one hostile-output probe with a process-group and byte deadline."""
+
+        if timeout <= 0 or timeout > DEFAULT_COMMAND_TIMEOUT_SECONDS:
+            raise GateError(f"invalid node probe timeout: {timeout}")
+        if output_limit <= 0 or output_limit > NODE_PROBE_OUTPUT_LIMIT_BYTES:
+            raise GateError(f"invalid node probe output limit: {output_limit}")
+        if not command:
+            raise GateError("node version probe command is empty")
+
+        process: subprocess.Popen[bytes] | None = None
+        selector = selectors.DefaultSelector()
+        streams: tuple[object, ...] = ()
+        terminated = False
+        try:
+            process = subprocess.Popen(
+                list(command),
+                cwd=cwd,
+                env=self._root_environment(None),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            if process.stdout is None or process.stderr is None:
+                raise GateError("node version probe did not expose bounded pipes")
+            streams = (process.stdout, process.stderr)
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+            captured = {"stdout": bytearray(), "stderr": bytearray()}
+            total_output = 0
+            deadline = time.monotonic() + timeout
+            failure: GateError | None = None
+
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    failure = GateError(
+                        f"node version probe exceeded its {timeout:g}s bound"
+                    )
+                    break
+                events = selector.select(min(0.05, remaining))
+                for key, _ in events:
+                    try:
+                        chunk = os.read(key.fd, 4_096)
+                    except OSError as error:
+                        failure = GateError("node version probe output could not be read")
+                        failure.__cause__ = error
+                        break
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    total_output += len(chunk)
+                    if total_output > output_limit:
+                        failure = GateError(
+                            "node version probe exceeded its output limit"
+                        )
+                        break
+                    captured[str(key.data)].extend(chunk)
+                if failure is not None:
+                    break
+
+            # Signal the session before wait(2) reaps its leader. A zombie leader
+            # keeps the PID/PGID reserved while any descendant is terminated, so
+            # no post-reap PID-reuse window can target an unrelated process group.
+            self._terminate_probe_group(process)
+            terminated = True
+            self._drain_probe_pipes(selector)
+            if failure is not None:
+                raise failure
+
+            try:
+                stdout = bytes(captured["stdout"]).decode("utf-8")
+                stderr = bytes(captured["stderr"]).decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise GateError("node version probe returned invalid UTF-8") from error
+            result = CommandResult(process.returncode, stdout, stderr)
+            if result.returncode != 0:
+                detail = safe_diagnostic(result.stderr or result.stdout)
+                raise GateError(
+                    "node version probe failed: "
+                    f"{detail or 'no safe diagnostic'}"
+                )
+            return result
+        except (FileNotFoundError, PermissionError) as error:
+            raise GateError(
+                f"could not launch node version probe: {safe_command(command)}"
+            ) from error
+        except OSError as error:
+            raise GateError(
+                "node version probe failed during bounded execution"
+            ) from error
+        finally:
+            if process is not None and not terminated:
+                self._terminate_probe_group(process)
+                self._drain_probe_pipes(selector)
+            selector.close()
+            for stream in streams:
+                stream.close()  # type: ignore[union-attr]
+
     def run_bytes(
         self,
         command: Sequence[str],
@@ -568,6 +799,7 @@ class CommandExecutor:
             completed = subprocess.run(
                 list(command),
                 cwd=cwd,
+                env=self._root_environment(None),
                 capture_output=True,
                 timeout=timeout,
                 check=False,
@@ -581,6 +813,296 @@ class CommandExecutor:
         if completed.returncode != 0:
             raise GateError(f"command failed: {safe_command(command)}")
         return completed.stdout
+
+
+def _stable_node_version(value: str) -> tuple[int, int, int] | None:
+    stripped = value.removesuffix("\n")
+    match = STABLE_NODE_VERSION.fullmatch(stripped)
+    if match is None or value not in (stripped, f"{stripped}\n"):
+        return None
+    return tuple(
+        int(match.group(component))
+        for component in ("major", "minor", "patch")
+    )
+
+
+def _selected_source_path_entry(
+    selected_directory: Path,
+    source_environment: Mapping[str, str] | None,
+) -> Path:
+    environment = os.environ if source_environment is None else source_environment
+    raw_path = environment.get(PACKAGE_BUILD_PATH_ENVIRONMENT)
+    if raw_path is None:
+        raw_path = environment.get("PATH")
+    if not isinstance(raw_path, str):
+        raise GateError("package build PATH is missing")
+    first_value = raw_path.split(os.pathsep)[0]
+    first_entry = Path(first_value)
+    if not first_value or not first_entry.is_absolute():
+        raise GateError("selected package toolchain PATH entry is invalid")
+    try:
+        resolved = first_entry.resolve(strict=True)
+    except OSError as error:
+        raise GateError("selected package toolchain is no longer available") from error
+    if resolved != selected_directory:
+        raise GateError("selected package toolchain silently changed")
+    if first_entry != resolved:
+        raise GateError("selected package toolchain PATH entry is an alias")
+    return first_entry
+
+
+def _require_nvm_directory(
+    identity: BuildIdentity,
+    directory: Path,
+    *,
+    description: str,
+) -> None:
+    try:
+        metadata = directory.lstat()
+        resolved = directory.resolve(strict=True)
+    except OSError as error:
+        raise GateError(f"{description} is unavailable or untrusted") from error
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or resolved != directory
+        or not identity._is_trusted_directory(  # noqa: SLF001
+            directory,
+            allowed_owners={0, identity.uid},
+        )
+    ):
+        raise GateError(f"{description} is unavailable or untrusted")
+
+
+def _trusted_nvm_directory_metadata(
+    identity: BuildIdentity,
+    metadata: os.stat_result,
+) -> bool:
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and metadata.st_uid in {0, identity.uid}
+        and identity._target_writers_are_trusted(metadata)  # noqa: SLF001
+        and identity._target_has_permission(  # noqa: SLF001
+            metadata,
+            stat.S_IXUSR,
+            stat.S_IXGRP,
+            stat.S_IXOTH,
+        )
+    )
+
+
+def _read_validated_nvm_npm_wrapper(
+    identity: BuildIdentity,
+    version_root: Path,
+    npm: Path,
+) -> None:
+    """Validate the reviewed npm symlink and open its target component-by-component."""
+
+    try:
+        npm_metadata = npm.lstat()
+        raw_target = os.readlink(npm)
+    except OSError as error:
+        raise GateError("NVM npm must be a trusted in-root symlink") from error
+    if not stat.S_ISLNK(npm_metadata.st_mode):
+        raise GateError("NVM npm must be a trusted in-root symlink")
+
+    unnormalized_target = (
+        Path(raw_target)
+        if Path(raw_target).is_absolute()
+        else npm.parent / raw_target
+    )
+    lexical_target = Path(os.path.normpath(str(unnormalized_target)))
+    try:
+        relative_target = lexical_target.relative_to(version_root)
+    except ValueError as error:
+        raise GateError("NVM npm must be a trusted in-root symlink") from error
+    if not relative_target.parts:
+        raise GateError("NVM npm must be a trusted in-root symlink")
+
+    directory_flags = (
+        os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    # O_NONBLOCK makes a concurrently replaced FIFO/device fail validation
+    # instead of hanging the host gate before fstat(2) can reject it.
+    file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    directory_fd: int | None = None
+    target_fd: int | None = None
+    try:
+        directory_fd = os.open(version_root, directory_flags)
+        if not _trusted_nvm_directory_metadata(
+            identity,
+            os.fstat(directory_fd),
+        ):
+            raise GateError("NVM npm target path components are untrusted")
+        for component in relative_target.parts[:-1]:
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+            if not _trusted_nvm_directory_metadata(
+                identity,
+                os.fstat(directory_fd),
+            ):
+                raise GateError("NVM npm target path components are untrusted")
+        target_fd = os.open(
+            relative_target.parts[-1],
+            file_flags,
+            dir_fd=directory_fd,
+        )
+        metadata = os.fstat(target_fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid not in {0, identity.uid}
+            or not identity._target_writers_are_trusted(metadata)  # noqa: SLF001
+            or not identity._target_has_permission(  # noqa: SLF001
+                metadata,
+                stat.S_IXUSR,
+                stat.S_IXGRP,
+                stat.S_IXOTH,
+            )
+        ):
+            raise GateError("NVM npm wrapper is unavailable or untrusted")
+        if metadata.st_size <= 0 or metadata.st_size > NPM_WRAPPER_MAX_BYTES:
+            raise GateError("NVM npm wrapper exceeds its size bound")
+        prefix = os.read(target_fd, len(NPM_ENV_NODE_SHEBANG))
+        if prefix != NPM_ENV_NODE_SHEBANG:
+            raise GateError("NVM npm wrapper has an unexpected shebang")
+        if os.readlink(npm) != raw_target or not stat.S_ISLNK(npm.lstat().st_mode):
+            raise GateError("NVM npm symlink changed during validation")
+    except GateError:
+        raise
+    except FileNotFoundError as error:
+        raise GateError("NVM npm must be a trusted in-root symlink") from error
+    except OSError as error:
+        if error.errno in {
+            getattr(os, "ELOOP", 40),
+            getattr(os, "ENOTDIR", 20),
+        }:
+            raise GateError("NVM npm target path components are untrusted") from error
+        raise GateError("NVM npm wrapper is unavailable or untrusted") from error
+    finally:
+        if target_fd is not None:
+            os.close(target_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def _canonical_nvm_version(
+    identity: BuildIdentity,
+    selected_bin: Path,
+    source_bin: Path,
+    node: Path,
+    npm: Path,
+) -> tuple[int, int, int] | None:
+    versions_root = identity.home / ".nvm/versions/node"
+    selected_is_nvm = selected_bin.is_relative_to(versions_root)
+    source_is_nvm = source_bin.is_relative_to(versions_root)
+    try:
+        resolved_versions_root = versions_root.resolve(strict=True)
+    except OSError:
+        resolved_versions_root = None
+    resolved_is_nvm = (
+        resolved_versions_root is not None
+        and selected_bin.is_relative_to(resolved_versions_root)
+    )
+    if not (selected_is_nvm or source_is_nvm or resolved_is_nvm):
+        return None
+
+    canonical_bin = source_bin if source_is_nvm else selected_bin
+    version_root = canonical_bin.parent
+    if canonical_bin.name != "bin" or version_root.parent != versions_root:
+        raise GateError("selected NVM toolchain path is noncanonical")
+    version = _stable_node_version(version_root.name)
+    if version is None or version[0] not in SUPPORTED_NODE_MAJORS:
+        raise GateError("selected NVM toolchain version is unsupported")
+
+    for directory, description in (
+        (identity.home, "NVM home"),
+        (identity.home / ".nvm", "NVM root"),
+        (identity.home / ".nvm/versions", "NVM versions root"),
+        (versions_root, "NVM Node versions root"),
+        (version_root, "NVM version root"),
+        (canonical_bin, "NVM bin directory"),
+    ):
+        _require_nvm_directory(identity, directory, description=description)
+    if selected_bin != canonical_bin or node != canonical_bin / "node":
+        raise GateError("selected NVM Node executable is noncanonical")
+    if npm != canonical_bin / "npm":
+        raise GateError("selected NVM npm executable is noncanonical")
+
+    try:
+        node_metadata = node.lstat()
+    except OSError as error:
+        raise GateError("NVM node must be a regular executable") from error
+    if (
+        not stat.S_ISREG(node_metadata.st_mode)
+        or stat.S_ISLNK(node_metadata.st_mode)
+        or not identity._is_trusted_executable(  # noqa: SLF001
+            node,
+            allowed_owners={0, identity.uid},
+        )
+    ):
+        raise GateError("NVM node must be a regular executable")
+    _read_validated_nvm_npm_wrapper(identity, version_root, npm)
+    return version
+
+
+def resolve_package_toolchain(
+    identity: BuildIdentity,
+    executor: CommandExecutor,
+    *,
+    source_environment: Mapping[str, str] | None = None,
+) -> PackageToolchain:
+    """Resolve one coherent pair and revalidate its actual Node runtime once."""
+
+    trusted_path = identity._trusted_path(source_environment)  # noqa: SLF001
+    selected_bin = trusted_path[0]
+    source_bin = _selected_source_path_entry(
+        selected_bin,
+        source_environment,
+    )
+    node = selected_bin / "node"
+    npm = selected_bin / "npm"
+    node_is_trusted = identity._is_trusted_executable(  # noqa: SLF001
+        node,
+        allowed_owners={0, identity.uid},
+    )
+    npm_is_trusted = identity._is_trusted_executable(  # noqa: SLF001
+        npm,
+        allowed_owners={0, identity.uid},
+    )
+    nvm_dangling_npm = (
+        selected_bin.is_relative_to(identity.home / ".nvm/versions/node")
+        and node_is_trusted
+        and npm.is_symlink()
+    )
+    if not ((node_is_trusted and npm_is_trusted) or nvm_dangling_npm):
+        raise GateError(
+            "selected package toolchain no longer has coherent trusted node and npm"
+        )
+    expected_nvm_version = _canonical_nvm_version(
+        identity,
+        selected_bin,
+        source_bin,
+        node,
+        npm,
+    )
+    toolchain = PackageToolchain(node, npm, trusted_path, (0, 0, 0))
+    result = executor.run_probe(
+        identity.command(
+            (str(node), "--version"),
+            source_environment=toolchain.source_environment(),
+        ),
+        timeout=NODE_PROBE_TIMEOUT_SECONDS,
+        output_limit=NODE_PROBE_OUTPUT_LIMIT_BYTES,
+    )
+    if result.stderr:
+        raise GateError("node version probe emitted unexpected stderr")
+    runtime_version = _stable_node_version(result.stdout)
+    if runtime_version is None or runtime_version[0] not in SUPPORTED_NODE_MAJORS:
+        raise GateError("node version probe returned an unsupported stable version")
+    if expected_nvm_version is not None and runtime_version != expected_nvm_version:
+        raise GateError("node runtime does not match selected NVM version")
+    return dataclasses.replace(toolchain, version=runtime_version)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1270,6 +1792,7 @@ def stage_public_artifacts(
     source_tree_sha256: str,
     executor: CommandExecutor,
     identity: BuildIdentity,
+    toolchain: PackageToolchain,
 ) -> PublicArtifacts:
     """Assemble every package archive without using one as a source import."""
 
@@ -1283,12 +1806,11 @@ def stage_public_artifacts(
     _copy_python_source(repository_root / "packages" / "python", python_source)
     chown_tree(workspace, identity)
 
-    cargo_binary = identity.home / ".cargo" / "bin" / "cargo"
-    if not cargo_binary.is_file():
-        resolved_cargo = shutil.which("cargo")
-        if resolved_cargo is None:
-            raise GateError("cargo is required to stage the Rust crates")
-        cargo_binary = Path(resolved_cargo)
+    source_environment = toolchain.source_environment()
+    cargo_binary = identity.resolve_executable(
+        "cargo",
+        source_environment=source_environment,
+    )
     for package in ("xenoteer-protocol", "xenoteer-sdk"):
         executor.run(
             identity.command(
@@ -1305,7 +1827,8 @@ def stage_public_artifacts(
                     str(cargo_target),
                     "--package",
                     package,
-                ]
+                ],
+                source_environment=source_environment,
             ),
             timeout=PACKAGE_COMMAND_TIMEOUT_SECONDS,
             cwd=repository_root,
@@ -1321,21 +1844,24 @@ def stage_public_artifacts(
         "SDK crate",
     )
 
-    npm_binary = identity.resolve_executable("npm")
     executor.run(
-        identity.command([str(npm_binary), "run", "build"]),
+        identity.command(
+            [str(toolchain.npm), "run", "build"],
+            source_environment=source_environment,
+        ),
         timeout=PACKAGE_COMMAND_TIMEOUT_SECONDS,
         cwd=repository_root / "packages" / "typescript",
     )
     npm_output = executor.run(
         identity.command(
             [
-                str(npm_binary),
+                str(toolchain.npm),
                 "pack",
                 "--json",
                 "--pack-destination",
                 str(npm_stage),
-            ]
+            ],
+            source_environment=source_environment,
         ),
         timeout=PACKAGE_COMMAND_TIMEOUT_SECONDS,
         cwd=repository_root / "packages" / "typescript",
@@ -1353,7 +1879,8 @@ def stage_public_artifacts(
                 "--outdir",
                 str(python_dist),
                 str(python_source),
-            ]
+            ],
+            source_environment=source_environment,
         ),
         timeout=PACKAGE_COMMAND_TIMEOUT_SECONDS,
         cwd=workspace,
@@ -1375,7 +1902,8 @@ def stage_public_artifacts(
                 str(repository_root / "packages" / "python" / "scripts" / "verify_dist.py"),
                 str(python_wheel),
                 str(python_sdist),
-            ]
+            ],
+            source_environment=source_environment,
         ),
         timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS,
         cwd=repository_root,
@@ -1409,6 +1937,7 @@ def prepare_installed_quickstarts(
     artifacts: PublicArtifacts,
     executor: CommandExecutor,
     identity: BuildIdentity,
+    toolchain: PackageToolchain,
 ) -> InstalledQuickstarts:
     """Install every archive into isolated consumers and build their examples."""
 
@@ -1466,14 +1995,11 @@ def prepare_installed_quickstarts(
         root.mkdir()
     chown_tree(workspace, identity)
 
-    cargo_binary = identity.home / ".cargo" / "bin" / "cargo"
-    if not cargo_binary.is_file():
-        resolved_cargo = shutil.which("cargo")
-        if resolved_cargo is None:
-            raise GateError("cargo is required to build the staged Rust consumer")
-        cargo_binary = Path(resolved_cargo)
-    npm_binary = identity.resolve_executable("npm")
-    node_binary = identity.resolve_executable("node")
+    source_environment = toolchain.source_environment()
+    cargo_binary = identity.resolve_executable(
+        "cargo",
+        source_environment=source_environment,
+    )
     rust_target = repository_root / "target" / "phase6-public-quickstarts"
     executor.run(
         identity.command(
@@ -1483,7 +2009,8 @@ def prepare_installed_quickstarts(
                 "--offline",
                 "--manifest-path",
                 str(rust_consumer / "Cargo.toml"),
-            ]
+            ],
+            source_environment=source_environment,
         ),
         timeout=PACKAGE_COMMAND_TIMEOUT_SECONDS,
         cwd=rust_consumer,
@@ -1499,7 +2026,8 @@ def prepare_installed_quickstarts(
                 "--offline",
                 "--manifest-path",
                 str(rust_consumer / "Cargo.toml"),
-            ]
+            ],
+            source_environment=source_environment,
         ),
         timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS,
         cwd=rust_consumer,
@@ -1520,7 +2048,8 @@ def prepare_installed_quickstarts(
                 str(rust_target),
                 "--manifest-path",
                 str(rust_consumer / "Cargo.toml"),
-            ]
+            ],
+            source_environment=source_environment,
         ),
         timeout=PACKAGE_COMMAND_TIMEOUT_SECONDS,
         cwd=rust_consumer,
@@ -1529,14 +2058,15 @@ def prepare_installed_quickstarts(
     executor.run(
         identity.command(
             [
-                str(npm_binary),
+                str(toolchain.npm),
                 "install",
                 "--ignore-scripts",
                 "--no-audit",
                 "--no-fund",
                 "--package-lock=false",
                 str(artifacts.npm_tarball),
-            ]
+            ],
+            source_environment=source_environment,
         ),
         timeout=PACKAGE_COMMAND_TIMEOUT_SECONDS,
         cwd=typescript_root,
@@ -1564,7 +2094,10 @@ def prepare_installed_quickstarts(
             install_command.append("--no-build-isolation")
         install_command.append(str(archive))
         executor.run(
-            identity.command(install_command),
+            identity.command(
+                install_command,
+                source_environment=source_environment,
+            ),
             timeout=PACKAGE_COMMAND_TIMEOUT_SECONDS,
             cwd=root,
         )
@@ -1589,7 +2122,7 @@ def prepare_installed_quickstarts(
     return InstalledQuickstarts(
         (str(rust_binary),),
         rust_artifacts,
-        (str(node_binary), str(typescript_example)),
+        (str(toolchain.node), str(typescript_example)),
         typescript_root / "node_modules" / "@xenoteer" / "sdk",
         python_commands[0],
         python_roots[0],
@@ -1698,12 +2231,13 @@ def run_one_quickstart(
     token: str,
     expect_auth_failure: bool,
     forbidden_tokens: Sequence[str],
+    source_environment: Mapping[str, str] | None = None,
 ) -> None:
     """Run one installed consumer with bounded typed-auth expectations."""
 
     runtime_root = identity._trusted_installed_root(installed_root)
     home = identity._trusted_home()
-    trusted_path = identity._trusted_path()
+    trusted_path = identity._trusted_path(source_environment)
     environment = {
         "HOME": str(home),
         "PATH": os.pathsep.join(str(directory) for directory in trusted_path),
@@ -1719,7 +2253,10 @@ def run_one_quickstart(
     }
     if name.startswith("python-"):
         environment["PYTHONPATH"] = str(runtime_root)
-    runtime_command = identity.runtime_command(command)
+    runtime_command = identity.runtime_command(
+        command,
+        source_environment=source_environment,
+    )
     if any(
         secret and any(secret in argument for argument in runtime_command)
         for secret in forbidden_tokens
@@ -1775,6 +2312,7 @@ def run_live_gate(
     image: ExactFixtureImage,
     executor: CommandExecutor,
     identity: BuildIdentity,
+    toolchain: PackageToolchain,
 ) -> None:
     """Exercise every archive variant in fresh exact-fixture state."""
 
@@ -1882,6 +2420,7 @@ def run_live_gate(
                 token=wrong_token,
                 expect_auth_failure=True,
                 forbidden_tokens=(token, wrong_token),
+                source_environment=toolchain.source_environment(),
             )
             run_one_quickstart(
                 executor,
@@ -1893,6 +2432,7 @@ def run_live_gate(
                 token=token,
                 expect_auth_failure=False,
                 forbidden_tokens=(token, wrong_token),
+                source_environment=toolchain.source_environment(),
             )
 
             assert_container_logs_safe(
@@ -1937,6 +2477,7 @@ def qualify(image_reference: str) -> dict[str, str]:
     repository_root = Path(__file__).resolve().parents[2]
     executor = CommandExecutor()
     identity = BuildIdentity.current()
+    toolchain = resolve_package_toolchain(identity, executor)
     image = resolve_exact_image(executor, image_reference)
     current_hash = current_source_tree_hash(repository_root, executor)
     if current_hash != image.source_tree_sha256:
@@ -1961,6 +2502,7 @@ def qualify(image_reference: str) -> dict[str, str]:
             current_hash,
             executor,
             identity,
+            toolchain,
         )
         after_staging_hash = current_source_tree_hash(repository_root, executor)
         if after_staging_hash != image.source_tree_sha256:
@@ -1973,6 +2515,7 @@ def qualify(image_reference: str) -> dict[str, str]:
             artifacts,
             executor,
             identity,
+            toolchain,
         )
         before_live_hash = current_source_tree_hash(repository_root, executor)
         if before_live_hash != image.source_tree_sha256:
@@ -1987,6 +2530,7 @@ def qualify(image_reference: str) -> dict[str, str]:
             image,
             executor,
             identity,
+            toolchain,
         )
         return {
             "fixture_image": image.fixture_id,

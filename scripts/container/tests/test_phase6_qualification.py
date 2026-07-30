@@ -44,6 +44,7 @@ SOURCE_TREE = "3c" * 32
 DEPENDENCY_LOCK = "4d" * 32
 REVISION = "5e" * 20
 PACKAGE_DIGEST = "sha256:" + ("6f" * 32)
+PACKAGE_TOOL_PATH = None if MODULE is None else MODULE._package_tool_path
 
 
 def require_module() -> object:
@@ -152,6 +153,615 @@ def expected_quickstart_summary(
     return f"public quick-start qualification passed: {encoded}\n"
 
 
+class PackageToolPathContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        if PACKAGE_TOOL_PATH is None:
+            raise AssertionError("Phase 6 package-tool path implementation is missing")
+        self.package_tool_path = PACKAGE_TOOL_PATH
+        self.temporary = tempfile.TemporaryDirectory(
+            prefix="xenoteer-phase6-node-path-test-"
+        )
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.home = self.root / "invoking-home"
+        self.home.mkdir(mode=0o775)
+        self.system_directory = self.root / "trusted-system"
+        self.system_directory.mkdir(mode=0o755)
+        self.uid = os.getuid()
+        self.gid = os.getgid()
+        self.account = SimpleNamespace(
+            pw_uid=self.uid,
+            pw_gid=self.gid,
+            pw_dir=str(self.home),
+            pw_name="phase6-builder",
+        )
+        self.runtime_outputs: dict[Path, object] = {}
+        self.probe_commands: list[tuple[str, ...]] = []
+
+    def install_nvm_version(
+        self,
+        version: str,
+        *,
+        include_node: bool = True,
+        include_npm: bool = True,
+    ) -> Path:
+        version_directory = self.home / ".nvm/versions/node" / version
+        bin_directory = version_directory / "bin"
+        bin_directory.mkdir(parents=True, mode=0o755)
+        for directory in (
+            self.home / ".nvm",
+            self.home / ".nvm/versions",
+            self.home / ".nvm/versions/node",
+            version_directory,
+        ):
+            directory.chmod(0o775)
+        if include_node:
+            node = bin_directory / "node"
+            node.write_text(
+                f"#!/bin/sh\nprintf '%s\\n' {version}\n",
+                encoding="utf-8",
+            )
+            node.chmod(0o755)
+            self.runtime_outputs[node] = version
+        if include_npm:
+            npm_target = (
+                version_directory
+                / "lib/node_modules/npm/bin/npm-cli.js"
+            )
+            npm_target.parent.mkdir(parents=True, mode=0o755)
+            npm_target.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+            npm_target.chmod(0o775)
+            (bin_directory / "npm").symlink_to(
+                os.path.relpath(npm_target, bin_directory)
+            )
+        return version_directory
+
+    def _runtime_probe(self, command: object, **kwargs: object) -> object:
+        del kwargs
+        arguments = tuple(str(argument) for argument in command)
+        self.probe_commands.append(arguments)
+        node_candidates = [
+            Path(argument)
+            for argument in arguments
+            if Path(argument).is_absolute() and Path(argument).name == "node"
+        ]
+        if len(node_candidates) != 1:
+            raise AssertionError(f"unexpected Node probe command: {arguments!r}")
+        result = self.runtime_outputs[node_candidates[0]]
+        if isinstance(result, BaseException):
+            raise result
+        if isinstance(result, tuple):
+            returncode, stdout, stderr = result
+        else:
+            returncode, stdout, stderr = 0, f"{result}\n", ""
+        return SimpleNamespace(
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    def select_path(
+        self,
+        *,
+        as_root: bool = False,
+        environment: dict[str, str] | None = None,
+        primary_gid: int | None = None,
+        trusted_system_path: str | None = None,
+    ) -> str:
+        account = SimpleNamespace(
+            **{
+                **vars(self.account),
+                "pw_gid": self.gid if primary_gid is None else primary_gid,
+            }
+        )
+
+        def lookup(uid: int) -> object:
+            if uid != self.uid:
+                raise KeyError(uid)
+            return account
+
+        source_environment = {
+            "HOME": "/tmp/hostile-home",
+            "NVM_BIN": "/tmp/hostile-nvm/bin",
+            "NVM_DIR": "/tmp/hostile-nvm",
+            "PATH": "/tmp/hostile-bin",
+        }
+        if as_root:
+            source_environment.update(
+                {
+                    "SUDO_UID": str(self.uid),
+                    "SUDO_GID": str(account.pw_gid),
+                }
+            )
+        if environment is not None:
+            source_environment.update(environment)
+        with (
+            mock.patch.object(
+                self.package_tool_path.__globals__["os"],
+                "geteuid",
+                return_value=0 if as_root else self.uid,
+            ),
+            mock.patch.object(
+                self.package_tool_path.__globals__["pwd"],
+                "getpwuid",
+                side_effect=lookup,
+            ),
+            mock.patch.object(
+                self.package_tool_path.__globals__["subprocess"],
+                "run",
+                side_effect=self._runtime_probe,
+            ),
+            mock.patch.dict(
+                self.package_tool_path.__globals__,
+                {
+                    "TRUSTED_SYSTEM_PATH": (
+                        str(self.system_directory)
+                        if trusted_system_path is None
+                        else trusted_system_path
+                    )
+                },
+            ),
+        ):
+            return self.package_tool_path(self.root, source_environment)
+
+    def test_exact_root_lane_path_admits_node24_and_survives_sanitization(
+        self,
+    ) -> None:
+        version_directory = self.install_nvm_version("v24.18.0")
+
+        selected = self.select_path(as_root=True)
+
+        expected = os.pathsep.join(
+            (
+                str(version_directory / "bin"),
+                str(self.home / ".cargo/bin"),
+                str(self.system_directory),
+            )
+        )
+        self.assertEqual(selected, expected)
+        self.assertNotIn("/tmp/hostile", selected)
+        self.assertEqual(self.probe_commands, [])
+        pair = require_module().ExactImagePair(
+            production=image_metadata(PRODUCTION_ID, fixture=False),
+            fixture=image_metadata(FIXTURE_ID, fixture=True),
+            source=source_identity(),
+        )
+        lane = require_module().qualification_lanes(
+            REPOSITORY_ROOT,
+            sys.executable,
+            pair,
+            package_tool_path=selected,
+        )[-1]
+        self.assertEqual(
+            lane.environment,
+            (("XENOTEER_PACKAGE_BUILD_PATH", expected),),
+        )
+
+    def test_node22_only_and_node24_only_are_admitted(self) -> None:
+        for version in ("v22.19.1", "v24.18.0"):
+            with self.subTest(version=version):
+                self.probe_commands.clear()
+                version_directory = self.install_nvm_version(version)
+                selected = self.select_path()
+                self.assertEqual(
+                    selected.split(os.pathsep)[0],
+                    str(version_directory / "bin"),
+                )
+
+    def test_highest_supported_semantic_version_is_deterministic(self) -> None:
+        self.install_nvm_version("v22.99.1")
+        self.install_nvm_version("v24.2.0")
+        expected = self.install_nvm_version("v24.18.0")
+
+        selected = self.select_path()
+
+        self.assertEqual(selected.split(os.pathsep)[0], str(expected / "bin"))
+        self.assertEqual(self.probe_commands, [])
+
+    def test_unsupported_versions_and_aliases_are_ignored(self) -> None:
+        self.install_nvm_version("v20.20.0")
+        self.install_nvm_version("v23.11.1")
+        default_alias = self.home / ".nvm/versions/node/default"
+        default_alias.symlink_to("v23.11.1", target_is_directory=True)
+
+        with self.assertRaisesRegex(
+            require_module().QualificationError,
+            "supported Node 22 or 24",
+        ):
+            self.select_path()
+
+        self.assertEqual(self.probe_commands, [])
+
+    def test_supported_system_node_and_npm_must_share_one_fixed_directory(
+        self,
+    ) -> None:
+        node_only = self.root / "node-only-system"
+        npm_only = self.root / "npm-only-system"
+        node_only.mkdir()
+        npm_only.mkdir()
+        node = node_only / "node"
+        node.write_text(
+            "#!/bin/sh\nprintf '%s\\n' v22.20.0\n",
+            encoding="utf-8",
+        )
+        node.chmod(0o755)
+        npm = npm_only / "npm"
+        npm.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+        npm.chmod(0o755)
+        self.runtime_outputs[node] = "v22.20.0"
+        system_path = os.pathsep.join((str(node_only), str(npm_only)))
+        module = require_module()
+        original_trust = module._trusted_non_symlink_directory
+
+        def trust_test_system(
+            identity: object,
+            directory: Path,
+            *,
+            root_owned: bool = False,
+        ) -> bool:
+            if root_owned and directory in {node_only, npm_only}:
+                return True
+            return original_trust(
+                identity,
+                directory,
+                root_owned=root_owned,
+            )
+
+        with (
+            mock.patch.object(
+                module,
+                "_trusted_non_symlink_directory",
+                side_effect=trust_test_system,
+            ),
+            self.assertRaisesRegex(
+                module.QualificationError,
+                "supported Node 22 or 24",
+            ),
+        ):
+            self.select_path(trusted_system_path=system_path)
+        self.assertEqual(self.probe_commands, [])
+
+    def test_coherent_supported_system_pair_is_a_safe_fallback(self) -> None:
+        node = self.system_directory / "node"
+        node.write_text(
+            "#!/bin/sh\nprintf '%s\\n' v22.20.0\n",
+            encoding="utf-8",
+        )
+        node.chmod(0o755)
+        npm = self.system_directory / "npm"
+        npm.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+        npm.chmod(0o755)
+        self.runtime_outputs[node] = "v22.20.0"
+        module = require_module()
+        original_trust = module._trusted_non_symlink_directory
+
+        def trust_test_system(
+            identity: object,
+            directory: Path,
+            *,
+            root_owned: bool = False,
+        ) -> bool:
+            if root_owned and directory == self.system_directory:
+                return True
+            return original_trust(
+                identity,
+                directory,
+                root_owned=root_owned,
+            )
+
+        with (
+            mock.patch.object(
+                module,
+                "_trusted_non_symlink_directory",
+                side_effect=trust_test_system,
+            ),
+            mock.patch.object(
+                module,
+                "_strict_root_owned_system_executable",
+                return_value=True,
+            ),
+        ):
+            selected = self.select_path()
+
+        self.assertEqual(
+            selected,
+            os.pathsep.join(
+                (
+                    str(self.system_directory),
+                    str(self.home / ".cargo/bin"),
+                    str(self.system_directory),
+                )
+            ),
+        )
+        self.assertEqual(self.probe_commands, [])
+
+    def test_system_symlinks_cannot_admit_user_owned_writable_targets(
+        self,
+    ) -> None:
+        target_directory = self.root / "invoking-user-tools"
+        target_directory.mkdir(mode=0o775)
+        target_node = target_directory / "node"
+        target_node.write_text(
+            "#!/bin/sh\nprintf '%s\\n' v22.20.0\n",
+            encoding="utf-8",
+        )
+        target_node.chmod(0o755)
+        target_npm = target_directory / "npm"
+        target_npm.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+        target_npm.chmod(0o755)
+        system_node = self.system_directory / "node"
+        system_npm = self.system_directory / "npm"
+        system_node.symlink_to(target_node)
+        system_npm.symlink_to(target_npm)
+        self.runtime_outputs[system_node] = "v22.20.0"
+        module = require_module()
+        original_trust = module._trusted_non_symlink_directory
+
+        def trust_test_system(
+            identity: object,
+            directory: Path,
+            *,
+            root_owned: bool = False,
+        ) -> bool:
+            if root_owned and directory == self.system_directory:
+                return True
+            return original_trust(
+                identity,
+                directory,
+                root_owned=root_owned,
+            )
+
+        with (
+            mock.patch.object(
+                module,
+                "_trusted_non_symlink_directory",
+                side_effect=trust_test_system,
+            ),
+            self.assertRaisesRegex(
+                module.QualificationError,
+                "supported Node 22 or 24",
+            ),
+        ):
+            self.select_path()
+        self.assertEqual(self.probe_commands, [])
+
+    def test_system_target_metadata_rejects_every_nonroot_writer(self) -> None:
+        module = require_module()
+        root_owned = SimpleNamespace(
+            st_uid=0,
+            st_mode=stat.S_IFREG | 0o755,
+        )
+        invoking_user_owned = SimpleNamespace(
+            st_uid=self.uid,
+            st_mode=stat.S_IFREG | 0o755,
+        )
+        group_writable = SimpleNamespace(
+            st_uid=0,
+            st_mode=stat.S_IFREG | 0o775,
+        )
+        world_writable = SimpleNamespace(
+            st_uid=0,
+            st_mode=stat.S_IFREG | 0o757,
+        )
+
+        self.assertTrue(module._root_owned_without_nonroot_writes(root_owned))
+        for metadata in (
+            invoking_user_owned,
+            group_writable,
+            world_writable,
+        ):
+            with self.subTest(metadata=metadata):
+                self.assertFalse(
+                    module._root_owned_without_nonroot_writes(metadata)
+                )
+
+    def test_malformed_names_purporting_supported_majors_fail_closed(self) -> None:
+        malformed_names = (
+            "v22",
+            "v22.1",
+            "v22.01.0",
+            "v024.1.0",
+            "v24.1.0-rc.1",
+            "v24garbage",
+            f"v24.{'9' * 11}.0",
+        )
+        for index, name in enumerate(malformed_names):
+            with self.subTest(name=name):
+                version_root = (
+                    self.home
+                    / f"case-{index}/.nvm/versions/node"
+                )
+                version_root.mkdir(parents=True)
+                (version_root / name).mkdir()
+                original_home = self.account.pw_dir
+                self.account.pw_dir = str(version_root.parents[2])
+                try:
+                    with self.assertRaisesRegex(
+                        require_module().QualificationError,
+                        "malformed supported NVM Node version",
+                    ):
+                        self.select_path()
+                finally:
+                    self.account.pw_dir = original_home
+
+    def test_enormous_supported_looking_major_is_classified_without_int(
+        self,
+    ) -> None:
+        module = require_module()
+        name = f"v{'0' * 5000}24.1.0"
+
+        self.assertIsNone(module._nvm_version(name))
+        self.assertTrue(module._purports_supported_node_major(name))
+
+    def test_supported_installations_require_coherent_node_and_npm(self) -> None:
+        cases = (
+            {"include_node": False, "include_npm": True},
+            {"include_node": True, "include_npm": False},
+        )
+        for index, options in enumerate(cases):
+            with self.subTest(options=options):
+                version = f"v24.{index}.0"
+                self.install_nvm_version(version, **options)
+                with self.assertRaisesRegex(
+                    require_module().QualificationError,
+                    "supported NVM Node installation is untrusted or incomplete",
+                ):
+                    self.select_path()
+
+    def test_hostile_environment_cannot_select_a_different_nvm_home(self) -> None:
+        expected = self.install_nvm_version("v22.19.1")
+        hostile_home = self.root / "hostile-home"
+        hostile_version = hostile_home / ".nvm/versions/node/v24.99.0/bin"
+        hostile_version.mkdir(parents=True)
+        for executable in ("node", "npm"):
+            path = hostile_version / executable
+            path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            path.chmod(0o755)
+
+        selected = self.select_path(
+            environment={
+                "HOME": str(hostile_home),
+                "NVM_BIN": str(hostile_version),
+                "NVM_DIR": str(hostile_home / ".nvm"),
+                "PATH": str(hostile_version),
+            }
+        )
+
+        self.assertEqual(selected.split(os.pathsep)[0], str(expected / "bin"))
+        self.assertNotIn(str(hostile_home), selected)
+
+    def test_qualifier_shape_scan_never_executes_invoking_user_node(self) -> None:
+        self.install_nvm_version("v24.18.0")
+
+        self.select_path()
+
+        self.assertEqual(self.probe_commands, [])
+
+    def test_group_writes_require_the_invoking_primary_group(self) -> None:
+        self.install_nvm_version("v24.18.0")
+        self.assertIn("v24.18.0/bin", self.select_path())
+
+        with self.assertRaisesRegex(
+            require_module().QualificationError,
+            "untrusted or incomplete",
+        ):
+            self.select_path(primary_gid=self.gid + 1)
+
+    def test_directory_file_and_traversal_permissions_fail_closed(self) -> None:
+        cases = ("directory", "node", "npm-target", "traversal")
+        for index, case in enumerate(cases):
+            with self.subTest(case=case):
+                version = f"v24.{index}.0"
+                version_directory = self.install_nvm_version(version)
+                if case == "directory":
+                    (version_directory / "bin").chmod(0o777)
+                elif case == "node":
+                    (version_directory / "bin/node").chmod(0o644)
+                elif case == "npm-target":
+                    (
+                        version_directory
+                        / "lib/node_modules/npm/bin/npm-cli.js"
+                    ).chmod(0o777)
+                else:
+                    (self.home / ".nvm").chmod(0o666)
+                    self.addCleanup((self.home / ".nvm").chmod, 0o775)
+                with self.assertRaisesRegex(
+                    require_module().QualificationError,
+                    "untrusted or incomplete",
+                ):
+                    self.select_path()
+                if case != "traversal":
+                    for child in (
+                        self.home / ".nvm/versions/node"
+                    ).iterdir():
+                        if child.name != version:
+                            child.rename(child.with_name(f"ignored-v23-{child.name}"))
+
+    def test_symlinked_layout_and_escaping_npm_target_fail_closed(self) -> None:
+        actual = self.root / "actual-v24"
+        actual.mkdir()
+        version_root = self.home / ".nvm/versions/node"
+        version_root.mkdir(parents=True)
+        (version_root / "v24.18.0").symlink_to(
+            actual,
+            target_is_directory=True,
+        )
+        with self.assertRaisesRegex(
+            require_module().QualificationError,
+            "untrusted or incomplete",
+        ):
+            self.select_path()
+
+        (version_root / "v24.18.0").unlink()
+        version_directory = self.install_nvm_version("v24.18.0")
+        npm = version_directory / "bin/npm"
+        npm.unlink()
+        external_target = self.root / "outside/npm-cli.js"
+        external_target.parent.mkdir()
+        external_target.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+        external_target.chmod(0o755)
+        npm.symlink_to(os.path.relpath(external_target, npm.parent))
+        with self.assertRaisesRegex(
+            require_module().QualificationError,
+            "untrusted or incomplete",
+        ):
+            self.select_path()
+
+    def test_runtime_execution_is_deferred_to_lane7_package_use(
+        self,
+    ) -> None:
+        version_directory = self.install_nvm_version("v24.18.0")
+        node = version_directory / "bin/node"
+        self.runtime_outputs[node] = subprocess.TimeoutExpired(
+            ("node", "--version"),
+            5,
+        )
+
+        selected = self.select_path()
+
+        self.assertEqual(
+            selected.split(os.pathsep)[0],
+            str(version_directory / "bin"),
+        )
+        self.assertEqual(self.probe_commands, [])
+
+    def test_nvm_scan_rejects_too_many_entries_before_sorting(self) -> None:
+        versions_root = self.home / ".nvm/versions/node"
+        versions_root.mkdir(parents=True)
+        for index in range(65):
+            (versions_root / f"unsupported-{index:03d}").mkdir()
+
+        with self.assertRaisesRegex(
+            require_module().QualificationError,
+            "too many NVM Node entries",
+        ):
+            self.select_path()
+
+    def test_nvm_scan_deletion_race_is_a_typed_failure(self) -> None:
+        version_directory = self.install_nvm_version("v24.18.0")
+        versions_root = version_directory.parent
+        original_iterdir = Path.iterdir
+
+        def racing_iterdir(path: Path) -> object:
+            if path != versions_root:
+                return original_iterdir(path)
+
+            def entries() -> object:
+                yield version_directory
+                (version_directory / "bin/node").unlink()
+
+            return entries()
+
+        with (
+            mock.patch.object(Path, "iterdir", racing_iterdir),
+            self.assertRaisesRegex(
+                require_module().QualificationError,
+                "untrusted or incomplete",
+            ),
+        ):
+            self.select_path()
+
+
 class RecordingLaneRunner:
     """Write deterministic lane logs and optionally fail one lane."""
 
@@ -197,6 +807,16 @@ class QualificationContractTests(unittest.TestCase):
         self.heavy_lock = self.root / "heavy.lock"
         self.session_lock = self.root / "session.lock"
         self.evidence = self.root / "evidence"
+        self.reviewed_package_tool_path = (
+            f"{Path.home()}/.cargo/bin:{self.module.TRUSTED_SYSTEM_PATH}"
+        )
+        package_path_patch = mock.patch.object(
+            self.module,
+            "_package_tool_path",
+            return_value=self.reviewed_package_tool_path,
+        )
+        package_path_patch.start()
+        self.addCleanup(package_path_patch.stop)
 
     def qualify(
         self,
@@ -356,7 +976,12 @@ class QualificationContractTests(unittest.TestCase):
                         ),
                         FIXTURE_ID,
                     ),
-                    (("PATH", self.module.TRUSTED_SYSTEM_PATH),),
+                    (
+                        (
+                            "XENOTEER_PACKAGE_BUILD_PATH",
+                            self.module.TRUSTED_SYSTEM_PATH,
+                        ),
+                    ),
                     self.module.LockMode.INNER,
                     20 * 60,
                     (15, 3),
@@ -596,6 +1221,7 @@ class QualificationContractTests(unittest.TestCase):
             "HOME": "/tmp/attacker-home",
             "LD_PRELOAD": "/tmp/attacker.so",
             "PATH": "/tmp/attacker-bin:/usr/bin",
+            "XENOTEER_PACKAGE_BUILD_PATH": "/tmp/attacker-package-bin",
             "PYTHONHOME": "/tmp/python",
             "PYTHONPATH": "/tmp/python",
             "XENOTEER_DESKTOP_MATRIX_SCOPE": "hardened-only",
@@ -639,14 +1265,18 @@ class QualificationContractTests(unittest.TestCase):
                 )
                 if lane_name == "public-quickstarts":
                     self.assertEqual(
-                        lane_overrides["PATH"],
-                        (
-                            f"{lane_environment['HOME']}/.cargo/bin:"
-                            f"{self.module.TRUSTED_SYSTEM_PATH}"
-                        ),
+                        lane_overrides["XENOTEER_PACKAGE_BUILD_PATH"],
+                        self.reviewed_package_tool_path,
+                    )
+                    self.assertEqual(
+                        lane_environment["PATH"],
+                        self.module.TRUSTED_SYSTEM_PATH,
                     )
                 else:
-                    self.assertNotIn("PATH", lane_overrides)
+                    self.assertNotIn(
+                        "XENOTEER_PACKAGE_BUILD_PATH",
+                        lane_overrides,
+                    )
 
     def test_rejects_invalid_image_identity_and_ancestry_before_lane1(self) -> None:
         cases = {
