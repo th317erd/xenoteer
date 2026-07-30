@@ -38,6 +38,9 @@ GTK_TITLE = "Xenoteer GTK3 Fixture — Main"
 XMESSAGE_TITLE = "xmessage"
 VIEWER_ORIGIN = "https://viewer.example"
 UNICODE_TEXT = "Xenoteer — العربية — 中文 — e\u0301 — 😀"
+TRANSPORT_REQUEST_TIMEOUT_MILLISECONDS = 35_000
+SERVER_LONG_POLL_TIMEOUT_MILLISECONDS = 30_000
+EXAMPLE_OVERALL_TIMEOUT_MILLISECONDS = 110_000
 
 
 def required(name: str) -> str:
@@ -129,7 +132,7 @@ async def wait_element(desktop: Any, name: str) -> Any:
             },
             "predicate": {"type": "exists"},
             "after_revision": None,
-            "timeout_ms": 30_000,
+            "timeout_ms": SERVER_LONG_POLL_TIMEOUT_MILLISECONDS,
             "allow_poll_fallback": True,
             **accessibility_options(component=False),
         }
@@ -151,7 +154,7 @@ async def wait_window(desktop: Any, title: str) -> Any:
             },
             "predicate": {"type": "exists"},
             "after_revision": None,
-            "timeout_ms": 30_000,
+            "timeout_ms": SERVER_LONG_POLL_TIMEOUT_MILLISECONDS,
         }
     )
     return await desktop.windows.one(selector, order="creation_ascending")
@@ -387,7 +390,7 @@ async def exercise_scoped(desktop: Any, language: str, lease: Any) -> None:
             ClientOptions(
                 base_url=required("XENOTEER_API_BASE"),
                 token=required("XENOTEER_TOKEN"),
-                request_timeout=5,
+                request_timeout=TRANSPORT_REQUEST_TIMEOUT_MILLISECONDS / 1_000,
             )
         )
         async with reconnect:
@@ -473,7 +476,7 @@ async def exercise() -> None:
     options = ClientOptions(
         base_url=required("XENOTEER_API_BASE"),
         token=required("XENOTEER_TOKEN"),
-        request_timeout=5,
+        request_timeout=TRANSPORT_REQUEST_TIMEOUT_MILLISECONDS / 1_000,
     )
     try:
         client = await XenoteerClient.connect(options)
@@ -499,7 +502,12 @@ async def exercise() -> None:
 
 def main() -> int:
     try:
-        asyncio.run(asyncio.wait_for(exercise(), timeout=110))
+        asyncio.run(
+            asyncio.wait_for(
+                exercise(),
+                timeout=EXAMPLE_OVERALL_TIMEOUT_MILLISECONDS / 1_000,
+            )
+        )
     except XenoteerError as error:
         print(
             f"public Python behavior example failed: XenoteerError[{error.code}]",

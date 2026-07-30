@@ -27,6 +27,12 @@ const GTK_TITLE = 'Xenoteer GTK3 Fixture — Main';
 const XMESSAGE_TITLE = 'xmessage';
 const VIEWER_ORIGIN = 'https://viewer.example';
 const UNICODE_TEXT = 'Xenoteer — العربية — 中文 — e\u0301 — 😀';
+const TRANSPORT_REQUEST_TIMEOUT_MILLISECONDS = 35_000;
+const SERVER_LONG_POLL_TIMEOUT_MILLISECONDS = 30_000;
+// JavaScript promises do not provide structured cancellation. A Promise.race
+// would report a timeout while an in-flight mutation or cleanup kept running.
+// The package gate therefore owns the honest whole-process deadline.
+const EXTERNAL_PROCESS_TIMEOUT_MILLISECONDS = 120_000;
 
 function required(name) {
   const value = process.env[name];
@@ -104,7 +110,7 @@ async function waitElement(desktop, name) {
     target: { type: 'selector', selector, quantifier: 'exactly_one' },
     predicate: { type: 'exists' },
     after_revision: null,
-    timeout_ms: 30_000,
+    timeout_ms: SERVER_LONG_POLL_TIMEOUT_MILLISECONDS,
     allow_poll_fallback: true,
     ...accessibilitySpec(false),
   });
@@ -117,7 +123,7 @@ async function waitWindow(desktop, title) {
     target: { type: 'selector', selector, quantifier: 'exactly_one' },
     predicate: { type: 'exists' },
     after_revision: null,
-    timeout_ms: 30_000,
+    timeout_ms: SERVER_LONG_POLL_TIMEOUT_MILLISECONDS,
   });
   return await desktop.windows.one(selector, 'creation_ascending');
 }
@@ -356,7 +362,7 @@ async function exerciseScoped(desktop, language, lease) {
     const reconnect = await XenoteerClient.connect({
       baseUrl: required('XENOTEER_API_BASE'),
       token: required('XENOTEER_TOKEN'),
-      requestTimeoutMs: 5_000,
+      requestTimeoutMs: TRANSPORT_REQUEST_TIMEOUT_MILLISECONDS,
     });
     try {
       const recovered = await reconnect.desktop().command(knownCommandId);
@@ -440,6 +446,10 @@ async function exerciseScoped(desktop, language, lease) {
 
 async function exercise() {
   verifyInstalledOrigin();
+  requireCondition(
+    EXTERNAL_PROCESS_TIMEOUT_MILLISECONDS >= 2 * TRANSPORT_REQUEST_TIMEOUT_MILLISECONDS,
+    'external process deadline does not cover an operation plus cleanup',
+  );
   const language = required('XENOTEER_QUICKSTART_LANGUAGE');
   requireCondition(/^[a-z-]+$/u.test(language), 'quick-start language label is invalid');
   const expectAuthenticationFailure = required('XENOTEER_EXPECT_AUTH_FAILURE') === '1';
@@ -448,7 +458,7 @@ async function exercise() {
     client = await XenoteerClient.connect({
       baseUrl: required('XENOTEER_API_BASE'),
       token: required('XENOTEER_TOKEN'),
-      requestTimeoutMs: 5_000,
+      requestTimeoutMs: TRANSPORT_REQUEST_TIMEOUT_MILLISECONDS,
     });
   } catch (error) {
     if (

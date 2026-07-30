@@ -195,6 +195,38 @@
   against the same immutable release-candidate image ID, cover bounded
   invalid-auth/failure cleanup as well as success, and reject daemon binary
   overrides.
+- The first exact Phase-6 candidates were production
+  `sha256:723a53474f3ba61ed00695f7355a85a559b4bf4e393bb1f6fd6adc2dc7f06158`
+  and fixture
+  `sha256:4f094fc2d1c13bdb646ce15f679718d0b2efcbee3b75aead8f91d1776d6e0d09`
+  from clean source commit `99ae21bc8aa78f2da73c437a55756af6bed77853`.
+  All six serial Docker live gates passed. The final staged-package gate then
+  reproduced a real cross-language example bug: each example overrode the
+  SDK's 35-second request default with 5 seconds while issuing 10-30-second
+  server long polls. The Rust crate passed status and scoped launch, then
+  failed its first window wait with `SDK request timed out`. No package digest
+  was accepted and both images must be rebuilt after the fail-first fix so
+  their source identity remains exact.
+- The first deadline-fix review confirmed that the implementations use a
+  35-second transport request deadline around at most 30-second server long
+  polls, but rejected the initial regression as incomplete: it counted current
+  timeout expressions and could miss a new unconfigured transport constructor,
+  an omitted/aliased wait timeout, or an unsafe overall-deadline reduction.
+  The proportional follow-up also counts generic connect/wait member access and
+  exact SDK client-symbol references so ordinary type aliases and extracted
+  receiver aliases fail closed; intentionally obfuscated computed properties
+  remain outside a source-shape contract and are covered behaviorally by the
+  exact staged-artifact gate.
+  Phase 6 does not close until mutation tests make those sibling regressions
+  fail closed and the exact staged-artifact image gate passes.
+- The accepted deadline fix uses 35,000 ms transport requests, at most 30,000 ms
+  server long polls, named 110,000 ms Rust/Python internal bounds, and an honest
+  120,000 ms TypeScript whole-process gate rather than a non-cancelling
+  `Promise.race`. The final source contract passes 29 tests and rejects the
+  original three-language defect plus unconfigured constructors, omitted/
+  aliased/computed waits, lowered internal/external bounds, client aliases, and
+  extracted wait receivers. Independent re-review reported no high/medium
+  findings; the full container static gate also passes.
 - The Phase-6 example audit found that semantic text previously proved only
   character counts. Closure adds a content-private AT-SPI backend comparison
   that returns only exact-match boolean evidence for unprotected fields, keeps

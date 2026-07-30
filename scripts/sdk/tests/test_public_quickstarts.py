@@ -8,12 +8,15 @@ import copy
 import importlib.util
 import io
 import json
+import re
 import shutil
 import sys
 import tarfile
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
+from unittest import mock
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -24,6 +27,273 @@ if SPEC is None or SPEC.loader is None:
 MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
+
+EXAMPLE_PATHS = {
+    "rust": (
+        REPOSITORY_ROOT
+        / "crates"
+        / "xenoteer-sdk"
+        / "examples"
+        / "phase6_behaviors.rs"
+    ),
+    "typescript": (
+        REPOSITORY_ROOT
+        / "packages"
+        / "typescript"
+        / "examples"
+        / "phase6-behaviors.mjs"
+    ),
+    "python": (
+        REPOSITORY_ROOT
+        / "packages"
+        / "python"
+        / "src"
+        / "xenoteer"
+        / "examples"
+        / "phase6_behaviors.py"
+    ),
+}
+TRANSPORT_DEADLINE = "TRANSPORT_REQUEST_TIMEOUT_MILLISECONDS"
+SERVER_LONG_POLL_DEADLINE = "SERVER_LONG_POLL_TIMEOUT_MILLISECONDS"
+EXAMPLE_OVERALL_DEADLINE = "EXAMPLE_OVERALL_TIMEOUT_MILLISECONDS"
+EXTERNAL_PROCESS_DEADLINE = "EXTERNAL_PROCESS_TIMEOUT_MILLISECONDS"
+
+
+def _require_contract(condition: bool, message: str) -> None:
+    if not condition:
+        raise AssertionError(message)
+
+
+def _require_shape(
+    source: str,
+    expected: int,
+    patterns: tuple[str, ...],
+    message: str,
+) -> None:
+    counts = [len(re.findall(pattern, source)) for pattern in patterns]
+    _require_contract(
+        all(count == expected for count in counts),
+        f"{message}: expected {expected}, observed {counts}",
+    )
+
+
+def _integer_constant(source: str, name: str, language: str) -> int:
+    type_annotation = r"(?:\s*:\s*u(?:32|64))?" if language == "rust" else ""
+    matches = re.findall(
+        rf"\b{re.escape(name)}{type_annotation}\s*=\s*([0-9_]+)",
+        source,
+    )
+    _require_contract(len(matches) == 1, f"{language} must define {name} exactly once")
+    return int(matches[0].replace("_", ""))
+
+
+def validate_package_example_deadlines() -> None:
+    """Check the deliberately small, reviewed Phase 6 example manifest.
+
+    Exact shape counts are intentional: a new constructor or wait fails closed
+    until this contract is updated with its reviewed deadline expression.
+    Deliberate computed/dynamic property obfuscation is outside this source-shape
+    contract; the exact staged-package E2E remains the behavioral backstop.
+    """
+    sources = {
+        language: path.read_text(encoding="utf-8")
+        for language, path in EXAMPLE_PATHS.items()
+    }
+    transport_deadlines: dict[str, int] = {}
+    server_deadlines: dict[str, int] = {}
+    for language, source in sources.items():
+        transport_deadlines[language] = _integer_constant(
+            source,
+            TRANSPORT_DEADLINE,
+            language,
+        )
+        server_deadlines[language] = _integer_constant(
+            source,
+            SERVER_LONG_POLL_DEADLINE,
+            language,
+        )
+        _require_contract(
+            transport_deadlines[language] == 35_000,
+            f"{language} transport deadline must remain 35 seconds",
+        )
+        _require_contract(
+            0 < server_deadlines[language] <= 30_000,
+            f"{language} server long-poll deadline must remain bounded",
+        )
+
+    shapes = {
+        "rust": (
+            (2, (r"\bClient\b",), "Rust Client symbol references changed"),
+            (
+                6,
+                (r"\bXenoteerClient\b",),
+                "Rust XenoteerClient symbol references changed",
+            ),
+            (
+                1,
+                (
+                    r"\bClient::new\b",
+                    r"\bXenoteerClient::from_transport\b",
+                    r"with_request_timeout\(\s*Duration::from_millis\(\s*"
+                    rf"{TRANSPORT_DEADLINE}\s*,?\s*\)\s*\)",
+                ),
+                "every Rust constructor must remain in its bounded helper",
+            ),
+            (
+                3,
+                (
+                    r"\.(?:windows|accessibility)\(\)\s*\.wait\b",
+                    r"\.wait\s*\(",
+                    r"\b(?:Window|Element)WaitRequest\s*\{",
+                    rf"\btimeout_ms\s*:\s*{SERVER_LONG_POLL_DEADLINE}\s*,",
+                ),
+                "every Rust wait must use the reviewed direct deadline",
+            ),
+        ),
+        "typescript": (
+            (
+                3,
+                (r"\bXenoteerClient\b",),
+                "TypeScript XenoteerClient symbol references changed",
+            ),
+            (
+                2,
+                (
+                    r"\bXenoteerClient\.connect\b",
+                    r"\.connect\s*\(",
+                    rf"\brequestTimeoutMs\s*:\s*{TRANSPORT_DEADLINE}\s*,",
+                ),
+                "every TypeScript connect must use the named deadline",
+            ),
+            (
+                3,
+                (
+                    r"\.(?:windows|accessibility)\.wait\b",
+                    r"\.wait\s*\(",
+                    r"\btimeout_ms\s*:\s*"
+                    rf"(?:{SERVER_LONG_POLL_DEADLINE}|15_000)\s*,",
+                ),
+                "every TypeScript wait must use a reviewed direct deadline",
+            ),
+        ),
+        "python": (
+            (
+                4,
+                (r"\bXenoteerClient\b",),
+                "Python XenoteerClient symbol references changed",
+            ),
+            (
+                3,
+                (r"\bClientOptions\b",),
+                "Python ClientOptions symbol references changed",
+            ),
+            (
+                2,
+                (
+                    r"\bXenoteerClient\.connect\b",
+                    r"\.connect\s*\(",
+                    r"\bClientOptions\s*\(",
+                    rf"\brequest_timeout\s*=\s*{TRANSPORT_DEADLINE}\s*/\s*1_000\s*,",
+                ),
+                "every Python connect/options path must use the named deadline",
+            ),
+            (
+                3,
+                (
+                    r"\.(?:windows|accessibility)\.wait\b",
+                    r"\.wait\s*\(",
+                    r"""["']timeout_ms["']\s*:\s*"""
+                    rf"(?:{SERVER_LONG_POLL_DEADLINE}|15_000)\s*,",
+                ),
+                "every Python wait must use a reviewed direct deadline",
+            ),
+        ),
+    }
+    for language, language_shapes in shapes.items():
+        for expected, patterns, message in language_shapes:
+            _require_shape(sources[language], expected, patterns, message)
+
+    python = sources["python"]
+    _require_contract(
+        len(re.findall(r"\boptions\s*=\s*ClientOptions\s*\(", python))
+        == len(re.findall(r"\bXenoteerClient\.connect\s*\(\s*options\s*\)", python))
+        == 1,
+        "Python main connect must consume its reviewed options data flow",
+    )
+
+    external_deadline = MODULE.QUICKSTART_COMMAND_TIMEOUT_SECONDS * 1_000
+    _require_contract(
+        external_deadline == 120_000
+        and MODULE.PACKAGE_COMMAND_TIMEOUT_SECONDS * 1_000 == external_deadline,
+        "public package process deadlines must remain exactly 120 seconds",
+    )
+    for language in ("rust", "python"):
+        internal_deadline = _integer_constant(
+            sources[language],
+            EXAMPLE_OVERALL_DEADLINE,
+            language,
+        )
+        _require_contract(
+            internal_deadline == 110_000,
+            f"{language} internal deadline must remain exactly 110 seconds",
+        )
+        _require_contract(
+            internal_deadline >= 2 * transport_deadlines[language]
+            and internal_deadline < external_deadline,
+            f"{language} internal deadline no longer covers work plus cleanup",
+        )
+    rust = sources["rust"]
+    _require_contract(
+        len(
+            re.findall(
+                r"tokio::time::timeout\(\s*Duration::from_millis\(\s*"
+                rf"{EXAMPLE_OVERALL_DEADLINE}\s*,?\s*\)\s*,\s*exercise\(\)",
+                rust,
+            )
+        )
+        == 1,
+        "Rust runtime must use the named internal deadline",
+    )
+    _require_contract(
+        len(
+            re.findall(
+                r"asyncio\.wait_for\(\s*exercise\(\)\s*,\s*timeout\s*=\s*"
+                rf"{EXAMPLE_OVERALL_DEADLINE}\s*/\s*1_000\s*,?\s*\)",
+                sources["python"],
+            )
+        )
+        == 1,
+        "Python runtime must use the named internal deadline",
+    )
+
+    typescript = sources["typescript"]
+    typescript_external = _integer_constant(
+        typescript,
+        EXTERNAL_PROCESS_DEADLINE,
+        "typescript",
+    )
+    _require_contract(
+        typescript_external == external_deadline
+        and typescript_external >= 2 * transport_deadlines["typescript"],
+        "TypeScript external deadline no longer covers work plus cleanup",
+    )
+    _require_contract(
+        len(
+            re.findall(
+                rf"{EXTERNAL_PROCESS_DEADLINE}\s*>=\s*2\s*\*\s*"
+                rf"{TRANSPORT_DEADLINE}",
+                typescript,
+            )
+        )
+        == 1,
+        "TypeScript must verify its operation-plus-cleanup process budget",
+    )
+    _require_contract(
+        "JavaScript promises do not provide structured cancellation" in typescript
+        and "The package gate therefore owns the honest whole-process deadline"
+        in typescript,
+        "TypeScript must document why it cannot claim a deceptive internal timeout",
+    )
 
 
 class RecordingExecutor:
@@ -814,6 +1084,188 @@ class PublicQuickstartContractTests(unittest.TestCase):
                 language="rust-crate",
                 expect_auth_failure=True,
             )
+
+    def test_package_examples_keep_transport_deadline_above_server_long_polls(
+        self,
+    ) -> None:
+        validate_package_example_deadlines()
+
+    def _assert_deadline_source_mutation_rejected(
+        self,
+        path: Path,
+        mutate: Callable[[str], str],
+    ) -> None:
+        original_read_text = Path.read_text
+
+        def mutated_read_text(
+            candidate: Path,
+            *args: object,
+            **kwargs: object,
+        ) -> str:
+            source = original_read_text(candidate, *args, **kwargs)
+            if candidate == path:
+                return mutate(source)
+            return source
+
+        with mock.patch.object(Path, "read_text", mutated_read_text):
+            with self.assertRaises(AssertionError):
+                validate_package_example_deadlines()
+
+    def test_deadline_contract_rejects_every_unconfigured_transport_constructor(
+        self,
+    ) -> None:
+        additions = {
+            "rust": (
+                "\nfn review_bypass(base: &str, token: &str) {\n"
+                "    let _ = Client::new(base, token.as_bytes());\n}\n"
+            ),
+            "typescript": (
+                "\nasync function reviewBypass(baseUrl, token) {\n"
+                "  return await XenoteerClient.connect({ baseUrl, token });\n}\n"
+            ),
+            "python": (
+                "\nasync def review_bypass(base_url: str, token: str) -> None:\n"
+                "    options = ClientOptions(base_url=base_url, token=token)\n"
+                "    await XenoteerClient.connect(options)\n"
+            ),
+        }
+        for language, addition in additions.items():
+            with self.subTest(language=language):
+                self._assert_deadline_source_mutation_rejected(
+                    EXAMPLE_PATHS[language],
+                    lambda source, addition=addition: source + addition,
+                )
+
+    def test_deadline_contract_rejects_aliased_client_constructors(self) -> None:
+        additions = {
+            "rust-import": (
+                "rust",
+                "\nuse reqwest::Client as ReviewClient;\n"
+                "fn review(base: &str, token: &str) {\n"
+                "    let _ = ReviewClient::new(base, token.as_bytes());\n}\n",
+            ),
+            "rust-type": (
+                "rust",
+                "\ntype ReviewClient = Client;\n"
+                "fn review(base: &str, token: &str) {\n"
+                "    let _ = ReviewClient::new(base, token.as_bytes());\n}\n",
+            ),
+            "rust-local": (
+                "rust",
+                "\nfn review(base: &str, token: &str) {\n"
+                "    use reqwest::Client as ReviewClient;\n"
+                "    let _ = ReviewClient::new(base, token.as_bytes());\n}\n",
+            ),
+            "typescript": (
+                "typescript",
+                "\nconst ReviewClient = XenoteerClient;\n"
+                "async function review(options) {\n"
+                "  return await ReviewClient.connect(options);\n}\n",
+            ),
+            "python": (
+                "python",
+                "\nReviewClient = XenoteerClient\n"
+                "async def review(options: Any) -> None:\n"
+                "    await ReviewClient.connect(options)\n",
+            ),
+        }
+        for mutation, (language, addition) in additions.items():
+            with self.subTest(mutation=mutation):
+                self._assert_deadline_source_mutation_rejected(
+                    EXAMPLE_PATHS[language],
+                    lambda source, addition=addition: source + addition,
+                )
+
+    def test_deadline_contract_rejects_extracted_wait_members(self) -> None:
+        additions = {
+            ("rust", "windows"): (
+                "\nasync fn review(desktop: &Desktop, request: &WindowWaitRequest) {\n"
+                "    let windows = desktop.windows();\n"
+                "    let _ = windows.wait(request).await;\n}\n"
+            ),
+            ("rust", "accessibility"): (
+                "\nasync fn review(desktop: &Desktop, request: &ElementWaitRequest) {\n"
+                "    let accessibility = desktop.accessibility();\n"
+                "    let _ = accessibility.wait(request).await;\n}\n"
+            ),
+            ("typescript", "windows"): (
+                "\nasync function review(desktop, request) {\n"
+                "  const windows = desktop.windows;\n"
+                "  await windows.wait(request);\n}\n"
+            ),
+            ("typescript", "accessibility"): (
+                "\nasync function review(desktop, request) {\n"
+                "  const accessibility = desktop.accessibility;\n"
+                "  await accessibility.wait(request);\n}\n"
+            ),
+            ("python", "windows"): (
+                "\nasync def review(desktop: Any, request: Any) -> None:\n"
+                "    windows = desktop.windows\n"
+                "    await windows.wait(request)\n"
+            ),
+            ("python", "accessibility"): (
+                "\nasync def review(desktop: Any, request: Any) -> None:\n"
+                "    accessibility = desktop.accessibility\n"
+                "    await accessibility.wait(request)\n"
+            ),
+        }
+        for (language, domain), addition in additions.items():
+            with self.subTest(language=language, domain=domain):
+                self._assert_deadline_source_mutation_rejected(
+                    EXAMPLE_PATHS[language],
+                    lambda source, addition=addition: source + addition,
+                )
+
+    def test_deadline_contract_rejects_unverifiable_server_waits(self) -> None:
+        additions = {
+            "omitted": (
+                "\nasync function reviewWait(desktop) {\n"
+                "  await desktop.windows.wait({ predicate: { type: 'exists' } });\n}\n"
+            ),
+            "aliased": (
+                "\nasync function reviewWait(desktop, deadline) {\n"
+                "  await desktop.windows.wait({ timeout_ms: deadline });\n}\n"
+            ),
+            "computed": (
+                "\nasync function reviewWait(desktop) {\n"
+                "  await desktop.windows.wait({\n"
+                "    timeout_ms: SERVER_LONG_POLL_TIMEOUT_MILLISECONDS - 1,\n"
+                "  });\n}\n"
+            ),
+        }
+        for mutation, addition in additions.items():
+            with self.subTest(mutation=mutation):
+                self._assert_deadline_source_mutation_rejected(
+                    EXAMPLE_PATHS["typescript"],
+                    lambda source, addition=addition: source + addition,
+                )
+
+    def test_deadline_contract_rejects_lowered_internal_deadlines(self) -> None:
+        replacements = {
+            "rust": (
+                "Duration::from_millis(EXAMPLE_OVERALL_TIMEOUT_MILLISECONDS)",
+                "Duration::from_millis(20_000)",
+            ),
+            "python": (
+                "timeout=EXAMPLE_OVERALL_TIMEOUT_MILLISECONDS / 1_000",
+                "timeout=20",
+            ),
+        }
+        for language, (original, lowered) in replacements.items():
+            with self.subTest(language=language):
+                self._assert_deadline_source_mutation_rejected(
+                    EXAMPLE_PATHS[language],
+                    lambda source, original=original, lowered=lowered: source.replace(
+                        original,
+                        lowered,
+                        1,
+                    ),
+                )
+
+    def test_deadline_contract_rejects_lowered_external_deadline(self) -> None:
+        with mock.patch.object(MODULE, "QUICKSTART_COMMAND_TIMEOUT_SECONDS", 20):
+            with self.assertRaises(AssertionError):
+                self.test_package_examples_keep_transport_deadline_above_server_long_polls()
 
     def test_every_external_subprocess_timeout_is_bounded(self) -> None:
         self.assertLessEqual(MODULE.DEFAULT_COMMAND_TIMEOUT_SECONDS, 10)

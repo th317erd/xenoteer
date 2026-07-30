@@ -54,6 +54,9 @@ const XMESSAGE_TITLE: &str = "xmessage";
 const XMESSAGE_BODY: &str = "Xenoteer Phase 6 SDK fixture";
 const UNICODE_TEXT: &str = "Xenoteer — العربية — 中文 — e\u{301} — 😀";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+const TRANSPORT_REQUEST_TIMEOUT_MILLISECONDS: u64 = 35_000;
+const SERVER_LONG_POLL_TIMEOUT_MILLISECONDS: u32 = 30_000;
+const EXAMPLE_OVERALL_TIMEOUT_MILLISECONDS: u64 = 110_000;
 
 #[derive(Clone, Default)]
 struct OwnedResources {
@@ -246,7 +249,11 @@ async fn connect_result(
     token: &str,
 ) -> Result<Result<XenoteerClient, SdkError>, String> {
     let transport = Client::new(base, token.as_bytes())
-        .and_then(|client| client.with_request_timeout(Duration::from_secs(5)))
+        .and_then(|client| {
+            client.with_request_timeout(Duration::from_millis(
+                TRANSPORT_REQUEST_TIMEOUT_MILLISECONDS,
+            ))
+        })
         .map_err(|error| safe_sdk("could not prepare bounded SDK transport", error))?;
     tokio::time::timeout(
         Duration::from_secs(6),
@@ -340,7 +347,7 @@ async fn resolve_window_exact(
         },
         predicate: WindowWaitPredicate::Exists,
         after_revision: None,
-        timeout_ms: 10_000,
+        timeout_ms: SERVER_LONG_POLL_TIMEOUT_MILLISECONDS,
     };
     let waited = desktop
         .windows()
@@ -406,7 +413,7 @@ async fn resolve_element_exact(
         },
         predicate: ElementWaitPredicate::Exists,
         after_revision: None,
-        timeout_ms: 10_000,
+        timeout_ms: SERVER_LONG_POLL_TIMEOUT_MILLISECONDS,
         allow_poll_fallback: true,
         expansion,
         limits,
@@ -493,7 +500,7 @@ async fn terminate_process(
         },
         predicate: WindowWaitPredicate::Closed,
         after_revision: None,
-        timeout_ms: 10_000,
+        timeout_ms: SERVER_LONG_POLL_TIMEOUT_MILLISECONDS,
     };
     let waited = desktop
         .windows()
@@ -1085,7 +1092,12 @@ async fn exercise() -> Result<(), String> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match tokio::time::timeout(Duration::from_secs(110), exercise()).await {
+    match tokio::time::timeout(
+        Duration::from_millis(EXAMPLE_OVERALL_TIMEOUT_MILLISECONDS),
+        exercise(),
+    )
+    .await
+    {
         Ok(Ok(())) => ExitCode::SUCCESS,
         Ok(Err(error)) => {
             eprintln!("public Rust quick-start failed: {error}");

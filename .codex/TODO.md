@@ -106,6 +106,13 @@ Plan: `plans/15-phased-implementation.md`
   - [x] Add content-level copied-BSL rejection to the Rust archive verifier
 - [ ] Run every public quick-start against one immutable release-candidate image
       and record the exact image IDs
+  - [x] Reproduce and fix the cross-language Phase-6 example deadline
+        contradiction: the examples configured a 5-second transport deadline
+        around 10-30-second server long-poll waits, and the exact Rust crate
+        timed out after launch before window resolution
+    - [x] Make the regression fail closed for every transport constructor,
+          every server wait, and unsafe overall-deadline changes rather than
+          counting only today's configured timeout expressions
   - [x] Add the staged crate/npm/wheel/sdist installation gate, exact
       source-tree/image identity fence, no-override admission, per-variant
       typed-auth failure proof, and bounded cleanup contracts
