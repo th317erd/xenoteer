@@ -45,6 +45,8 @@ pub const MAX_WAIT_TIMEOUT_MS: u32 = 30_000;
 
 /// Default end-to-end deadline for one HTTP exchange, including response body.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
+/// Bounded time for a completed semantic wait response to arrive and decode.
+pub const LONG_POLL_RESPONSE_HEADROOM: Duration = Duration::from_secs(5);
 /// Maximum time client shutdown waits for owned event supervisors.
 pub const DEFAULT_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -280,6 +282,12 @@ pub struct Client {
     state: Arc<ClientState>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ExchangeLimits {
+    response_bytes: usize,
+    timeout: Duration,
+}
+
 struct ClientState {
     closed: AtomicBool,
     cancellation: CancellationToken,
@@ -509,7 +517,10 @@ impl Client {
             "{}/wait?timeout_ms={timeout_ms}",
             command_path(desktop_id, command_id)
         );
-        let response = self.send_empty(Method::GET, &path).await?;
+        let timeout = long_poll_request_timeout(timeout_ms, MAX_WAIT_TIMEOUT_MS)?;
+        let response = self
+            .send_empty_with_limit_and_timeout(Method::GET, &path, MAX_RESPONSE_BYTES, timeout)
+            .await?;
         validate_command_response(response, command_id)
     }
 
@@ -552,6 +563,35 @@ impl Client {
     {
         self.send_json_with_limit(Method::POST, path, value, &[], response_limit)
             .await
+    }
+
+    pub(crate) async fn post_json_with_limit_and_timeout<T, R>(
+        &self,
+        path: &str,
+        value: &T,
+        response_limit: usize,
+        request_timeout: Duration,
+    ) -> Result<R, SdkError>
+    where
+        T: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
+        let maximum =
+            Duration::from_millis(u64::from(xenoteer_protocol::MAX_WINDOW_WAIT_TIMEOUT_MS))
+                .checked_add(LONG_POLL_RESPONSE_HEADROOM)
+                .ok_or(SdkError::InvalidRequest)?;
+        if request_timeout.is_zero() || request_timeout > maximum {
+            return Err(SdkError::InvalidRequest);
+        }
+        self.send_json_with_limit_and_timeout(
+            Method::POST,
+            path,
+            value,
+            &[],
+            response_limit,
+            request_timeout,
+        )
+        .await
     }
 
     pub(crate) async fn post_json_with_headers<T, R>(
@@ -837,6 +877,30 @@ impl Client {
         T: Serialize + ?Sized,
         R: DeserializeOwned,
     {
+        self.send_json_with_limit_and_timeout(
+            method,
+            path,
+            value,
+            extra_headers,
+            response_limit,
+            self.request_timeout,
+        )
+        .await
+    }
+
+    async fn send_json_with_limit_and_timeout<T, R>(
+        &self,
+        method: Method,
+        path: &str,
+        value: &T,
+        extra_headers: &[(&'static str, HeaderValue)],
+        response_limit: usize,
+        request_timeout: Duration,
+    ) -> Result<R, SdkError>
+    where
+        T: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
         let body = serde_json::to_vec(value).map_err(|_| SdkError::EncodeRequest)?;
         if body.len() > MAX_RESPONSE_BYTES {
             return Err(SdkError::RequestTooLarge {
@@ -849,7 +913,10 @@ impl Client {
             Bytes::from(body),
             true,
             extra_headers,
-            response_limit,
+            ExchangeLimits {
+                response_bytes: response_limit,
+                timeout: request_timeout,
+            },
         )
         .await
     }
@@ -871,8 +938,42 @@ impl Client {
     where
         R: DeserializeOwned,
     {
-        self.send(method, path, Bytes::new(), false, &[], response_limit)
-            .await
+        self.send(
+            method,
+            path,
+            Bytes::new(),
+            false,
+            &[],
+            ExchangeLimits {
+                response_bytes: response_limit,
+                timeout: self.request_timeout,
+            },
+        )
+        .await
+    }
+
+    async fn send_empty_with_limit_and_timeout<R>(
+        &self,
+        method: Method,
+        path: &str,
+        response_limit: usize,
+        request_timeout: Duration,
+    ) -> Result<R, SdkError>
+    where
+        R: DeserializeOwned,
+    {
+        self.send(
+            method,
+            path,
+            Bytes::new(),
+            false,
+            &[],
+            ExchangeLimits {
+                response_bytes: response_limit,
+                timeout: request_timeout,
+            },
+        )
+        .await
     }
 
     async fn send<R>(
@@ -882,7 +983,7 @@ impl Client {
         body: Bytes,
         has_json_body: bool,
         extra_headers: &[(&'static str, HeaderValue)],
-        response_limit: usize,
+        limits: ExchangeLimits,
     ) -> Result<R, SdkError>
     where
         R: DeserializeOwned,
@@ -910,15 +1011,27 @@ impl Client {
                 .request(request)
                 .await
                 .map_err(|_| SdkError::Transport)?;
-            decode_response(response, response_limit).await
+            decode_response(response, limits.response_bytes).await
         };
         tokio::select! {
-            result = tokio::time::timeout(self.request_timeout, exchange) => {
+            result = tokio::time::timeout(limits.timeout, exchange) => {
                 result.map_err(|_| SdkError::RequestTimeout)?
             }
             () = self.state.cancellation.cancelled() => Err(SdkError::ClientClosed),
         }
     }
+}
+
+pub(crate) fn long_poll_request_timeout(
+    timeout_ms: u32,
+    maximum_timeout_ms: u32,
+) -> Result<Duration, SdkError> {
+    if timeout_ms == 0 || timeout_ms > maximum_timeout_ms {
+        return Err(SdkError::InvalidRequest);
+    }
+    Duration::from_millis(u64::from(timeout_ms))
+        .checked_add(LONG_POLL_RESPONSE_HEADROOM)
+        .ok_or(SdkError::InvalidRequest)
 }
 
 impl fmt::Debug for Client {
@@ -1392,6 +1505,159 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn semantic_wait_deadline_adds_exact_bounded_response_headroom() -> Result<(), TestError> {
+        assert_eq!(
+            long_poll_request_timeout(
+                xenoteer_protocol::MAX_WINDOW_WAIT_TIMEOUT_MS,
+                xenoteer_protocol::MAX_WINDOW_WAIT_TIMEOUT_MS,
+            )?,
+            Duration::from_secs(305)
+        );
+        assert_eq!(
+            long_poll_request_timeout(
+                xenoteer_protocol::MAX_ACCESSIBILITY_WAIT_TIMEOUT_MS,
+                xenoteer_protocol::MAX_ACCESSIBILITY_WAIT_TIMEOUT_MS,
+            )?,
+            Duration::from_secs(125)
+        );
+        assert!(matches!(
+            long_poll_request_timeout(0, xenoteer_protocol::MAX_WINDOW_WAIT_TIMEOUT_MS),
+            Err(SdkError::InvalidRequest)
+        ));
+        assert!(matches!(
+            long_poll_request_timeout(
+                xenoteer_protocol::MAX_WINDOW_WAIT_TIMEOUT_MS + 1,
+                xenoteer_protocol::MAX_WINDOW_WAIT_TIMEOUT_MS,
+            ),
+            Err(SdkError::InvalidRequest)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn per_request_json_deadline_overrides_the_shorter_client_default()
+    -> Result<(), TestError> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let base = format!("http://{}", listener.local_addr()?);
+        let response = json_response(
+            "200 OK",
+            "application/json",
+            &serde_json::json!({"bounded": true}),
+        )?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let request = read_request(&mut stream).await?;
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            stream.write_all(&response).await?;
+            Ok::<Vec<u8>, io::Error>(request)
+        });
+        let client =
+            Client::new(base, test_token())?.with_request_timeout(Duration::from_millis(10))?;
+        let value: serde_json::Value = client
+            .post_json_with_limit_and_timeout(
+                "/v1/desktops/test/windows/wait",
+                &serde_json::json!({}),
+                MAX_RESPONSE_BYTES,
+                Duration::from_millis(100),
+            )
+            .await?;
+        assert_eq!(value, serde_json::json!({"bounded": true}));
+        let request = String::from_utf8(server.await??)?;
+        assert!(request.starts_with("POST /v1/desktops/test/windows/wait HTTP/1.1"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn command_wait_method_overrides_the_shorter_client_default() -> Result<(), TestError> {
+        let desktop_id = DesktopId::new();
+        let command_id = CommandId::new();
+        let result = CommandResult::accepted(command_id, Timestamp::parse("2026-07-21T00:00:00Z")?);
+        let response = json_response("200 OK", "application/json", &result)?;
+        let (base, server) = serve_once_delayed(response, Duration::from_millis(40)).await?;
+        let client =
+            Client::new(base, test_token())?.with_request_timeout(Duration::from_millis(10))?;
+
+        let returned = client.wait_command(desktop_id, command_id, 30_000).await?;
+        assert_eq!(returned.command_id(), command_id);
+        let request = String::from_utf8(server.await??)?;
+        assert!(request.starts_with(&format!(
+            "GET /v1/desktops/{desktop_id}/commands/{command_id}/wait?timeout_ms=30000 HTTP/1.1"
+        )));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn actual_window_and_accessibility_wait_methods_override_short_client_default()
+    -> Result<(), TestError> {
+        let desktop_id = DesktopId::new();
+        let generation = DesktopGeneration::new();
+        let window_request: xenoteer_protocol::WindowWaitRequest =
+            serde_json::from_value(serde_json::json!({
+                "desktop_id": desktop_id,
+                "desktop_generation": generation,
+                "target": {
+                    "type": "selector",
+                    "selector": {
+                        "type": "predicate",
+                        "predicate": {"type": "active", "value": true}
+                    },
+                    "quantifier": "any"
+                },
+                "predicate": {"type": "exists"},
+                "after_revision": null,
+                "timeout_ms": 300000
+            }))?;
+        let element_request: xenoteer_protocol::ElementWaitRequest =
+            serde_json::from_value(serde_json::json!({
+                "desktop_id": desktop_id,
+                "desktop_generation": generation,
+                "target": {
+                    "type": "selector",
+                    "selector": {
+                        "scope": {"type": "desktop"},
+                        "predicates": [],
+                        "order": "preorder",
+                        "result_index": null
+                    },
+                    "quantifier": "any"
+                },
+                "predicate": {"type": "exists"},
+                "after_revision": null,
+                "timeout_ms": 120000,
+                "allow_poll_fallback": true
+            }))?;
+
+        let response = json_response("200 OK", "application/json", &serde_json::json!({}))?;
+        let (base, server) =
+            serve_once_delayed(response.clone(), Duration::from_millis(40)).await?;
+        let client =
+            Client::new(base, test_token())?.with_request_timeout(Duration::from_millis(10))?;
+        let desktop = crate::Desktop::for_test(client, desktop_id, generation);
+        assert!(matches!(
+            desktop.windows().wait(&window_request).await,
+            Err(SdkError::InvalidResponse)
+        ));
+        let request = String::from_utf8(server.await??)?;
+        assert!(request.starts_with(&format!(
+            "POST /v1/desktops/{desktop_id}/windows/wait HTTP/1.1"
+        )));
+
+        let (base, server) = serve_once_delayed(response, Duration::from_millis(40)).await?;
+        let client =
+            Client::new(base, test_token())?.with_request_timeout(Duration::from_millis(10))?;
+        let desktop = crate::Desktop::for_test(client, desktop_id, generation);
+        assert!(matches!(
+            desktop.accessibility().wait(&element_request).await,
+            Err(SdkError::InvalidResponse)
+        ));
+        let request = String::from_utf8(server.await??)?;
+        assert!(request.starts_with(&format!(
+            "POST /v1/desktops/{desktop_id}/accessibility/elements/wait HTTP/1.1"
+        )));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn artifact_download_streams_only_after_exact_metadata_and_digest_validation()
     -> Result<(), TestError> {
@@ -1673,6 +1939,23 @@ mod tests {
                     ) => {}
                 Err(error) => return Err(error),
             }
+            Ok(request)
+        });
+        Ok((base, server))
+    }
+
+    async fn serve_once_delayed(
+        response: Vec<u8>,
+        delay: Duration,
+    ) -> Result<(String, JoinHandle<io::Result<Vec<u8>>>), TestError> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let base = format!("http://{}", listener.local_addr()?);
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let request = read_request(&mut stream).await?;
+            tokio::time::sleep(delay).await;
+            stream.write_all(&response).await?;
+            stream.shutdown().await?;
             Ok(request)
         });
         Ok((base, server))

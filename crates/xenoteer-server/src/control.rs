@@ -631,10 +631,7 @@ async fn wait_command(
     let Some(_long_poll_permit) = state.long_polls.try_acquire(principal.id()) else {
         return ApiProblem::resource_exhausted(request_id).into_response();
     };
-    let transport_timeout = state.limits.request_timeout();
-    let transport_margin = (transport_timeout / 10).min(Duration::from_millis(100));
-    let wait_timeout = Duration::from_millis(u64::from(timeout_ms))
-        .min(transport_timeout.saturating_sub(transport_margin));
+    let wait_timeout = Duration::from_millis(u64::from(timeout_ms));
     match state
         .control
         .wait_command(

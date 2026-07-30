@@ -139,10 +139,41 @@ Plan: `plans/15-phased-implementation.md`
       cleanup after renewal failure, honest cancellation semantics, complete
       viewer-ticket metadata proof, and cleanup that preserves independent
       artifact/process failures
+  - [x] Commit broker-authenticated managed-process correlation into the
+        revision-fenced window model so public query, resolve, and wait
+        selectors can match it atomically
+    - [x] Prove late correlation wakes an already-registered wait without a
+          lost event, while stale revisions, XID/PID reuse, malformed broker
+          replies, no-match, and unavailable correlation remain fail-closed
+    - [x] Invalidate committed high-confidence correlation before process-exit,
+          broker replay-gap/resync, disconnect, and reconnect effects can be
+          observed; keep shutdown/cancellation bounded
+    - [x] Gate correlation commits on a shared lifecycle-subscription authority
+          epoch that starts unavailable, enables only after replay/live
+          handoff, and disables before any stream ambiguity or reconnect
+    - [x] Fence singleflight completion with the actor-published post-commit
+          change sequence so a raw/accessibility mutation between replace and
+          leader completion can never cache stale success or strand a waiter
+    - [x] Preserve exact-birth/same-PID correlation across individual raw
+          metadata updates, clear it on PID/birth change, and publish every
+          shared-model mutation before its response becomes observable
+    - [x] Permit ordinary fail-open projection only after correlation
+          invalidation is confirmed; an unavailable/full actor queue must never
+          leak previously committed high evidence
+    - [x] Preserve one monotonic semantic wait deadline across correlation
+          refresh, actor registration, wake, and any revision recheck rather
+          than restarting the caller's timeout
+  - [x] Give window/element long polls endpoint-owned handler headroom and
+        per-operation Rust/Python SDK deadlines so every legal 300/120-second
+        wait can return a typed result instead of racing a generic 30-second
+        HTTP 504
+    - [x] Preserve the ordinary-handler cutoff, command-wait clamp, exact route
+          classification, cancellation, response limits, and TypeScript's
+          existing per-operation deadline behavior
   - [ ] Build the final coherent Phase 6 image, run the gate against its exact
         immutable ID, and record only that successful image/package identity
 - [ ] Complete Phase 6 closure review, update implementation details, and commit
-      the verified phase boundary locally without pushing
+      and push the verified phase boundary
 
 ## Phase 7 — hardening and first release
 

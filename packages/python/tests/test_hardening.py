@@ -210,9 +210,7 @@ class RuntimeHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await desktop.artifacts.download_bytes(screenshot), body)
             await desktop.artifacts.delete(screenshot)
         self.assertEqual(seen[0].headers["content-length"], str(len(body)))
-        self.assertEqual(
-            seen[0].headers["x-content-sha256"], hashlib.sha256(body).hexdigest()
-        )
+        self.assertEqual(seen[0].headers["x-content-sha256"], hashlib.sha256(body).hexdigest())
         self.assertEqual(uploaded.purpose, "clipboard_input")
 
     async def test_real_httpx_malformed_oversize_auth_and_timeout(self) -> None:
@@ -268,6 +266,76 @@ class RuntimeHttpTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(XenoteerError) as timed_out:
             await request(timeout)
+        self.assertEqual(timed_out.exception.code, "request_timeout")
+
+    async def test_real_httpx_per_request_timeout_is_exact_and_bounded(self) -> None:
+        observed: list[dict[str, float]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            observed.append(dict(request.extensions["timeout"]))
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                json={"ok": True},
+            )
+
+        async with httpx.AsyncClient(
+            base_url="https://xenoteer.test",
+            transport=httpx.MockTransport(handler),
+        ) as http:
+            transport = HttpTransport(
+                ClientOptions("https://xenoteer.test", TOKEN),
+                http_client=http,
+            )
+            for timeout in (305.0, 125.0):
+                self.assertEqual(
+                    await transport.request_with_timeout("GET", "/v1/status", timeout=timeout),
+                    {"ok": True},
+                )
+            for invalid in (
+                0,
+                -1,
+                305.000_001,
+                10**10_000,
+                float("inf"),
+                float("nan"),
+                True,
+            ):
+                with self.subTest(timeout=invalid), self.assertRaises(XenoteerError):
+                    await transport.request_with_timeout("GET", "/v1/status", timeout=invalid)
+
+        self.assertEqual(
+            observed,
+            [
+                {"connect": 305.0, "read": 305.0, "write": 305.0, "pool": 305.0},
+                {"connect": 125.0, "read": 125.0, "write": 125.0, "pool": 125.0},
+            ],
+        )
+
+    async def test_real_httpx_per_request_timeout_bounds_the_whole_stream(self) -> None:
+        class SlowDrip(httpx.AsyncByteStream):
+            async def __aiter__(self) -> AsyncIterator[bytes]:
+                yield b'{"ok":'
+                await asyncio.sleep(0.05)
+                yield b"true}"
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                stream=SlowDrip(),
+            )
+
+        async with httpx.AsyncClient(
+            base_url="https://xenoteer.test",
+            transport=httpx.MockTransport(handler),
+        ) as http:
+            transport = HttpTransport(
+                ClientOptions("https://xenoteer.test", TOKEN),
+                http_client=http,
+            )
+            with self.assertRaises(XenoteerError) as timed_out:
+                await transport.request_with_timeout("GET", "/v1/status", timeout=0.01)
         self.assertEqual(timed_out.exception.code, "request_timeout")
 
     async def test_artifact_rejects_metadata_before_sink_and_digest_after_prefix(self) -> None:
@@ -435,6 +503,7 @@ class LifecycleAndCorpusTests(unittest.IsolatedAsyncioTestCase):
                 *,
                 headers: Mapping[str, str] | None = None,
             ) -> dict[str, Any]:
+                del method, path, body, headers
                 raise XenoteerError("stale_reference", "server rejected stale handle")
 
             async def close(self) -> None:
@@ -509,6 +578,7 @@ class LifecycleAndCorpusTests(unittest.IsolatedAsyncioTestCase):
                 *,
                 headers: Mapping[str, str] | None = None,
             ) -> dict[str, Any]:
+                del body, headers
                 if method == "DELETE":
                     return {
                         "desktop_id": DESKTOP_ID,
@@ -584,11 +654,7 @@ class ConformanceMutationTests(unittest.TestCase):
 
     def fixture(self, operation: str, predicate=lambda case: True):
         return copy.deepcopy(
-            next(
-                case
-                for case in self.cases
-                if case["operation"] == operation and predicate(case)
-            )
+            next(case for case in self.cases if case["operation"] == operation and predicate(case))
         )
 
     def assert_mutation_fails(self, case) -> None:
@@ -661,13 +727,12 @@ class ConformanceMutationTests(unittest.TestCase):
 
         reversed_sequence = self.fixture(
             "event_continuity",
-            lambda case: len(case["input"]["frames"]) >= 2
-            and all(
-                frame.get("type") == "event"
-                for frame in case["input"]["frames"][:2]
-            )
-            and case["input"]["frames"][0]["event"]["sequence"]
-            != case["input"]["frames"][1]["event"]["sequence"],
+            lambda case: (
+                len(case["input"]["frames"]) >= 2
+                and all(frame.get("type") == "event" for frame in case["input"]["frames"][:2])
+                and case["input"]["frames"][0]["event"]["sequence"]
+                != case["input"]["frames"][1]["event"]["sequence"]
+            ),
         )
         reversed_sequence["input"]["frames"][:2] = reversed(
             reversed_sequence["input"]["frames"][:2]
@@ -733,9 +798,7 @@ class ConformanceMutationTests(unittest.TestCase):
             "adapter_protocol": 1,
             "cases": [],
             "corpus": "xenoteer-conformance-v1",
-            "corpus_sha256": (
-                "6cc98e72e1de6591cce2d0661f4fc3ea508535d310a40746aa3ad8bd1e61e7fc"
-            ),
+            "corpus_sha256": ("6cc98e72e1de6591cce2d0661f4fc3ea508535d310a40746aa3ad8bd1e61e7fc"),
             "protocol": {"major": 1, "min_minor": 0, "max_minor": 0},
         }
         mutations = (

@@ -22,6 +22,7 @@ from xenoteer import (
     ArtifactRef,
     BearerToken,
     ClientOptions,
+    CommandHandle,
     ControlLease,
     Desktop,
     ProtocolRange,
@@ -35,6 +36,7 @@ from xenoteer import (
     encode_uint64,
     validate_status,
 )
+from xenoteer.transport import request_with_deadline
 
 
 DESKTOP_ID = "10000000-0000-4000-8000-000000000001"
@@ -66,9 +68,7 @@ def status(
     }
 
 
-def command_result(
-    command_id: str = COMMAND_ID, lifecycle: str = "accepted"
-) -> dict[str, Any]:
+def command_result(command_id: str = COMMAND_ID, lifecycle: str = "accepted") -> dict[str, Any]:
     return {
         "command_id": command_id,
         "lifecycle": lifecycle,
@@ -106,6 +106,7 @@ class FakeTransport:
     def __init__(self, responder: Callable[..., dict[str, Any]]) -> None:
         self.responder = responder
         self.calls: list[tuple[str, str, object, dict[str, str]]] = []
+        self.request_timeouts: list[float | None] = []
         self.closed = False
 
     @property
@@ -124,10 +125,44 @@ class FakeTransport:
         headers: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         self.calls.append((method, path, body, dict(headers or {})))
+        self.request_timeouts.append(None)
+        return self.responder(method, path, body, dict(headers or {}))
+
+    async def request_with_timeout(
+        self,
+        method: str,
+        path: str,
+        body: Mapping[str, Any] | None = None,
+        *,
+        headers: Mapping[str, str] | None = None,
+        timeout: float,
+    ) -> dict[str, Any]:
+        self.calls.append((method, path, body, dict(headers or {})))
+        self.request_timeouts.append(timeout)
         return self.responder(method, path, body, dict(headers or {}))
 
     async def close(self) -> None:
         self.closed = True
+
+
+class DeadlineFailureTransport(FakeTransport):
+    def __init__(self, failure: BaseException | None = None) -> None:
+        super().__init__(lambda *_args: {"ok": True})
+        self.failure = failure
+
+    async def request_with_timeout(
+        self,
+        method: str,
+        path: str,
+        body: Mapping[str, Any] | None = None,
+        *,
+        headers: Mapping[str, str] | None = None,
+        timeout: float,
+    ) -> dict[str, Any]:
+        if self.failure is not None:
+            raise self.failure
+        await asyncio.sleep(timeout * 10)
+        return {"ok": True}
 
 
 class WireTests(unittest.TestCase):
@@ -264,26 +299,10 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             {},
             {"capabilities": "not-an-array"},
             {"capabilities": [valid_capability, valid_capability]},
-            {
-                "capabilities": [
-                    {**valid_capability, "id": "Input.Pointer"}
-                ]
-            },
-            {
-                "capabilities": [
-                    {**valid_capability, "status": "future_status"}
-                ]
-            },
-            {
-                "capabilities": [
-                    {**valid_capability, "reason_code": "NOT_STABLE"}
-                ]
-            },
-            {
-                "capabilities": [
-                    {**valid_capability, "backend_version": "bad\nversion"}
-                ]
-            },
+            {"capabilities": [{**valid_capability, "id": "Input.Pointer"}]},
+            {"capabilities": [{**valid_capability, "status": "future_status"}]},
+            {"capabilities": [{**valid_capability, "reason_code": "NOT_STABLE"}]},
+            {"capabilities": [{**valid_capability, "backend_version": "bad\nversion"}]},
             {
                 "capabilities": [
                     {
@@ -303,9 +322,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_connect_negotiates_highest_common_minor_and_fences_desktop(self) -> None:
         transport = FakeTransport(
-            lambda method, path, body, headers: status(
-                minimum=(1, 1), maximum=(1, 3)
-            )
+            lambda method, path, body, headers: status(minimum=(1, 1), maximum=(1, 3))
         )
         client = await XenoteerClient.connect(
             ClientOptions(
@@ -326,9 +343,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_connect_fails_closed_on_no_shared_version(self) -> None:
         transport = FakeTransport(
-            lambda method, path, body, headers: status(
-                minimum=(2, 0), maximum=(2, 0)
-            )
+            lambda method, path, body, headers: status(minimum=(2, 0), maximum=(2, 0))
         )
         with self.assertRaisesRegex(XenoteerError, "overlap"):
             await XenoteerClient.connect(
@@ -453,6 +468,219 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LeaseAndDomainTests(unittest.IsolatedAsyncioTestCase):
+    async def test_semantic_waits_use_exact_per_request_deadline_headroom(
+        self,
+    ) -> None:
+        def responder(method, path, body, headers):
+            del method, body, headers
+            if path.endswith("/accessibility/elements/query"):
+                return {
+                    "desktop_id": DESKTOP_ID,
+                    "desktop_generation": GENERATION,
+                }
+            if path.endswith("/windows/wait"):
+                return {
+                    "desktop_id": DESKTOP_ID,
+                    "desktop_generation": GENERATION,
+                }
+            if path.endswith("/accessibility/elements/wait"):
+                return {
+                    "desktop_id": DESKTOP_ID,
+                    "desktop_generation": GENERATION,
+                }
+            if "/commands/" in path and path.endswith("/wait?timeout_ms=30000"):
+                return command_result()
+            raise AssertionError(path)
+
+        transport = FakeTransport(responder)
+        desktop = Desktop(
+            transport,
+            DESKTOP_ID,
+            GENERATION,
+            {"major": 1, "minor": 0},
+        )
+        await desktop.accessibility.query({})
+        await desktop.windows.wait({"timeout_ms": 300_000})
+        await desktop.accessibility.wait({"timeout_ms": 120_000})
+        command = CommandHandle(
+            transport,
+            DESKTOP_ID,
+            GENERATION,
+            command_result(),
+        )
+        await command.wait_once(30)
+        self.assertEqual(transport.request_timeouts, [None, 305.0, 125.0, 35.0])
+
+        call_count = len(transport.calls)
+        for invalid in (0, 300_001, True, None):
+            with self.subTest(window_timeout=invalid), self.assertRaises(XenoteerError):
+                await desktop.windows.wait({"timeout_ms": invalid})
+        for invalid in (0, 120_001, True, None):
+            with self.subTest(element_timeout=invalid), self.assertRaises(XenoteerError):
+                await desktop.accessibility.wait({"timeout_ms": invalid})
+        self.assertEqual(len(transport.calls), call_count)
+
+    async def test_legacy_transport_waits_use_local_deadline_without_signature_break(
+        self,
+    ) -> None:
+        class LegacyTransport:
+            base_url = "https://xenoteer.test"
+
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            async def request(
+                self,
+                method: str,
+                path: str,
+                body: Mapping[str, Any] | None = None,
+                *,
+                headers: Mapping[str, str] | None = None,
+            ) -> dict[str, Any]:
+                del method, body, headers
+                self.calls.append(path)
+                if path.endswith("/windows/wait"):
+                    return {
+                        "desktop_id": DESKTOP_ID,
+                        "desktop_generation": GENERATION,
+                    }
+                if path.endswith("/accessibility/elements/wait"):
+                    return {
+                        "desktop_id": DESKTOP_ID,
+                        "desktop_generation": GENERATION,
+                    }
+                if path.endswith("/wait?timeout_ms=30000"):
+                    return command_result()
+                raise AssertionError(path)
+
+        transport = LegacyTransport()
+        desktop = Desktop(
+            transport,
+            DESKTOP_ID,
+            GENERATION,
+            {"major": 1, "minor": 0},
+        )
+        await desktop.windows.wait({"timeout_ms": 300_000})
+        await desktop.accessibility.wait({"timeout_ms": 120_000})
+        command = CommandHandle(
+            transport,
+            DESKTOP_ID,
+            GENERATION,
+            command_result(),
+        )
+        await command.wait_once(30)
+        self.assertEqual(len(transport.calls), 3)
+
+    async def test_legacy_transport_local_wait_deadline_propagates_cancellation(
+        self,
+    ) -> None:
+        class LegacyTransport:
+            base_url = "https://xenoteer.test"
+
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+                self.cancelled = asyncio.Event()
+
+            async def request(
+                self,
+                method: str,
+                path: str,
+                body: Mapping[str, Any] | None = None,
+                *,
+                headers: Mapping[str, str] | None = None,
+            ) -> dict[str, Any]:
+                del method, path, body, headers
+                self.started.set()
+                try:
+                    await asyncio.Future()
+                finally:
+                    self.cancelled.set()
+                raise AssertionError("unreachable")
+
+        transport = LegacyTransport()
+        desktop = Desktop(
+            transport,
+            DESKTOP_ID,
+            GENERATION,
+            {"major": 1, "minor": 0},
+        )
+        task = asyncio.create_task(desktop.windows.wait({"timeout_ms": 1}))
+        await asyncio.wait_for(transport.started.wait(), timeout=1)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(transport.cancelled.wait(), timeout=1)
+
+    async def test_legacy_transport_local_deadline_expires_with_structured_error(
+        self,
+    ) -> None:
+        class LegacyTransport:
+            async def request(
+                self,
+                method: str,
+                path: str,
+                body: Mapping[str, Any] | None = None,
+                *,
+                headers: Mapping[str, str] | None = None,
+            ) -> dict[str, Any]:
+                del method, path, body, headers
+                try:
+                    await asyncio.Future()
+                finally:
+                    cancelled.set()
+                raise AssertionError("unreachable")
+
+        cancelled = asyncio.Event()
+        with self.assertRaises(XenoteerError) as caught:
+            await request_with_deadline(
+                LegacyTransport(),
+                "GET",
+                "/v1/status",
+                timeout=0.001,
+            )
+        self.assertEqual(caught.exception.code, "request_timeout")
+        self.assertTrue(cancelled.is_set())
+
+    async def test_deadline_capable_transport_remains_under_an_absolute_deadline(
+        self,
+    ) -> None:
+        transport = DeadlineFailureTransport()
+        with self.assertRaises(XenoteerError) as caught:
+            await request_with_deadline(
+                transport,
+                "GET",
+                "/v1/status",
+                timeout=0.001,
+            )
+        self.assertEqual(caught.exception.code, "request_timeout")
+
+        transport = DeadlineFailureTransport(TimeoutError("internal timeout"))
+        with self.assertRaises(XenoteerError) as internal:
+            await request_with_deadline(
+                transport,
+                "GET",
+                "/v1/status",
+                timeout=1,
+            )
+        self.assertEqual(internal.exception.code, "request_timeout")
+
+    async def test_deadline_capable_transport_preserves_caller_cancellation(
+        self,
+    ) -> None:
+        transport = DeadlineFailureTransport()
+        task = asyncio.create_task(
+            request_with_deadline(
+                transport,
+                "GET",
+                "/v1/status",
+                timeout=1,
+            )
+        )
+        await asyncio.sleep(0)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
     async def test_control_scopes_preserve_cancellation_while_release_finishes(self) -> None:
         class CancellationTransport:
             base_url = "https://xenoteer.test"
@@ -635,9 +863,7 @@ class LeaseAndDomainTests(unittest.IsolatedAsyncioTestCase):
             verify_length_only=False,
         )
         self.assertIs(
-            exact_submission.envelope["command"]["semantic_options"][
-                "verify_length_only"
-            ],
+            exact_submission.envelope["command"]["semantic_options"]["verify_length_only"],
             False,
         )
 
@@ -717,13 +943,7 @@ class LeaseAndDomainTests(unittest.IsolatedAsyncioTestCase):
         await client.close()
         self.assertFalse(lease.requires_cleanup)
         self.assertEqual(
-            len(
-                [
-                    call
-                    for call in calls
-                    if call[0] == "DELETE" and "/lease/" in call[1]
-                ]
-            ),
+            len([call for call in calls if call[0] == "DELETE" and "/lease/" in call[1]]),
             1,
         )
 
@@ -797,9 +1017,7 @@ class LeaseAndDomainTests(unittest.IsolatedAsyncioTestCase):
                 await control.mouse.move(120, 300, duration=0.25)
                 raise RuntimeError("body failed")
         envelopes = [
-            call[2]
-            for call in calls
-            if call[0] == "POST" and call[1].endswith("/commands")
+            call[2] for call in calls if call[0] == "POST" and call[1].endswith("/commands")
         ]
         self.assertEqual(envelopes[0]["command"]["curve"], "smooth")
         self.assertEqual(envelopes[0]["command"]["duration_ms"], 250)
@@ -937,16 +1155,12 @@ class EventSessionTests(unittest.IsolatedAsyncioTestCase):
             factory_calls.append((url, additional_headers))
             return socket
 
-        transport = FakeTransport(
-            lambda method, path, body, headers: status()
-        )
+        transport = FakeTransport(lambda method, path, body, headers: status())
         client = await XenoteerClient.connect(
             ClientOptions("https://xenoteer.test", TOKEN), transport=transport
         )
         session = await client.open_events(websocket_factory=factory)
-        subscribe = asyncio.create_task(
-            session.subscribe(DESKTOP_ID, GENERATION, ["future.topic"])
-        )
+        subscribe = asyncio.create_task(session.subscribe(DESKTOP_ID, GENERATION, ["future.topic"]))
         while len(socket.sent) < 2:
             await asyncio.sleep(0)
         request_id = socket.sent[1]["request_id"]
@@ -1087,9 +1301,7 @@ class EventSessionTests(unittest.IsolatedAsyncioTestCase):
                 json.dumps(
                     {
                         "type": "event",
-                        "request_id": (
-                            active_request if request_id == "<active>" else request_id
-                        ),
+                        "request_id": (active_request if request_id == "<active>" else request_id),
                         "event": {
                             "desktop_id": desktop_id,
                             "desktop_generation": generation,
@@ -1132,9 +1344,7 @@ class EventSessionTests(unittest.IsolatedAsyncioTestCase):
                 ClientOptions("https://xenoteer.test", TOKEN),
                 transport=transport,
             )
-            session = await client.open_events(
-                capacity=1, websocket_factory=factory
-            )
+            session = await client.open_events(capacity=1, websocket_factory=factory)
             subscribe = asyncio.create_task(
                 session.subscribe(DESKTOP_ID, GENERATION, ["window.created"])
             )
@@ -1290,9 +1500,7 @@ class EventSessionTests(unittest.IsolatedAsyncioTestCase):
         async def factory(url, **kwargs):
             return sockets.pop(0)
 
-        transport = FakeTransport(
-            lambda method, path, body, headers: status()
-        )
+        transport = FakeTransport(lambda method, path, body, headers: status())
         client = await XenoteerClient.connect(
             ClientOptions(
                 "https://xenoteer.test",
@@ -1317,23 +1525,17 @@ class EventSessionTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
         )
-        first.receives.put_nowait(
-            event(first.sent[1]["request_id"], "41", "window.created")
-        )
+        first.receives.put_nowait(event(first.sent[1]["request_id"], "41", "window.created"))
         first.receives.put_nowait(ConnectionError("drop"))
         await subscribe
         self.assertEqual((await asyncio.wait_for(anext(session), 1)).sequence, 41)
         while len(second.sent) < 2:
             await asyncio.sleep(0)
-        second.receives.put_nowait(
-            event(second.sent[1]["request_id"], "42", "window.created")
-        )
+        second.receives.put_nowait(event(second.sent[1]["request_id"], "42", "window.created"))
         self.assertEqual((await asyncio.wait_for(anext(session), 2)).sequence, 42)
         self.assertEqual(second.sent[0]["resume"]["event_sequence"], "41")
         self.assertEqual(second.sent[1]["since_sequence"], "41")
-        self.assertFalse(
-            any(call[1].endswith("/commands") for call in transport.calls)
-        )
+        self.assertFalse(any(call[1].endswith("/commands") for call in transport.calls))
         await client.close()
 
 

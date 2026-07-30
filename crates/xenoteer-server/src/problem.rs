@@ -155,6 +155,20 @@ impl ApiProblem {
         }
     }
 
+    pub(crate) fn deadline_before_effect(request_id: RequestId) -> Self {
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            code: ErrorCode::DeadlineExceededBeforeEffect,
+            title: "Deadline exceeded before effect",
+            detail: "The semantic read deadline elapsed without a mutating effect; retrying the read is safe.",
+            retry: RetryAdvice::AfterBackoff,
+            request_id,
+            retry_after_seconds: Some(1),
+            authenticate: false,
+            desktop_generation: None,
+        }
+    }
+
     pub(crate) fn origin_denied(request_id: RequestId) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,

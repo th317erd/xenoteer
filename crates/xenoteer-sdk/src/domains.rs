@@ -447,7 +447,15 @@ impl Windows {
             request.desktop_generation,
         )?;
         let path = format!("/v1/desktops/{}/windows/wait", self.desktop.id());
-        let response: WindowWaitResult = self.desktop.transport.post_json(&path, request).await?;
+        let timeout = crate::transport::long_poll_request_timeout(
+            request.timeout_ms,
+            xenoteer_protocol::MAX_WINDOW_WAIT_TIMEOUT_MS,
+        )?;
+        let response: WindowWaitResult = self
+            .desktop
+            .transport
+            .post_json_with_limit_and_timeout(&path, request, crate::MAX_RESPONSE_BYTES, timeout)
+            .await?;
         response.validate().map_err(|_| SdkError::InvalidResponse)?;
         validate_scope(
             &self.desktop,
@@ -598,10 +606,19 @@ impl Accessibility {
             "/v1/desktops/{}/accessibility/elements/wait",
             self.desktop.id()
         );
+        let timeout = crate::transport::long_poll_request_timeout(
+            request.timeout_ms,
+            xenoteer_protocol::MAX_ACCESSIBILITY_WAIT_TIMEOUT_MS,
+        )?;
         let response: ElementWaitResult = self
             .desktop
             .transport
-            .post_json_with_limit(&path, request, crate::MAX_ACCESSIBILITY_RESPONSE_BYTES)
+            .post_json_with_limit_and_timeout(
+                &path,
+                request,
+                crate::MAX_ACCESSIBILITY_RESPONSE_BYTES,
+                timeout,
+            )
             .await?;
         response.validate().map_err(|_| SdkError::InvalidResponse)?;
         validate_scope(

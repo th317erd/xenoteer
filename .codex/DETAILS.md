@@ -249,6 +249,43 @@
   immediately following input probe preserves the X0tigervnc/XKB ordering.
   Focused tests passed 9/9, strict xenoteerd Clippy and Rustfmt passed, and an
   independent review found no high- or medium-severity issue.
+- The clean `89d35fc` Phase-6 candidates were production
+  `sha256:9993456020cdef89c43c38db1fca2a71268135c7983b5a260647995b50b0b2e3`
+  and fixture
+  `sha256:04a5828e018a2c79f5e721cd48dda878dd873c9c17b822cff73e6abdb81991a6`.
+  Production lifecycle, Phase-4 event flood, real noVNC browser/RFB, desktop
+  application matrix, Phase-4 live API, and Phase-5 AT-SPI gates all passed
+  serially against those exact identities. The staged public-package gate then
+  failed before accepting any artifact digest: the Rust example's first exact
+  xmessage window wait returned a structured API problem after about 30
+  seconds. These image identities are rejected and remain diagnostics only.
+- That staged failure exposed two systemic contracts. First, the raw X11 actor
+  evaluates `ManagedProcess` predicates before the daemon's asynchronous
+  processd enrichment, so live query, resolve, and wait cannot match a public
+  predicate the protocol supports. Broker-authenticated correlation must be
+  committed to the single-owner revisioned model using exact window birth,
+  reported PID, desktop generation, and expected revision fences; correlation
+  changes must re-evaluate registered waiters. Second, window and accessibility
+  waits legally accept 300,000 ms and 120,000 ms, while the generic outer
+  handler timeout is 30 seconds. Equal 30-second example waits race into either
+  typed `timed_out` or HTTP 504 `request_outcome_unknown`. Long-poll routes need
+  explicit bounded headroom over their semantic maximum, and Rust/Python SDK
+  calls need per-operation request deadlines as TypeScript already has.
+- The actor-owned correlation closure must treat process lifecycle and model
+  sequencing as part of the same authority boundary. Process exit, broker
+  replay gaps/resync, stream failure, and reconnect invalidate committed high
+  evidence before their effects are published. Every raw/accessibility/process
+  correlation model mutation publishes a sticky change sequence before its
+  response, and a correlation singleflight may cache success only under the
+  exact actor-returned post-commit sequence; reading a newer sequence after the
+  fact can relabel stale work and strand a registered waiter.
+- A successful process-correlation RPC is not sufficient lifecycle authority
+  while the broker event subscription is offline. Correlation starts
+  unavailable, is enabled only after the atomic replay/live handoff is
+  processed, and is disabled before subscribe failure, gap/resync, closure,
+  stream error, or reconnect. The authority epoch fences in-flight RPC results
+  at the model owner so high evidence cannot be recommitted during an event
+  outage.
 - The Phase-6 example audit found that semantic text previously proved only
   character counts. Closure adds a content-private AT-SPI backend comparison
   that returns only exact-match boolean evidence for unprotected fields, keeps
@@ -319,6 +356,96 @@
   public-registry clean-host verification, a genuine 24-hour active soak, and
   the supported-host LSM matrix. Implement their harnesses/workflows locally but
   record those external observations as unverified until executed there.
+- The read-only Phase-7 AGIS territory/test preflight fixes the implementation
+  order as transport/private operations, live authentication/revocation,
+  telemetry/redaction, fault/fuzz/performance/leak evidence, then deterministic
+  release bundles/workflows/operations documentation. Transport, authentication,
+  and telemetry each touch security-critical server composition and must remain
+  separate reviewed commit waves rather than one integration-sized change.
+- Phase-7 transport composition must bind both public and private listeners
+  before readiness. A connection permit covers the complete accepted
+  connection; header count, parser bytes, header-read time, keep-alive idle, and
+  drain behavior are distinct bounds. Raw-socket tests must prove public
+  incomplete-header saturation cannot consume private readiness/metrics or
+  prevent bounded SIGTERM.
+- Phase-7 reload authority belongs in a separate narrow root
+  `xenoteer-authd`, not processd. Its root-owned Unix socket authenticates the
+  exact daemon UID/GID with `SO_PEERCRED`; bounded token-set sources are opened
+  no-follow with owner/mode/type/inode checks and unlinked after handoff. The
+  daemon retains only keyed fingerprints plus public metadata and atomically
+  swaps a completely validated set. Version-one scope is the current desktop
+  plus registered application IDs. Revocation/expiry/removal/scope reduction
+  invalidates the principal incarnation, closes affected WebSockets with 1008,
+  revokes owned leases/queued work, and rechecks authority at the first
+  mutating effect.
+- Phase-7 telemetry uses the existing request ID and fixed route templates,
+  never raw URI paths or caller strings as metric labels. A comprehensive
+  planted-canary gate must scan logs, problems, status, metadata, Debug/repr,
+  audit records, and metrics. Fuzzing uses checked-in deterministic replay
+  corpora for blocking gates; time-boxed libFuzzer exploration is nightly.
+  Performance evidence retains distributions and names the reference hardware;
+  local functional harness runs are not portable performance claims.
+- The aggregate OCI license is already correctly `NOASSERTION` with a separate
+  first-party BUSL declaration. The actual container metadata gaps are the
+  stale `phase-2` profile label and omission of the existing `xenoteerctl`
+  binary from the image/inventory. Release work must produce deterministic
+  source/notices/SBOM/checksum/offline-verification bundles bound to source
+  revision and exact image digest without claiming bit reproducibility until it
+  is measured.
+- The Phase-6 long-poll deadline patch passed independent source review with no
+  high- or medium-severity findings: authentication precedes semantic body
+  collection, matched-route classification ignores query/path values, typed
+  pre-effect 504 problems are truthful, inner/outer headroom is separated,
+  cancelled real waits release quota/actor state, and Rust/Python public wait
+  operations carry per-operation transport deadlines.
+- The final managed-process correlation design is actor-owned and revision
+  fenced. Commits require the exact desktop generation, window birth, reported
+  PID, model revision, lifecycle-authority epoch, and actor-returned post-commit
+  change sequence. Exact-birth/same-PID evidence survives ordinary metadata
+  refresh, but PID/birth changes, process exit, replay gaps, resync, malformed
+  replay, stream error/closure, cancellation, or reconnect disable authority
+  before externally visible effects. Reconnect uses cancellation-aware bounded
+  exponential backoff, and only a successfully applied live event resets it.
+- Correlation refresh uses one singleflight without holding its mutex across an
+  await. Cached hits are revalidated at the actor boundary; an in-flight result
+  cannot outlive a model or authority-epoch change. All ordinary list,
+  snapshot, query, resolve, and accessibility projections scrub stale high
+  evidence at their final authority gate, while managed selectors fail closed.
+  The blocking final-snapshot path used by real window control applies the same
+  exact epoch fence.
+- Semantic waits register before correlation refresh, retain one immutable
+  monotonic deadline through every refresh and recheck, and use one raw-event
+  budget across reconciliation and all window snapshots. At exact deadline
+  equality, a satisfied predicate wins; an unsatisfied predicate returns the
+  typed timeout. Strictly post-deadline work cannot create a late match, and a
+  transient unstable result re-registers only within the original deadline.
+- Final Phase-6 source verification is green. Rust passed the complete
+  workspace all-target/all-feature suite (including 326 xenoteerd unit tests
+  plus 3 SIGTERM process tests), strict Clippy, Rustdoc/doc tests, schema and API
+  checks, package-boundary tests, and both workspace/fixture dependency policy
+  gates. Rust `cargo audit --deny warnings` scanned 274 locked dependencies
+  against 1,173 advisories with no vulnerability. TypeScript passed 53 tests,
+  all 73 conformance cases, and deterministic package inspection. Python passed
+  49 isolated unit tests, all 73 conformance cases, Ruff, mypy across 19 files,
+  and wheel/sdist inspection. The static container/release contract passed
+  after removing generated local tool caches.
+- The holistic pre-commit review caught one Python deadline defect before it
+  reached an image: httpx scalar timeouts bound each connect/read/write/pool
+  phase, not the complete response stream, so a drip-fed response could exceed
+  the advertised operation deadline. The fail-first slow-stream regression
+  reproduced that no timeout was raised. `request_with_deadline` now retains one
+  outer `asyncio.timeout` even for deadline-capable transports, and
+  `HttpTransport` independently bounds the complete exchange while preserving
+  its per-phase httpx limits. Elapsed/internal timeout maps to
+  `request_timeout`; caller cancellation remains `CancelledError`. Six focused
+  regressions and the complete package matrix pass after the fix.
+- Real native qualification is also green under the two-job low-priority
+  policy: the authenticated isolated-Xvfb harness passed 11 X11 integration
+  tests, 4 live capture tests, 2 adversarial daemon observation tests, and the
+  independent XTEST fixture proof; the isolated D-Bus/AT-SPI harness passed its
+  live registry and fixture probe. Independent final correlation and deadline
+  reviews reported no high- or medium-severity findings. Exact coherent image
+  and staged-artifact qualification remain deliberately pending.
 - Phase 3 is committed locally as `90b0781`; the verified Phase 4 boundary is
   committed locally as `83b044c`. Phase 5 has completed coherent exact-image
   qualification and closure review and is ready for its local boundary commit.

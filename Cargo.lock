@@ -2468,6 +2468,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hmac",
  "http",
+ "http-body-util",
  "nix",
  "serde",
  "serde_json",

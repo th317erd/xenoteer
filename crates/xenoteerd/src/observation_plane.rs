@@ -17,7 +17,7 @@ use std::{
 };
 
 use sha2::{Digest, Sha256};
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 use xenoteer_core::{
     AccessibilityCorrelationError, AccessibilityWindowCandidate, ElementClickOcclusionSnapshot,
     MAX_ACCESSIBILITY_CORRELATION_CANDIDATES, MAX_ELEMENT_CLICK_OCCLUDERS, MonotonicMillis,
@@ -36,7 +36,7 @@ use xenoteer_protocol::{
     WindowFocusEvent, WindowGeometry, WindowGeometryEvent, WindowIdentityHash,
     WindowLifecycleEvent, WindowLifecycleKind, WindowListPage, WindowListRequest, WindowMetadata,
     WindowMetadataEvent, WindowMetadataField, WindowModelRebuildReason, WindowModelRebuiltEvent,
-    WindowModelRevision, WindowObservedState, WindowOrder, WindowPageCursor,
+    WindowModelRevision, WindowObservedState, WindowOrder, WindowPageCursor, WindowPredicate,
     WindowProcessConfidence, WindowProcessCorrelation, WindowProcessEvidence, WindowQueryPage,
     WindowQueryRequest, WindowRect, WindowRef, WindowReferenceToken, WindowResolveRequest,
     WindowResolveResult, WindowSelector, WindowSnapshot, WindowSnapshotEntry,
@@ -66,6 +66,76 @@ const TOKEN_SECRET_BYTES: usize = 32;
 const MAX_TOKEN_MINT_ATTEMPTS: usize = 16;
 /// Maximum total time advisory process correlation may add to one response.
 const PROCESS_CORRELATION_TOTAL_TIMEOUT: Duration = Duration::from_millis(250);
+const PROCESS_CORRELATION_REFRESH_ATTEMPTS: usize = 3;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessCorrelationFence {
+    revision: WindowModelRevision,
+    lifecycle_authority: ProcessLifecycleAuthorityFence,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessLifecycleAuthorityFence(u64);
+
+impl ProcessLifecycleAuthorityFence {
+    fn available(self) -> bool {
+        self.0 % 2 == 1
+    }
+}
+
+struct ProcessLifecycleAuthority {
+    state: AtomicU64,
+}
+
+impl ProcessLifecycleAuthority {
+    fn new() -> Self {
+        Self {
+            state: AtomicU64::new(0),
+        }
+    }
+
+    fn capture(&self) -> ProcessLifecycleAuthorityFence {
+        ProcessLifecycleAuthorityFence(self.state.load(Ordering::Acquire))
+    }
+
+    fn enable(&self) -> ProcessLifecycleAuthorityFence {
+        self.transition(false)
+    }
+
+    fn disable(&self) -> ProcessLifecycleAuthorityFence {
+        self.transition(true)
+    }
+
+    fn transition(&self, disable: bool) -> ProcessLifecycleAuthorityFence {
+        let mut current = self.state.load(Ordering::Acquire);
+        loop {
+            let currently_disabled = current.is_multiple_of(2);
+            if currently_disabled == disable {
+                return ProcessLifecycleAuthorityFence(current);
+            }
+            let next = current.wrapping_add(1);
+            match self.state.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return ProcessLifecycleAuthorityFence(next),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn accepts(&self, fence: ProcessLifecycleAuthorityFence) -> bool {
+        fence.available() && self.capture() == fence
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessCorrelationCommit {
+    fence: ProcessCorrelationFence,
+    change_sequence: u64,
+}
 
 /// One actor-owned, revision-fenced view used by accessibility correlation.
 #[derive(Clone, Debug)]
@@ -73,6 +143,8 @@ const PROCESS_CORRELATION_TOTAL_TIMEOUT: Duration = Duration::from_millis(250);
 pub(crate) struct ObservationCorrelationSnapshot {
     /// Window-model revision shared by every projected snapshot.
     pub(crate) revision: WindowModelRevision,
+    /// Actor-owned process-correlation authority epoch.
+    pub(crate) correlation_epoch: u64,
     /// Monotonic time at which the model owner produced the view.
     pub(crate) observed_at: MonotonicMillis,
     /// Complete live set, rejected rather than truncated above the hard cap.
@@ -517,6 +589,25 @@ impl CommittedWindowModelView {
                 .collect(),
         }
     }
+}
+
+fn process_correlation_universe_changed(
+    before: &CommittedWindowModelView,
+    after: &CommittedWindowModelView,
+) -> bool {
+    if before.windows.len() != after.windows.len() {
+        return true;
+    }
+    before.windows.iter().any(|(xid, previous)| {
+        after.windows.get(xid).is_none_or(|current| {
+            previous.window != current.window
+                || previous.process.reported_pid != current.process.reported_pid
+                || previous.process.managed_process != current.process.managed_process
+                || previous.process.confidence != current.process.confidence
+                || previous.process.evidence != current.process.evidence
+                || previous.process.conflict != current.process.conflict
+        })
+    })
 }
 
 fn lifecycle_event(
@@ -1090,6 +1181,7 @@ struct CursorClaim {
     principal: String,
     descriptor: WindowContinuationDescriptor,
     query: CursorQueryBinding,
+    correlation_epoch: Option<u64>,
     expires_at: MonotonicMillis,
 }
 
@@ -1176,6 +1268,7 @@ impl OpaqueTokenRegistry {
         &mut self,
         principal: &str,
         descriptor: WindowContinuationDescriptor,
+        correlation_epoch: Option<u64>,
         now: MonotonicMillis,
     ) -> Result<WindowPageCursor, ObservationAdapterError> {
         self.purge(now);
@@ -1198,6 +1291,7 @@ impl OpaqueTokenRegistry {
                 principal: principal.to_owned(),
                 descriptor,
                 query,
+                correlation_epoch,
                 expires_at,
             },
         );
@@ -1214,6 +1308,7 @@ impl OpaqueTokenRegistry {
         desktop_generation: DesktopGeneration,
         order: WindowOrder,
         query: CursorQueryBinding,
+        correlation_epoch: Option<u64>,
         now: MonotonicMillis,
     ) -> Result<WindowContinuationDescriptor, ObservationAdapterError> {
         self.purge(now);
@@ -1227,6 +1322,7 @@ impl OpaqueTokenRegistry {
             || claim.descriptor.desktop_generation != desktop_generation
             || claim.descriptor.order != order
             || claim.query != query
+            || claim.correlation_epoch != correlation_epoch
         {
             return Err(ObservationAdapterError::TokenUnavailable);
         }
@@ -1378,6 +1474,26 @@ fn selector_binding(
     Ok(CursorQueryBinding::Selector(digest.finalize().into()))
 }
 
+fn selector_requires_managed_process(selector: &WindowSelector) -> bool {
+    match selector {
+        WindowSelector::Predicate {
+            predicate: WindowPredicate::ManagedProcess { .. },
+        } => true,
+        WindowSelector::Predicate { .. } => false,
+        WindowSelector::All { selectors } | WindowSelector::Any { selectors } => {
+            selectors.iter().any(selector_requires_managed_process)
+        }
+        WindowSelector::Not { selector } => selector_requires_managed_process(selector),
+    }
+}
+
+fn wait_requires_managed_process(request: &WindowWaitRequest) -> bool {
+    match &request.target {
+        WindowWaitTarget::Reference { .. } => false,
+        WindowWaitTarget::Selector { selector, .. } => selector_requires_managed_process(selector),
+    }
+}
+
 struct ModelState {
     desktop_id: DesktopId,
     desktop_generation: DesktopGeneration,
@@ -1386,6 +1502,10 @@ struct ModelState {
     tokens: OpaqueTokenRegistry,
     events: WindowEventEmitter,
     stacking_epoch: u64,
+    correlation_epoch: u64,
+    process_correlation_available: bool,
+    model_changes: Option<Arc<ProcessCorrelationModelChanges>>,
+    process_lifecycle_authority: Arc<ProcessLifecycleAuthority>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1437,6 +1557,10 @@ impl ModelState {
             tokens: OpaqueTokenRegistry::new(token_capacity, cursor_ttl_ms, reference_ttl_ms)?,
             events: WindowEventEmitter::new(event_sink, event_metrics),
             stacking_epoch: 0,
+            correlation_epoch: 1,
+            process_correlation_available: false,
+            model_changes: None,
+            process_lifecycle_authority: Arc::new(ProcessLifecycleAuthority::new()),
         })
     }
 
@@ -1565,6 +1689,15 @@ impl ModelState {
                     .transpose()?,
                 &desired_references,
             )?;
+            if let Some(previous) = before.windows.get(&input.window)
+                && previous.window == snapshot.window
+                && previous.process.reported_pid == snapshot.process.reported_pid
+            {
+                // Broker evidence belongs to one exact X11 birth and reported
+                // PID. Preserve it across unrelated metadata/geometry
+                // reconciliation, but never across PID mutation or XID reuse.
+                snapshot.process = previous.process.clone();
+            }
             snapshot.has_accessibility_application =
                 before.windows.get(&input.window).is_some_and(|current| {
                     current.window == snapshot.window && current.has_accessibility_application
@@ -1598,9 +1731,193 @@ impl ModelState {
             self.model.revision(),
             committed,
         );
+        if process_correlation_universe_changed(&before, &after) {
+            self.advance_correlation_epoch()?;
+            self.process_correlation_available = false;
+        }
         self.events
             .emit_committed_transition(&before, &after, event_policy);
         Ok(())
+    }
+
+    fn advance_correlation_epoch(&mut self) -> Result<(), ObservationAdapterError> {
+        self.correlation_epoch = self
+            .correlation_epoch
+            .checked_add(1)
+            .ok_or(ObservationAdapterError::Model)?;
+        Ok(())
+    }
+
+    fn publish_model_change(&self) -> Option<u64> {
+        if let Some(changes) = &self.model_changes {
+            return Some(changes.publish());
+        }
+        None
+    }
+
+    fn model_change_sequence(&self) -> u64 {
+        self.model_changes
+            .as_ref()
+            .map_or(0, |changes| changes.sequence())
+    }
+
+    fn replace_process_correlations(
+        &mut self,
+        expected_revision: WindowModelRevision,
+        expected_correlation_epoch: u64,
+        expected_generation: DesktopGeneration,
+        assignments: &[ProcessCorrelationAssignment],
+        now: MonotonicMillis,
+    ) -> Result<ProcessCorrelationFence, ControlPlaneError> {
+        if expected_generation != self.desktop_generation {
+            return Err(ControlPlaneError::PermissionDenied);
+        }
+        if assignments.len() > self.max_live_windows {
+            return Err(ControlPlaneError::ResourceExhausted);
+        }
+        let (before_revision, current) = self.model.snapshot_all(now).map_err(map_model_error)?;
+        if before_revision != expected_revision
+            || self.correlation_epoch != expected_correlation_epoch
+        {
+            return Err(ControlPlaneError::StaleReference {
+                current_generation: Some(self.desktop_generation),
+            });
+        }
+        if assignments.len() != current.len() {
+            return Err(ControlPlaneError::StaleReference {
+                current_generation: Some(self.desktop_generation),
+            });
+        }
+        let before = CommittedWindowModelView::new(
+            self.desktop_id,
+            self.desktop_generation,
+            before_revision,
+            current.clone(),
+        );
+        let mut by_xid = BTreeMap::new();
+        for assignment in assignments {
+            if assignment.window.validate_shape().is_err()
+                || assignment.window.desktop_id != self.desktop_id
+                || assignment.window.desktop_generation != self.desktop_generation
+                || by_xid.insert(assignment.window.xid, assignment).is_some()
+            {
+                return Err(ControlPlaneError::InvalidRequest);
+            }
+        }
+
+        let mut desired = Vec::with_capacity(current.len());
+        for mut snapshot in current {
+            let assignment = by_xid.get(&snapshot.window.xid).copied().ok_or(
+                ControlPlaneError::StaleReference {
+                    current_generation: Some(self.desktop_generation),
+                },
+            )?;
+            if assignment.window != snapshot.window
+                || assignment.reported_pid != snapshot.process.reported_pid
+            {
+                return Err(ControlPlaneError::StaleReference {
+                    current_generation: Some(self.desktop_generation),
+                });
+            }
+            snapshot.process =
+                process_correlation_from_assignment(assignment, self.desktop_generation)?;
+            snapshot
+                .validate()
+                .map_err(|_| ControlPlaneError::InvalidRequest)?;
+            desired.push(snapshot);
+        }
+
+        let changed = desired.iter().any(|snapshot| {
+            before
+                .windows
+                .get(&snapshot.window.xid)
+                .is_none_or(|previous| previous.process != snapshot.process)
+        });
+        let availability_changed = !self.process_correlation_available;
+        if !changed && !availability_changed {
+            return Ok(ProcessCorrelationFence {
+                revision: before_revision,
+                lifecycle_authority: self.process_lifecycle_authority.capture(),
+            });
+        }
+        if changed {
+            for snapshot in desired {
+                self.model.observe(snapshot, now).map_err(map_model_error)?;
+            }
+        }
+        self.process_correlation_available = true;
+        self.correlation_epoch = self
+            .correlation_epoch
+            .checked_add(1)
+            .ok_or(ControlPlaneError::Internal)?;
+        let (after_revision, after_windows) =
+            self.model.snapshot_all(now).map_err(map_model_error)?;
+        let after = CommittedWindowModelView::new(
+            self.desktop_id,
+            self.desktop_generation,
+            after_revision,
+            after_windows,
+        );
+        self.events
+            .emit_committed_transition(&before, &after, ReconcileEventPolicy::Incremental);
+        self.publish_model_change();
+        Ok(ProcessCorrelationFence {
+            revision: after_revision,
+            lifecycle_authority: self.process_lifecycle_authority.capture(),
+        })
+    }
+
+    fn invalidate_process_correlations(
+        &mut self,
+        now: MonotonicMillis,
+    ) -> Result<ProcessCorrelationFence, ControlPlaneError> {
+        let (before_revision, current) = self.model.snapshot_all(now).map_err(map_model_error)?;
+        let before = CommittedWindowModelView::new(
+            self.desktop_id,
+            self.desktop_generation,
+            before_revision,
+            current.clone(),
+        );
+        let mut changed = false;
+        for mut snapshot in current {
+            let baseline = baseline_process_correlation(snapshot.process.reported_pid);
+            if snapshot.process == baseline {
+                continue;
+            }
+            snapshot.process = baseline;
+            self.model.observe(snapshot, now).map_err(map_model_error)?;
+            changed = true;
+        }
+        let availability_changed = self.process_correlation_available;
+        if changed || availability_changed {
+            self.correlation_epoch = self
+                .correlation_epoch
+                .checked_add(1)
+                .ok_or(ControlPlaneError::Internal)?;
+        }
+        self.process_correlation_available = false;
+        let revision = self.model.revision();
+        if changed {
+            let (_, after_windows) = self.model.snapshot_all(now).map_err(map_model_error)?;
+            let after = CommittedWindowModelView::new(
+                self.desktop_id,
+                self.desktop_generation,
+                revision,
+                after_windows,
+            );
+            self.events.emit_committed_transition(
+                &before,
+                &after,
+                ReconcileEventPolicy::Incremental,
+            );
+        }
+        if changed || availability_changed {
+            self.publish_model_change();
+        }
+        Ok(ProcessCorrelationFence {
+            revision,
+            lifecycle_authority: self.process_lifecycle_authority.capture(),
+        })
     }
 
     fn replace_accessibility_correlations(
@@ -1666,6 +1983,7 @@ impl ModelState {
         );
         self.events
             .emit_committed_transition(&before, &after, ReconcileEventPolicy::Incremental);
+        self.publish_model_change();
         Ok(after_revision)
     }
 
@@ -1679,6 +1997,7 @@ impl ModelState {
         }
         Ok(ObservationCorrelationSnapshot {
             revision,
+            correlation_epoch: self.correlation_epoch,
             observed_at: now,
             windows,
         })
@@ -1817,6 +2136,13 @@ impl ModelState {
             stacking_index,
             &references,
         )?;
+        let process_universe_changed = previous.as_ref().is_none_or(|previous| {
+            previous.window != snapshot.window
+                || previous.process.reported_pid != snapshot.process.reported_pid
+        });
+        if !process_universe_changed && let Some(previous) = &previous {
+            snapshot.process = previous.process.clone();
+        }
         snapshot.has_accessibility_application = previous
             .as_ref()
             .is_some_and(|snapshot| snapshot.has_accessibility_application);
@@ -1827,6 +2153,10 @@ impl ModelState {
         let committed = match change {
             WindowModelChange::Created(snapshot) | WindowModelChange::Updated(snapshot) => snapshot,
         };
+        if process_universe_changed {
+            self.advance_correlation_epoch()?;
+            self.process_correlation_available = false;
+        }
         self.events.emit_committed_observation(
             WindowEventScope {
                 desktop_id: self.desktop_id,
@@ -1868,6 +2198,8 @@ impl ModelState {
         self.model
             .destroy(&previous.window, now)
             .map_err(|_| ObservationAdapterError::Model)?;
+        self.advance_correlation_epoch()?;
+        self.process_correlation_available = false;
         self.events.emit_committed_removal(
             WindowEventScope {
                 desktop_id: self.desktop_id,
@@ -1903,6 +2235,7 @@ impl ModelState {
                         request.desktop_generation,
                         request.order,
                         CursorQueryBinding::List,
+                        None,
                         now,
                     )
                     .map_err(|_| ControlPlaneError::NotFound)?;
@@ -1950,6 +2283,8 @@ impl ModelState {
                         request.desktop_generation,
                         request.order,
                         binding,
+                        selector_requires_managed_process(&request.selector)
+                            .then_some(self.correlation_epoch),
                         now,
                     )
                     .map_err(|_| ControlPlaneError::NotFound)?;
@@ -1975,7 +2310,12 @@ impl ModelState {
                 continuation.as_ref(),
             )
             .map_err(map_query_error)?;
-        self.page_to_query(principal, projection, now)
+        self.page_to_query(
+            principal,
+            projection,
+            selector_requires_managed_process(&request.selector),
+            now,
+        )
     }
 
     fn snapshot(
@@ -2173,7 +2513,7 @@ impl ModelState {
         let windows = self.entries(principal, projection.windows, now)?;
         let next_cursor = projection
             .continuation
-            .map(|descriptor| self.tokens.mint_cursor(principal, descriptor, now))
+            .map(|descriptor| self.tokens.mint_cursor(principal, descriptor, None, now))
             .transpose()
             .map_err(|_| ControlPlaneError::Internal)?;
         Ok(WindowListPage {
@@ -2189,12 +2529,20 @@ impl ModelState {
         &mut self,
         principal: &str,
         projection: WindowPageProjection,
+        requires_managed_process: bool,
         now: MonotonicMillis,
     ) -> Result<WindowQueryPage, ControlPlaneError> {
         let windows = self.entries(principal, projection.windows, now)?;
         let next_cursor = projection
             .continuation
-            .map(|descriptor| self.tokens.mint_cursor(principal, descriptor, now))
+            .map(|descriptor| {
+                self.tokens.mint_cursor(
+                    principal,
+                    descriptor,
+                    requires_managed_process.then_some(self.correlation_epoch),
+                    now,
+                )
+            })
             .transpose()
             .map_err(|_| ControlPlaneError::Internal)?;
         Ok(WindowQueryPage {
@@ -2440,7 +2788,187 @@ pub struct DaemonObservationService {
     control: Arc<ModelActorControl>,
     desktop_generation: DesktopGeneration,
     pid_correlator: Arc<dyn PidCorrelator>,
+    process_refresh: Arc<ProcessCorrelationRefreshCoordinator>,
+    process_lifecycle_authority: Arc<ProcessLifecycleAuthority>,
+    wait_terminal_settlement_timeout: Duration,
     event_metrics: Arc<WindowEventDeliveryMetrics>,
+    #[cfg(test)]
+    unavailable_refresh_hook: Mutex<Option<Arc<UnavailableRefreshHook>>>,
+}
+
+struct ProcessCorrelationRefreshState {
+    in_flight: bool,
+    completion_sequence: u64,
+    completion_change_sequence: u64,
+    last_result: Result<ProcessCorrelationFence, ControlPlaneError>,
+    refreshed_change_sequence: Option<u64>,
+}
+
+struct ProcessCorrelationRefreshCoordinator {
+    state: Mutex<ProcessCorrelationRefreshState>,
+    completed: Notify,
+    model_changed: Arc<ProcessCorrelationModelChanges>,
+    #[cfg(test)]
+    cache_hit_hook: Mutex<Option<Arc<ProcessRefreshCacheHitHook>>>,
+}
+
+#[cfg(test)]
+struct ProcessRefreshCacheHitHook {
+    observed: Notify,
+    released: AtomicBool,
+    resume: Notify,
+}
+
+#[cfg(test)]
+impl ProcessRefreshCacheHitHook {
+    fn new() -> Self {
+        Self {
+            observed: Notify::new(),
+            released: AtomicBool::new(false),
+            resume: Notify::new(),
+        }
+    }
+
+    async fn pause(&self) {
+        self.observed.notify_waiters();
+        loop {
+            let notified = self.resume.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.released.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::Release);
+        self.resume.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+struct UnavailableRefreshHook {
+    observed: Notify,
+    released: AtomicBool,
+    resume: Notify,
+}
+
+#[cfg(test)]
+impl UnavailableRefreshHook {
+    fn new() -> Self {
+        Self {
+            observed: Notify::new(),
+            released: AtomicBool::new(false),
+            resume: Notify::new(),
+        }
+    }
+
+    async fn pause(&self) {
+        self.observed.notify_waiters();
+        loop {
+            let notified = self.resume.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.released.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::Release);
+        self.resume.notify_waiters();
+    }
+}
+
+struct ProcessCorrelationModelChanges {
+    sequence: AtomicU64,
+    notify: Notify,
+}
+
+impl ProcessCorrelationModelChanges {
+    fn new() -> Self {
+        Self {
+            sequence: AtomicU64::new(0),
+            notify: Notify::new(),
+        }
+    }
+
+    fn publish(&self) -> u64 {
+        let previous = self.sequence.fetch_add(1, Ordering::AcqRel);
+        self.notify.notify_waiters();
+        previous.wrapping_add(1)
+    }
+
+    fn sequence(&self) -> u64 {
+        self.sequence.load(Ordering::Acquire)
+    }
+}
+
+impl ProcessCorrelationRefreshCoordinator {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(ProcessCorrelationRefreshState {
+                in_flight: false,
+                completion_sequence: 0,
+                completion_change_sequence: 0,
+                last_result: Err(ControlPlaneError::CapabilityUnavailable),
+                refreshed_change_sequence: None,
+            }),
+            completed: Notify::new(),
+            model_changed: Arc::new(ProcessCorrelationModelChanges::new()),
+            #[cfg(test)]
+            cache_hit_hook: Mutex::new(None),
+        }
+    }
+
+    fn complete(
+        &self,
+        result: Result<ProcessCorrelationFence, ControlPlaneError>,
+        refreshed_change_sequence: u64,
+    ) -> Result<ProcessCorrelationFence, ControlPlaneError> {
+        {
+            let mut state = lock_unpoisoned(&self.state);
+            state.in_flight = false;
+            state.completion_sequence = state.completion_sequence.wrapping_add(1);
+            state.completion_change_sequence = refreshed_change_sequence;
+            state.last_result = result;
+            state.refreshed_change_sequence = result.is_ok().then_some(refreshed_change_sequence);
+        }
+        self.completed.notify_waiters();
+        result
+    }
+}
+
+struct ProcessCorrelationRefreshLeader<'a> {
+    coordinator: &'a ProcessCorrelationRefreshCoordinator,
+    refreshed_change_sequence: u64,
+    finished: bool,
+}
+
+impl ProcessCorrelationRefreshLeader<'_> {
+    fn finish(
+        mut self,
+        result: Result<ProcessCorrelationFence, ControlPlaneError>,
+    ) -> Result<ProcessCorrelationFence, ControlPlaneError> {
+        self.finished = true;
+        self.coordinator
+            .complete(result, self.refreshed_change_sequence)
+    }
+}
+
+impl Drop for ProcessCorrelationRefreshLeader<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.coordinator.complete(
+                Err(ControlPlaneError::CapabilityUnavailable),
+                self.refreshed_change_sequence,
+            );
+        }
+    }
 }
 
 impl fmt::Debug for DaemonObservationService {
@@ -2656,6 +3184,19 @@ impl DaemonObservationService {
         self.control.health()
     }
 
+    pub(crate) fn enable_process_lifecycle_authority(&self) {
+        self.process_lifecycle_authority.enable();
+    }
+
+    pub(crate) fn disable_process_lifecycle_authority(&self) {
+        self.process_lifecycle_authority.disable();
+    }
+
+    fn process_fence_is_current(&self, fence: ProcessCorrelationFence) -> bool {
+        self.process_lifecycle_authority
+            .accepts(fence.lifecycle_authority)
+    }
+
     /// Returns content-free counts of events dropped before coordinator ingress.
     #[allow(dead_code)]
     pub(crate) fn window_event_drop_stats(&self) -> WindowEventDropStats {
@@ -2699,6 +3240,9 @@ impl DaemonObservationService {
     pub(crate) async fn accessibility_correlation_snapshot(
         &self,
     ) -> Result<ObservationCorrelationSnapshot, ControlPlaneError> {
+        let fence = self.refresh_for_operation(false).await?;
+        self.pause_after_unavailable_refresh(fence).await;
+        let observed_sequence = self.process_refresh.model_changed.sequence();
         let (response, receiver) = oneshot::channel();
         self.submit(ModelRequest::AccessibilityCorrelationSnapshot { response })?;
         let mut snapshot = receiver
@@ -2711,18 +3255,22 @@ impl DaemonObservationService {
         }) {
             return Err(ControlPlaneError::Internal);
         }
-        enrich_window_snapshots(
-            self.pid_correlator.as_ref(),
-            self.desktop_generation,
-            &mut snapshot.windows,
-        )
-        .await;
         if snapshot
             .windows
             .iter()
             .any(|window| window.validate().is_err())
         {
             return Err(ControlPlaneError::Internal);
+        }
+        if fence.is_none()
+            || self.process_refresh.model_changed.sequence() != observed_sequence
+            || fence.is_some_and(|fence| {
+                fence.revision != snapshot.revision || !self.process_fence_is_current(fence)
+            })
+        {
+            for window in &mut snapshot.windows {
+                window.process = baseline_process_correlation(window.process.reported_pid);
+            }
         }
         Ok(snapshot)
     }
@@ -2738,13 +3286,17 @@ impl DaemonObservationService {
         }
         let (response, receiver) = mpsc::sync_channel(1);
         self.submit(ModelRequest::AccessibilityCorrelationSnapshotBlocking { response })?;
-        receiver
+        let mut snapshot = receiver
             .recv_timeout(timeout)
             .map_err(|error| match error {
                 mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected => {
                     ControlPlaneError::CapabilityUnavailable
                 }
-            })?
+            })??;
+        for window in &mut snapshot.windows {
+            window.process = baseline_process_correlation(window.process.reported_pid);
+        }
+        Ok(snapshot)
     }
 
     fn submit(&self, request: ModelRequest) -> Result<(), ControlPlaneError> {
@@ -2756,6 +3308,547 @@ impl DaemonObservationService {
             })?;
         self.control.notify();
         Ok(())
+    }
+
+    async fn refresh_process_correlations(
+        &self,
+    ) -> Result<ProcessCorrelationFence, ControlPlaneError> {
+        enum RefreshAction {
+            Cached(Result<ProcessCorrelationFence, ControlPlaneError>),
+            Lead,
+            Follow(u64),
+        }
+
+        loop {
+            let change_sequence = self.process_refresh.model_changed.sequence();
+            let notified = self.process_refresh.completed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let action = {
+                let mut state = lock_unpoisoned(&self.process_refresh.state);
+                if state.refreshed_change_sequence == Some(change_sequence) {
+                    RefreshAction::Cached(state.last_result)
+                } else if !state.in_flight {
+                    state.in_flight = true;
+                    RefreshAction::Lead
+                } else {
+                    RefreshAction::Follow(state.completion_sequence)
+                }
+            };
+            match action {
+                RefreshAction::Cached(result) => {
+                    #[cfg(test)]
+                    {
+                        let hook = lock_unpoisoned(&self.process_refresh.cache_hit_hook).clone();
+                        if let Some(hook) = hook {
+                            hook.pause().await;
+                        }
+                    }
+                    if self.process_refresh.model_changed.sequence() == change_sequence
+                        && result.is_ok_and(|fence| self.process_fence_is_current(fence))
+                    {
+                        return result;
+                    }
+                }
+                RefreshAction::Lead => {
+                    let mut leader = ProcessCorrelationRefreshLeader {
+                        coordinator: self.process_refresh.as_ref(),
+                        refreshed_change_sequence: change_sequence,
+                        finished: false,
+                    };
+                    let result =
+                        self.perform_process_correlation_refresh()
+                            .await
+                            .and_then(|commit| {
+                                leader.refreshed_change_sequence = commit.change_sequence;
+                                (self.process_refresh.model_changed.sequence()
+                                    == commit.change_sequence)
+                                    .then_some(commit.fence)
+                                    .ok_or(ControlPlaneError::StaleReference {
+                                        current_generation: Some(self.desktop_generation),
+                                    })
+                            });
+                    if result.is_err() {
+                        leader.refreshed_change_sequence =
+                            self.process_refresh.model_changed.sequence();
+                    }
+                    return leader.finish(result);
+                }
+                RefreshAction::Follow(observed_sequence) => {
+                    notified.await;
+                    let state = lock_unpoisoned(&self.process_refresh.state);
+                    if state.completion_sequence != observed_sequence {
+                        let result = state.last_result;
+                        let completion_change_sequence = state.completion_change_sequence;
+                        drop(state);
+                        if self.process_refresh.model_changed.sequence()
+                            == completion_change_sequence
+                        {
+                            return result;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn perform_process_correlation_refresh(
+        &self,
+    ) -> Result<ProcessCorrelationCommit, ControlPlaneError> {
+        let lifecycle_authority = self.process_lifecycle_authority.capture();
+        if !lifecycle_authority.available() {
+            self.invalidate_process_correlations_internal().await?;
+            return Err(ControlPlaneError::CapabilityUnavailable);
+        }
+        let (snapshot_response, snapshot_receiver) = oneshot::channel();
+        self.submit(ModelRequest::ProcessCorrelationSnapshot {
+            response: snapshot_response,
+        })?;
+        let snapshot = snapshot_receiver
+            .await
+            .map_err(|_| ControlPlaneError::CapabilityUnavailable)??;
+        if snapshot.windows.iter().any(|window| {
+            window.window.desktop_generation != self.desktop_generation
+                || window.model_revision != snapshot.revision
+                || window.validate().is_err()
+        }) {
+            self.invalidate_process_correlations_internal().await?;
+            return Err(ControlPlaneError::CapabilityUnavailable);
+        }
+
+        let pids = unique_reported_pids(snapshot.windows.iter());
+        let upgrades = match resolve_process_correlation_upgrades(
+            self.pid_correlator.as_ref(),
+            self.desktop_generation,
+            pids,
+        )
+        .await
+        {
+            Ok(upgrades) => upgrades,
+            Err(_) => {
+                self.invalidate_process_correlations_internal().await?;
+                return Err(ControlPlaneError::CapabilityUnavailable);
+            }
+        };
+        let assignments = snapshot
+            .windows
+            .into_iter()
+            .map(|window| ProcessCorrelationAssignment {
+                reported_pid: window.process.reported_pid,
+                upgrade: window
+                    .process
+                    .reported_pid
+                    .and_then(|pid| upgrades.get(&pid).copied()),
+                window: window.window,
+            })
+            .collect();
+        let (replace_response, replace_receiver) = oneshot::channel();
+        self.submit(ModelRequest::ReplaceProcessCorrelations {
+            expected_revision: snapshot.revision,
+            expected_correlation_epoch: snapshot.correlation_epoch,
+            expected_generation: self.desktop_generation,
+            expected_lifecycle_authority: lifecycle_authority,
+            assignments,
+            response: replace_response,
+        })?;
+        replace_receiver
+            .await
+            .map_err(|_| ControlPlaneError::CapabilityUnavailable)?
+    }
+
+    async fn invalidate_process_correlations_internal(
+        &self,
+    ) -> Result<ProcessCorrelationFence, ControlPlaneError> {
+        let (response, receiver) = oneshot::channel();
+        self.submit(ModelRequest::InvalidateProcessCorrelations { response })?;
+        receiver
+            .await
+            .map_err(|_| ControlPlaneError::CapabilityUnavailable)?
+    }
+
+    /// Clears every broker-confirmed process assignment through the model owner.
+    ///
+    /// The process-event relay can call this on exit, replay gaps, or broker
+    /// reconnect before a fresh correlation pass. Invalidation advances the
+    /// correlation epoch even when the visible snapshots were already low
+    /// confidence, fencing a concurrently captured broker response.
+    #[allow(dead_code, reason = "process lifecycle integration seam")]
+    pub(crate) async fn invalidate_process_correlations(&self) -> Result<(), ControlPlaneError> {
+        self.process_lifecycle_authority.disable();
+        self.invalidate_process_correlations_internal().await?;
+        Ok(())
+    }
+
+    async fn refresh_for_operation(
+        &self,
+        requires_managed_process: bool,
+    ) -> Result<Option<ProcessCorrelationFence>, ControlPlaneError> {
+        if !self.process_lifecycle_authority.capture().available() {
+            self.invalidate_process_correlations_internal().await?;
+            return if requires_managed_process {
+                Err(ControlPlaneError::CapabilityUnavailable)
+            } else {
+                Ok(None)
+            };
+        }
+        for _ in 0..PROCESS_CORRELATION_REFRESH_ATTEMPTS {
+            match self.refresh_process_correlations().await {
+                Ok(fence) => return Ok(Some(fence)),
+                Err(ControlPlaneError::StaleReference { .. }) => continue,
+                Err(ControlPlaneError::CapabilityUnavailable) if !requires_managed_process => {
+                    self.invalidate_process_correlations_internal().await?;
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if requires_managed_process {
+            Err(ControlPlaneError::CapabilityUnavailable)
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn pause_after_unavailable_refresh(&self, fence: Option<ProcessCorrelationFence>) {
+        #[cfg(test)]
+        if fence.is_none() {
+            let hook = lock_unpoisoned(&self.unavailable_refresh_hook).clone();
+            if let Some(hook) = hook {
+                hook.pause().await;
+            }
+        }
+        #[cfg(not(test))]
+        let _ = fence;
+    }
+
+    async fn list_for_principal(
+        &self,
+        principal: String,
+        request: WindowListRequest,
+    ) -> Result<WindowListPage, ControlPlaneError> {
+        for attempt in 0..PROCESS_CORRELATION_REFRESH_ATTEMPTS {
+            let fence = self.refresh_for_operation(false).await?;
+            self.pause_after_unavailable_refresh(fence).await;
+            let observed_sequence = self.process_refresh.model_changed.sequence();
+            let (response, receiver) = oneshot::channel();
+            self.submit(ModelRequest::List {
+                principal: principal.clone(),
+                request: request.clone(),
+                response,
+            })?;
+            let mut result = receiver
+                .await
+                .map_err(|_| ControlPlaneError::CapabilityUnavailable)??;
+            if fence.is_none() {
+                strip_process_from_entries(&mut result.windows);
+                return Ok(result);
+            }
+            if self.process_refresh.model_changed.sequence() == observed_sequence
+                && fence.is_some_and(|fence| {
+                    fence.revision == result.snapshot_revision
+                        && self.process_fence_is_current(fence)
+                })
+            {
+                return Ok(result);
+            }
+            if attempt + 1 == PROCESS_CORRELATION_REFRESH_ATTEMPTS {
+                strip_process_from_entries(&mut result.windows);
+                return Ok(result);
+            }
+        }
+        Err(ControlPlaneError::CapabilityUnavailable)
+    }
+
+    async fn snapshot_for_principal(
+        &self,
+        principal: String,
+        request: WindowSnapshotRequest,
+    ) -> Result<WindowSnapshotResult, ControlPlaneError> {
+        for attempt in 0..PROCESS_CORRELATION_REFRESH_ATTEMPTS {
+            let fence = self.refresh_for_operation(false).await?;
+            self.pause_after_unavailable_refresh(fence).await;
+            let observed_sequence = self.process_refresh.model_changed.sequence();
+            let (response, receiver) = oneshot::channel();
+            self.submit(ModelRequest::Snapshot {
+                principal: principal.clone(),
+                request: request.clone(),
+                response,
+            })?;
+            let mut result = receiver
+                .await
+                .map_err(|_| ControlPlaneError::CapabilityUnavailable)??;
+            if fence.is_none() {
+                strip_process_from_entry(&mut result.window);
+                return Ok(result);
+            }
+            if self.process_refresh.model_changed.sequence() == observed_sequence
+                && fence.is_some_and(|fence| {
+                    fence.revision == result.snapshot_revision
+                        && self.process_fence_is_current(fence)
+                })
+            {
+                return Ok(result);
+            }
+            if attempt + 1 == PROCESS_CORRELATION_REFRESH_ATTEMPTS {
+                strip_process_from_entry(&mut result.window);
+                return Ok(result);
+            }
+        }
+        Err(ControlPlaneError::CapabilityUnavailable)
+    }
+
+    async fn query_for_principal(
+        &self,
+        principal: String,
+        request: WindowQueryRequest,
+    ) -> Result<WindowQueryPage, ControlPlaneError> {
+        let requires_managed_process = selector_requires_managed_process(&request.selector);
+        for attempt in 0..PROCESS_CORRELATION_REFRESH_ATTEMPTS {
+            let fence = self.refresh_for_operation(requires_managed_process).await?;
+            self.pause_after_unavailable_refresh(fence).await;
+            let observed_sequence = self.process_refresh.model_changed.sequence();
+            let (response, receiver) = oneshot::channel();
+            self.submit(ModelRequest::Query {
+                principal: principal.clone(),
+                request: request.clone(),
+                response,
+            })?;
+            let mut result = receiver
+                .await
+                .map_err(|_| ControlPlaneError::CapabilityUnavailable)??;
+            if fence.is_none() {
+                strip_process_from_entries(&mut result.windows);
+                return Ok(result);
+            }
+            if self.process_refresh.model_changed.sequence() == observed_sequence
+                && fence.is_some_and(|fence| {
+                    fence.revision == result.snapshot_revision
+                        && self.process_fence_is_current(fence)
+                })
+            {
+                return Ok(result);
+            }
+            if attempt + 1 == PROCESS_CORRELATION_REFRESH_ATTEMPTS {
+                return if requires_managed_process {
+                    Err(ControlPlaneError::CapabilityUnavailable)
+                } else {
+                    strip_process_from_entries(&mut result.windows);
+                    Ok(result)
+                };
+            }
+        }
+        Err(ControlPlaneError::CapabilityUnavailable)
+    }
+
+    async fn resolve_for_principal(
+        &self,
+        principal: String,
+        request: WindowResolveRequest,
+    ) -> Result<WindowResolveResult, ControlPlaneError> {
+        let requires_managed_process = selector_requires_managed_process(&request.selector);
+        for attempt in 0..PROCESS_CORRELATION_REFRESH_ATTEMPTS {
+            let fence = self.refresh_for_operation(requires_managed_process).await?;
+            self.pause_after_unavailable_refresh(fence).await;
+            let observed_sequence = self.process_refresh.model_changed.sequence();
+            let (response, receiver) = oneshot::channel();
+            self.submit(ModelRequest::Resolve {
+                principal: principal.clone(),
+                request: request.clone(),
+                response,
+            })?;
+            let mut result = receiver
+                .await
+                .map_err(|_| ControlPlaneError::CapabilityUnavailable)??;
+            if fence.is_none() {
+                strip_process_from_entry(&mut result.window);
+                return Ok(result);
+            }
+            if self.process_refresh.model_changed.sequence() == observed_sequence
+                && fence.is_some_and(|fence| {
+                    fence.revision == result.snapshot_revision
+                        && self.process_fence_is_current(fence)
+                })
+            {
+                return Ok(result);
+            }
+            if attempt + 1 == PROCESS_CORRELATION_REFRESH_ATTEMPTS {
+                return if requires_managed_process {
+                    Err(ControlPlaneError::CapabilityUnavailable)
+                } else {
+                    strip_process_from_entry(&mut result.window);
+                    Ok(result)
+                };
+            }
+        }
+        Err(ControlPlaneError::CapabilityUnavailable)
+    }
+
+    async fn wait_for_principal(
+        &self,
+        principal: String,
+        request: WindowWaitRequest,
+    ) -> Result<WindowWaitResult, ControlPlaneError> {
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(u64::from(request.timeout_ms)))
+            .ok_or(ControlPlaneError::InvalidRequest)?;
+        let async_deadline = tokio::time::Instant::from_std(deadline);
+        let requires_managed_process = wait_requires_managed_process(&request);
+        let (response, mut receiver) = oneshot::channel();
+        self.submit(ModelRequest::Wait {
+            principal: principal.clone(),
+            request: request.clone(),
+            deadline: Some(deadline),
+            response,
+        })?;
+
+        let changed = self.process_refresh.model_changed.notify.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        let mut latest_fence = match tokio::time::timeout_at(
+            async_deadline,
+            self.refresh_for_operation(requires_managed_process),
+        )
+        .await
+        {
+            Ok(result) => {
+                result?.map(|fence| (fence, self.process_refresh.model_changed.sequence()))
+            }
+            Err(_) => None,
+        };
+        let mut observed_change_sequence = self.process_refresh.model_changed.sequence();
+        loop {
+            if Instant::now() >= deadline {
+                let settlement_deadline = tokio::time::Instant::now()
+                    .checked_add(self.wait_terminal_settlement_timeout)
+                    .ok_or(ControlPlaneError::Internal)?;
+                let mut result = tokio::time::timeout_at(settlement_deadline, &mut receiver)
+                    .await
+                    .map_err(|_| ControlPlaneError::CapabilityUnavailable)?
+                    .map_err(|_| ControlPlaneError::CapabilityUnavailable)??;
+                let stable = latest_fence.is_some_and(|(fence, sequence)| {
+                    fence.revision == result.evaluated_revision
+                        && self.process_fence_is_current(fence)
+                        && self.process_refresh.model_changed.sequence() == sequence
+                });
+                if stable {
+                    return Ok(result);
+                }
+                if requires_managed_process {
+                    return Err(ControlPlaneError::CapabilityUnavailable);
+                }
+                for window in &mut result.windows {
+                    window.snapshot.process =
+                        baseline_process_correlation(window.snapshot.process.reported_pid);
+                }
+                return Ok(result);
+            }
+            if self.process_refresh.model_changed.sequence() != observed_change_sequence {
+                observed_change_sequence = self.process_refresh.model_changed.sequence();
+                let next_change = self.process_refresh.model_changed.notify.notified();
+                changed.set(next_change);
+                changed.as_mut().enable();
+                let refresh = tokio::time::timeout_at(
+                    async_deadline,
+                    self.refresh_for_operation(requires_managed_process),
+                )
+                .await;
+                match refresh {
+                    Ok(result) => {
+                        latest_fence = result?
+                            .map(|fence| (fence, self.process_refresh.model_changed.sequence()));
+                    }
+                    Err(_) => latest_fence = None,
+                }
+                continue;
+            }
+            tokio::select! {
+                result = &mut receiver => {
+                    let mut result =
+                        result.map_err(|_| ControlPlaneError::CapabilityUnavailable)??;
+                    if latest_fence.is_none() && !requires_managed_process {
+                        for window in &mut result.windows {
+                            window.snapshot.process =
+                                baseline_process_correlation(window.snapshot.process.reported_pid);
+                        }
+                        return Ok(result);
+                    }
+                    let stable = latest_fence.is_some_and(|(fence, sequence)| {
+                        fence.revision == result.evaluated_revision
+                            && self.process_fence_is_current(fence)
+                            && self.process_refresh.model_changed.sequence() == sequence
+                    });
+                    if stable {
+                        return Ok(result);
+                    }
+                    if Instant::now() < deadline {
+                        let (response, next_receiver) = oneshot::channel();
+                        self.submit(ModelRequest::Wait {
+                            principal: principal.clone(),
+                            request: request.clone(),
+                            deadline: Some(deadline),
+                            response,
+                        })?;
+                        receiver = next_receiver;
+                        continue;
+                    }
+                    if requires_managed_process {
+                        return Err(ControlPlaneError::CapabilityUnavailable);
+                    }
+                    for window in &mut result.windows {
+                        window.snapshot.process =
+                            baseline_process_correlation(window.snapshot.process.reported_pid);
+                    }
+                    return Ok(result);
+                }
+                () = &mut changed => {
+                    observed_change_sequence = self.process_refresh.model_changed.sequence();
+                    let next_change = self.process_refresh.model_changed.notify.notified();
+                    changed.set(next_change);
+                    changed.as_mut().enable();
+                    let refresh = tokio::time::timeout_at(
+                        async_deadline,
+                        self.refresh_for_operation(requires_managed_process),
+                    )
+                    .await;
+                    match refresh {
+                        Ok(result) => {
+                            latest_fence = result?.map(|fence| {
+                                (
+                                    fence,
+                                    self.process_refresh.model_changed.sequence(),
+                                )
+                            });
+                        }
+                        Err(_) => latest_fence = None,
+                    }
+                }
+                () = tokio::time::sleep_until(async_deadline) => {
+                    let settlement_deadline = tokio::time::Instant::now()
+                        .checked_add(self.wait_terminal_settlement_timeout)
+                        .ok_or(ControlPlaneError::Internal)?;
+                    let mut result = tokio::time::timeout_at(settlement_deadline, &mut receiver)
+                        .await
+                        .map_err(|_| ControlPlaneError::CapabilityUnavailable)?
+                        .map_err(|_| ControlPlaneError::CapabilityUnavailable)??;
+                    let stable = latest_fence.is_some_and(|(fence, sequence)| {
+                        fence.revision == result.evaluated_revision
+                            && self.process_fence_is_current(fence)
+                            && self.process_refresh.model_changed.sequence() == sequence
+                    });
+                    if stable {
+                        return Ok(result);
+                    }
+                    if requires_managed_process {
+                        return Err(ControlPlaneError::CapabilityUnavailable);
+                    }
+                    for window in &mut result.windows {
+                        window.snapshot.process =
+                            baseline_process_correlation(window.snapshot.process.reported_pid);
+                    }
+                    return Ok(result);
+                }
+            }
+        }
     }
 
     /// Revalidates one exact live window birth on the model-owner thread.
@@ -2796,15 +3889,23 @@ impl DaemonObservationService {
         if timeout.is_zero() || window.validate_shape().is_err() {
             return Err(ControlPlaneError::InvalidRequest);
         }
+        let lifecycle_authority = self.process_lifecycle_authority.capture();
         let (response, receiver) = mpsc::sync_channel(1);
         self.submit(ModelRequest::InternalSnapshot { window, response })?;
-        receiver
+        let mut snapshot = receiver
             .recv_timeout(timeout)
             .map_err(|error| match error {
                 mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected => {
                     ControlPlaneError::CapabilityUnavailable
                 }
-            })?
+            })??;
+        if !self
+            .process_lifecycle_authority
+            .accepts(lifecycle_authority)
+        {
+            snapshot.process = baseline_process_correlation(snapshot.process.reported_pid);
+        }
+        Ok(snapshot)
     }
 
     /// Reads fresh bounded stacking evidence for one exact target birth.
@@ -2882,27 +3983,86 @@ struct ProcessCorrelationUpgrade {
     evidence: WindowProcessEvidence,
 }
 
+#[derive(Clone)]
+struct ProcessCorrelationAssignment {
+    window: WindowRef,
+    reported_pid: Option<u32>,
+    upgrade: Option<ProcessCorrelationUpgrade>,
+}
+
+fn baseline_process_correlation(reported_pid: Option<u32>) -> WindowProcessCorrelation {
+    match reported_pid {
+        Some(pid) => WindowProcessCorrelation {
+            reported_pid: Some(pid),
+            managed_process: None,
+            confidence: WindowProcessConfidence::Low,
+            evidence: vec![WindowProcessEvidence::NetWmPid],
+            conflict: false,
+        },
+        None => WindowProcessCorrelation {
+            reported_pid: None,
+            managed_process: None,
+            confidence: WindowProcessConfidence::None,
+            evidence: Vec::new(),
+            conflict: false,
+        },
+    }
+}
+
+fn strip_process_from_entry(entry: &mut WindowSnapshotEntry) {
+    entry.snapshot.process = baseline_process_correlation(entry.snapshot.process.reported_pid);
+}
+
+fn strip_process_from_entries(entries: &mut [WindowSnapshotEntry]) {
+    for entry in entries {
+        strip_process_from_entry(entry);
+    }
+}
+
+fn process_correlation_from_assignment(
+    assignment: &ProcessCorrelationAssignment,
+    desktop_generation: DesktopGeneration,
+) -> Result<WindowProcessCorrelation, ControlPlaneError> {
+    let Some(upgrade) = assignment.upgrade else {
+        return Ok(baseline_process_correlation(assignment.reported_pid));
+    };
+    let Some(reported_pid) = assignment.reported_pid else {
+        return Err(ControlPlaneError::InvalidRequest);
+    };
+    if upgrade.process.validate().is_err()
+        || upgrade.process.desktop_generation != desktop_generation
+        || (upgrade.evidence == WindowProcessEvidence::ProcStartTime
+            && upgrade.process.pid != reported_pid)
+        || !matches!(
+            upgrade.evidence,
+            WindowProcessEvidence::ProcStartTime | WindowProcessEvidence::ProcessGroup
+        )
+    {
+        return Err(ControlPlaneError::InvalidRequest);
+    }
+    Ok(WindowProcessCorrelation {
+        reported_pid: Some(reported_pid),
+        managed_process: Some(upgrade.process),
+        confidence: WindowProcessConfidence::High,
+        evidence: vec![WindowProcessEvidence::NetWmPid, upgrade.evidence],
+        conflict: false,
+    })
+}
+
+#[cfg(test)]
 async fn enrich_entries(
     correlator: &dyn PidCorrelator,
     desktop_generation: DesktopGeneration,
     entries: &mut [WindowSnapshotEntry],
 ) {
     let pids = unique_reported_pids(entries.iter().map(|entry| &entry.snapshot));
-    let upgrades = resolve_process_correlation_upgrades(correlator, desktop_generation, pids).await;
+    let Ok(upgrades) =
+        resolve_process_correlation_upgrades(correlator, desktop_generation, pids).await
+    else {
+        return;
+    };
     for entry in entries {
         apply_process_correlation_upgrade(&mut entry.snapshot, &upgrades);
-    }
-}
-
-async fn enrich_window_snapshots(
-    correlator: &dyn PidCorrelator,
-    desktop_generation: DesktopGeneration,
-    snapshots: &mut [WindowSnapshot],
-) {
-    let pids = unique_reported_pids(snapshots.iter());
-    let upgrades = resolve_process_correlation_upgrades(correlator, desktop_generation, pids).await;
-    for snapshot in snapshots {
-        apply_process_correlation_upgrade(snapshot, &upgrades);
     }
 }
 
@@ -2923,7 +4083,7 @@ async fn resolve_process_correlation_upgrades(
     correlator: &dyn PidCorrelator,
     desktop_generation: DesktopGeneration,
     pids: Vec<u32>,
-) -> BTreeMap<u32, ProcessCorrelationUpgrade> {
+) -> Result<BTreeMap<u32, ProcessCorrelationUpgrade>, PidCorrelationError> {
     let deadline = tokio::time::Instant::now() + PROCESS_CORRELATION_TOTAL_TIMEOUT;
     let mut upgrades = BTreeMap::new();
     for batch in pids.chunks(MAX_PROCESS_CORRELATION_PIDS) {
@@ -2936,18 +4096,19 @@ async fn resolve_process_correlation_upgrades(
         else {
             // Transport unavailability is normally shared by every batch;
             // one shared deadline prevents per-batch latency multiplication.
-            break;
+            return Err(PidCorrelationError);
         };
         let Some(batch_upgrades) =
             validate_correlation_reply(desktop_generation, &requested, reply)
         else {
-            continue;
+            return Err(PidCorrelationError);
         };
         upgrades.extend(batch_upgrades);
     }
-    upgrades
+    Ok(upgrades)
 }
 
+#[cfg(test)]
 fn apply_process_correlation_upgrade(
     snapshot: &mut WindowSnapshot,
     upgrades: &BTreeMap<u32, ProcessCorrelationUpgrade>,
@@ -3010,6 +4171,7 @@ fn validate_correlation_reply(
     Some(upgrades)
 }
 
+#[cfg(test)]
 async fn enrich_list_result(
     correlator: &dyn PidCorrelator,
     desktop_id: DesktopId,
@@ -3027,6 +4189,7 @@ async fn enrich_list_result(
     Ok(result)
 }
 
+#[cfg(test)]
 async fn enrich_snapshot_result(
     correlator: &dyn PidCorrelator,
     desktop_id: DesktopId,
@@ -3049,6 +4212,7 @@ async fn enrich_snapshot_result(
     Ok(result)
 }
 
+#[cfg(test)]
 async fn enrich_query_result(
     correlator: &dyn PidCorrelator,
     desktop_id: DesktopId,
@@ -3066,6 +4230,7 @@ async fn enrich_query_result(
     Ok(result)
 }
 
+#[cfg(test)]
 async fn enrich_resolve_result(
     correlator: &dyn PidCorrelator,
     desktop_id: DesktopId,
@@ -3088,6 +4253,7 @@ async fn enrich_resolve_result(
     Ok(result)
 }
 
+#[cfg(test)]
 async fn enrich_wait_result(
     correlator: &dyn PidCorrelator,
     desktop_id: DesktopId,
@@ -3112,25 +4278,8 @@ impl ObservationPlane for DaemonObservationService {
         request: WindowListRequest,
     ) -> ObservationFuture<'a, Result<WindowListPage, ControlPlaneError>> {
         Box::pin(async move {
-            let desktop_id = request.desktop_id;
-            let desktop_generation = request.desktop_generation;
             let principal = authorized_principal(&context)?;
-            let (response, receiver) = oneshot::channel();
-            self.submit(ModelRequest::List {
-                principal,
-                request,
-                response,
-            })?;
-            let result = receiver
-                .await
-                .map_err(|_| ControlPlaneError::CapabilityUnavailable)??;
-            enrich_list_result(
-                self.pid_correlator.as_ref(),
-                desktop_id,
-                desktop_generation,
-                result,
-            )
-            .await
+            self.list_for_principal(principal, request).await
         })
     }
 
@@ -3140,25 +4289,8 @@ impl ObservationPlane for DaemonObservationService {
         request: WindowSnapshotRequest,
     ) -> ObservationFuture<'a, Result<WindowSnapshotResult, ControlPlaneError>> {
         Box::pin(async move {
-            let desktop_id = request.desktop_id;
-            let desktop_generation = request.desktop_generation;
             let principal = authorized_principal(&context)?;
-            let (response, receiver) = oneshot::channel();
-            self.submit(ModelRequest::Snapshot {
-                principal,
-                request,
-                response,
-            })?;
-            let result = receiver
-                .await
-                .map_err(|_| ControlPlaneError::CapabilityUnavailable)??;
-            enrich_snapshot_result(
-                self.pid_correlator.as_ref(),
-                desktop_id,
-                desktop_generation,
-                result,
-            )
-            .await
+            self.snapshot_for_principal(principal, request).await
         })
     }
 
@@ -3168,25 +4300,8 @@ impl ObservationPlane for DaemonObservationService {
         request: WindowQueryRequest,
     ) -> ObservationFuture<'a, Result<WindowQueryPage, ControlPlaneError>> {
         Box::pin(async move {
-            let desktop_id = request.desktop_id;
-            let desktop_generation = request.desktop_generation;
             let principal = authorized_principal(&context)?;
-            let (response, receiver) = oneshot::channel();
-            self.submit(ModelRequest::Query {
-                principal,
-                request,
-                response,
-            })?;
-            let result = receiver
-                .await
-                .map_err(|_| ControlPlaneError::CapabilityUnavailable)??;
-            enrich_query_result(
-                self.pid_correlator.as_ref(),
-                desktop_id,
-                desktop_generation,
-                result,
-            )
-            .await
+            self.query_for_principal(principal, request).await
         })
     }
 
@@ -3196,25 +4311,8 @@ impl ObservationPlane for DaemonObservationService {
         request: WindowResolveRequest,
     ) -> ObservationFuture<'a, Result<WindowResolveResult, ControlPlaneError>> {
         Box::pin(async move {
-            let desktop_id = request.desktop_id;
-            let desktop_generation = request.desktop_generation;
             let principal = authorized_principal(&context)?;
-            let (response, receiver) = oneshot::channel();
-            self.submit(ModelRequest::Resolve {
-                principal,
-                request,
-                response,
-            })?;
-            let result = receiver
-                .await
-                .map_err(|_| ControlPlaneError::CapabilityUnavailable)??;
-            enrich_resolve_result(
-                self.pid_correlator.as_ref(),
-                desktop_id,
-                desktop_generation,
-                result,
-            )
-            .await
+            self.resolve_for_principal(principal, request).await
         })
     }
 
@@ -3224,25 +4322,8 @@ impl ObservationPlane for DaemonObservationService {
         request: WindowWaitRequest,
     ) -> ObservationFuture<'a, Result<WindowWaitResult, ControlPlaneError>> {
         Box::pin(async move {
-            let desktop_id = request.desktop_id;
-            let desktop_generation = request.desktop_generation;
             let principal = authorized_principal(&context)?;
-            let (response, receiver) = oneshot::channel();
-            self.submit(ModelRequest::Wait {
-                principal,
-                request,
-                response,
-            })?;
-            let result = receiver
-                .await
-                .map_err(|_| ControlPlaneError::CapabilityUnavailable)??;
-            enrich_wait_result(
-                self.pid_correlator.as_ref(),
-                desktop_id,
-                desktop_generation,
-                result,
-            )
-            .await
+            self.wait_for_principal(principal, request).await
         })
     }
 }
@@ -3279,6 +4360,7 @@ enum ModelRequest {
     Wait {
         principal: String,
         request: WindowWaitRequest,
+        deadline: Option<Instant>,
         response: oneshot::Sender<Result<WindowWaitResult, ControlPlaneError>>,
     },
     Revalidate {
@@ -3294,6 +4376,20 @@ enum ModelRequest {
     },
     AccessibilityCorrelationSnapshotBlocking {
         response: SyncSender<Result<ObservationCorrelationSnapshot, ControlPlaneError>>,
+    },
+    ProcessCorrelationSnapshot {
+        response: oneshot::Sender<Result<ObservationCorrelationSnapshot, ControlPlaneError>>,
+    },
+    ReplaceProcessCorrelations {
+        expected_revision: WindowModelRevision,
+        expected_correlation_epoch: u64,
+        expected_generation: DesktopGeneration,
+        expected_lifecycle_authority: ProcessLifecycleAuthorityFence,
+        assignments: Vec<ProcessCorrelationAssignment>,
+        response: oneshot::Sender<Result<ProcessCorrelationCommit, ControlPlaneError>>,
+    },
+    InvalidateProcessCorrelations {
+        response: oneshot::Sender<Result<ProcessCorrelationFence, ControlPlaneError>>,
     },
     OcclusionSnapshot {
         window: WindowRef,
@@ -3336,6 +4432,15 @@ impl ModelRequest {
             Self::AccessibilityCorrelationSnapshotBlocking { response } => {
                 let _ = response.send(Err(error));
             }
+            Self::ProcessCorrelationSnapshot { response } => {
+                let _ = response.send(Err(error));
+            }
+            Self::ReplaceProcessCorrelations { response, .. } => {
+                let _ = response.send(Err(error));
+            }
+            Self::InvalidateProcessCorrelations { response } => {
+                let _ = response.send(Err(error));
+            }
             Self::OcclusionSnapshot { response, .. } => {
                 let _ = response.send(Err(error));
             }
@@ -3350,6 +4455,7 @@ struct PendingWait {
     principal: String,
     request: WindowWaitRequest,
     deadline: MonotonicMillis,
+    wall_deadline: Option<Instant>,
     response: oneshot::Sender<Result<WindowWaitResult, ControlPlaneError>>,
 }
 
@@ -3494,10 +4600,19 @@ fn spawn_model_actor_with_components(
     ObservationCompositionError,
 > {
     let settings = settings.validate()?;
+    let wait_terminal_settlement_timeout = settings
+        .raw_request_timeout
+        .checked_add(settings.idle_poll_interval)
+        .and_then(|timeout| timeout.checked_add(Duration::from_millis(250)))
+        .ok_or(ObservationCompositionError::InvalidSettings)?;
     let (request_tx, request_rx) = mpsc::sync_channel(settings.request_capacity);
     let control = Arc::new(ModelActorControl::default());
     let thread_control = Arc::clone(&control);
     let exit_control = Arc::clone(&control);
+    let process_refresh = Arc::new(ProcessCorrelationRefreshCoordinator::new());
+    let model_changed = Arc::clone(&process_refresh.model_changed);
+    let process_lifecycle_authority = Arc::new(ProcessLifecycleAuthority::new());
+    let thread_process_lifecycle_authority = Arc::clone(&process_lifecycle_authority);
     let event_metrics = Arc::new(WindowEventDeliveryMetrics::default());
     let thread_event_metrics = Arc::clone(&event_metrics);
     let (startup_tx, startup_rx) = mpsc::sync_channel(1);
@@ -3516,6 +4631,8 @@ fn spawn_model_actor_with_components(
                     startup_tx,
                     event_sink,
                     thread_event_metrics,
+                    model_changed,
+                    thread_process_lifecycle_authority,
                 )
             }));
             let exit = result.unwrap_or(ObservationServiceExit::Panicked);
@@ -3537,7 +4654,12 @@ fn spawn_model_actor_with_components(
         control,
         desktop_generation,
         pid_correlator,
+        process_refresh,
+        process_lifecycle_authority,
+        wait_terminal_settlement_timeout,
         event_metrics,
+        #[cfg(test)]
+        unavailable_refresh_hook: Mutex::new(None),
     });
     Ok((
         service,
@@ -3561,6 +4683,8 @@ fn run_model_actor(
     startup: SyncSender<Result<(), ObservationCompositionError>>,
     event_sink: Arc<dyn WindowEventSink>,
     event_metrics: Arc<WindowEventDeliveryMetrics>,
+    model_changed: Arc<ProcessCorrelationModelChanges>,
+    process_lifecycle_authority: Arc<ProcessLifecycleAuthority>,
 ) -> ObservationServiceExit {
     let epoch = Instant::now();
     let mut state = match ModelState::new_with_event_components(
@@ -3580,12 +4704,22 @@ fn run_model_actor(
             return ObservationServiceExit::Poisoned;
         }
     };
-    if let Err(error) = reconcile_from_backend(
+    state.model_changes = Some(Arc::clone(&model_changed));
+    state.process_lifecycle_authority = process_lifecycle_authority;
+    let startup_deadline = match Instant::now().checked_add(settings.raw_request_timeout) {
+        Some(deadline) => deadline,
+        None => {
+            let _ = startup.send(Err(ObservationCompositionError::InitialReconcileFailed));
+            let _ = backend.shutdown(settings.raw_request_timeout);
+            return ObservationServiceExit::Poisoned;
+        }
+    };
+    if let Err(error) = reconcile_from_backend_until(
         &mut state,
         backend.as_mut(),
         &control,
-        monotonic_now(epoch),
-        settings.raw_request_timeout,
+        &|| monotonic_now(epoch),
+        startup_deadline,
         ReconcileIdentityPolicy::PreserveContinuity,
         ReconcileEventPolicy::InitialBaseline,
     ) {
@@ -3627,7 +4761,7 @@ fn run_model_actor(
                         backend.as_mut(),
                         &control,
                         event,
-                        now,
+                        &|| monotonic_now(epoch),
                         settings.raw_request_timeout,
                     ) {
                         if control.shutdown.load(Ordering::Acquire) {
@@ -3740,11 +4874,17 @@ fn process_model_request(
         ModelRequest::Wait {
             principal,
             request,
+            deadline,
             response,
         } => {
             if response.is_closed() {
                 return;
             }
+            if deadline.is_some_and(|deadline| Instant::now() > deadline) {
+                let _ = response.send(state.timed_out_wait(&principal, &request, now));
+                return;
+            }
+            let wall_deadline = deadline;
             match state.evaluate_wait(&principal, &request, now, None) {
                 Ok(Some(result)) => {
                     let _ = response.send(Ok(result));
@@ -3758,7 +4898,16 @@ fn process_model_request(
                         let _ = response.send(Err(ControlPlaneError::ResourceExhausted));
                         return;
                     }
-                    let Some(deadline) = now.checked_add(u64::from(request.timeout_ms)) else {
+                    let remaining_ms = deadline.map_or(u64::from(request.timeout_ms), |deadline| {
+                        u64::try_from(
+                            deadline
+                                .saturating_duration_since(Instant::now())
+                                .as_millis()
+                                .saturating_add(1),
+                        )
+                        .unwrap_or(u64::MAX)
+                    });
+                    let Some(deadline) = now.checked_add(remaining_ms) else {
                         let _ = response.send(Err(ControlPlaneError::InvalidRequest));
                         return;
                     };
@@ -3766,6 +4915,7 @@ fn process_model_request(
                         principal,
                         request,
                         deadline,
+                        wall_deadline,
                         response,
                     });
                     // The actor is the sole model owner, so this immediate
@@ -3796,6 +4946,45 @@ fn process_model_request(
         ModelRequest::AccessibilityCorrelationSnapshotBlocking { response } => {
             let _ = response.send(state.correlation_snapshot(now));
         }
+        ModelRequest::ProcessCorrelationSnapshot { response } => {
+            let _ = response.send(state.correlation_snapshot(now));
+        }
+        ModelRequest::ReplaceProcessCorrelations {
+            expected_revision,
+            expected_correlation_epoch,
+            expected_generation,
+            expected_lifecycle_authority,
+            assignments,
+            response,
+        } => {
+            let result = if state
+                .process_lifecycle_authority
+                .accepts(expected_lifecycle_authority)
+            {
+                state
+                    .replace_process_correlations(
+                        expected_revision,
+                        expected_correlation_epoch,
+                        expected_generation,
+                        &assignments,
+                        now,
+                    )
+                    .map(|fence| ProcessCorrelationCommit {
+                        fence,
+                        change_sequence: state.model_change_sequence(),
+                    })
+                    .inspect(|_| process_waiters(state, waiters, now))
+            } else {
+                Err(ControlPlaneError::CapabilityUnavailable)
+            };
+            let _ = response.send(result);
+        }
+        ModelRequest::InvalidateProcessCorrelations { response } => {
+            let result = state
+                .invalidate_process_correlations(now)
+                .inspect(|_| process_waiters(state, waiters, now));
+            let _ = response.send(result);
+        }
         ModelRequest::OcclusionSnapshot { window, response } => {
             let _ = response.send(state.occlusion_snapshot(&window, now));
         }
@@ -3818,6 +5007,16 @@ fn process_waiters(state: &mut ModelState, waiters: &mut Vec<PendingWait>, now: 
         if waiter.response.is_closed() {
             continue;
         }
+        let wall_deadline_order = waiter
+            .wall_deadline
+            .map(|deadline| Instant::now().cmp(&deadline));
+        if now > waiter.deadline || wall_deadline_order.is_some_and(|order| order.is_gt()) {
+            let result = state.timed_out_wait(&waiter.principal, &waiter.request, now);
+            let _ = waiter.response.send(result);
+            continue;
+        }
+        let at_deadline =
+            now == waiter.deadline || wall_deadline_order.is_some_and(|order| order.is_eq());
         match state.evaluate_wait(&waiter.principal, &waiter.request, now, None) {
             Ok(Some(result)) => {
                 let _ = waiter.response.send(Ok(result));
@@ -3825,7 +5024,7 @@ fn process_waiters(state: &mut ModelState, waiters: &mut Vec<PendingWait>, now: 
             Err(error) => {
                 let _ = waiter.response.send(Err(error));
             }
-            Ok(None) if now >= waiter.deadline => {
+            Ok(None) if at_deadline => {
                 let result = state.timed_out_wait(&waiter.principal, &waiter.request, now);
                 let _ = waiter.response.send(result);
             }
@@ -3875,11 +5074,19 @@ fn process_actor_event(
     backend: &mut dyn RawObservationBackend,
     control: &ModelActorControl,
     event: ObservationActorEvent,
-    now: MonotonicMillis,
+    now: &dyn Fn() -> MonotonicMillis,
     timeout: Duration,
 ) -> Result<(), ObservationAdapterError> {
     let resync = matches!(&event, ObservationActorEvent::ResyncRequired);
+    let before_revision = state.model.revision();
+    let before_correlation_epoch = state.correlation_epoch;
     process_raw_event(state, backend, control, event, now, timeout)?;
+    if state.model.revision() != before_revision
+        || state.correlation_epoch != before_correlation_epoch
+    {
+        state.publish_model_change();
+    }
+    let now = now();
     if resync {
         complete_resync_waiters(state, waiters, now);
     } else {
@@ -3893,9 +5100,12 @@ fn process_raw_event(
     backend: &mut dyn RawObservationBackend,
     control: &ModelActorControl,
     event: ObservationActorEvent,
-    now: MonotonicMillis,
+    now: &dyn Fn() -> MonotonicMillis,
     timeout: Duration,
 ) -> Result<(), ObservationAdapterError> {
+    let raw_deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or(ObservationAdapterError::ClockOverflow)?;
     let (decision, identity_policy, event_policy) = match event {
         ObservationActorEvent::Reconcile { decision } => {
             let event_policy = if decision == ReconcileDecision::FullResync {
@@ -3940,29 +5150,32 @@ fn process_raw_event(
     match decision {
         ReconcileDecision::ObserveWindow { window }
         | ReconcileDecision::RefreshWindow { window, .. } => {
-            match backend.snapshot(window, control, timeout) {
-                Ok(input) => state.observe_raw(&input, now),
-                Err(RawBackendFailure::RequestFailed) => reconcile_from_backend(
+            match backend.snapshot(window, control, remaining_raw_event_budget(raw_deadline)?) {
+                Ok(input) => {
+                    remaining_raw_event_budget(raw_deadline)?;
+                    state.observe_raw(&input, now())
+                }
+                Err(RawBackendFailure::RequestFailed) => reconcile_from_backend_until(
                     state,
                     backend,
                     control,
                     now,
-                    timeout,
+                    raw_deadline,
                     ReconcileIdentityPolicy::PreserveContinuity,
                     ReconcileEventPolicy::Incremental,
                 ),
                 Err(_) => Err(ObservationAdapterError::Model),
             }
         }
-        ReconcileDecision::RemoveWindow { window } => state.remove_xid(window, now),
+        ReconcileDecision::RemoveWindow { window } => state.remove_xid(window, now()),
         ReconcileDecision::RefreshFocus
         | ReconcileDecision::RebuildInventory
-        | ReconcileDecision::FullResync => reconcile_from_backend(
+        | ReconcileDecision::FullResync => reconcile_from_backend_until(
             state,
             backend,
             control,
             now,
-            timeout,
+            raw_deadline,
             identity_policy,
             event_policy,
         ),
@@ -3971,6 +5184,7 @@ fn process_raw_event(
     }
 }
 
+#[cfg(test)]
 fn reconcile_from_backend(
     state: &mut ModelState,
     backend: &mut dyn RawObservationBackend,
@@ -3980,23 +5194,49 @@ fn reconcile_from_backend(
     identity_policy: ReconcileIdentityPolicy,
     event_policy: ReconcileEventPolicy,
 ) -> Result<(), ObservationAdapterError> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or(ObservationAdapterError::ClockOverflow)?;
+    reconcile_from_backend_until(
+        state,
+        backend,
+        control,
+        &|| now,
+        deadline,
+        identity_policy,
+        event_policy,
+    )
+}
+
+fn reconcile_from_backend_until(
+    state: &mut ModelState,
+    backend: &mut dyn RawObservationBackend,
+    control: &ModelActorControl,
+    now: &dyn Fn() -> MonotonicMillis,
+    deadline: Instant,
+    identity_policy: ReconcileIdentityPolicy,
+    event_policy: ReconcileEventPolicy,
+) -> Result<(), ObservationAdapterError> {
     let mut inventory = backend
-        .reconcile(control, timeout)
+        .reconcile(control, remaining_raw_event_budget(deadline)?)
         .map_err(|_| ObservationAdapterError::Model)?;
+    remaining_raw_event_budget(deadline)?;
     let mut inputs = Vec::with_capacity(inventory.windows.len());
     let candidate_windows = std::mem::take(&mut inventory.windows);
     for window in candidate_windows {
-        let snapshot = match backend.snapshot(window, control, timeout) {
-            Ok(snapshot) => Some(snapshot),
-            Err(RawBackendFailure::RequestFailed) => {
-                match backend.snapshot(window, control, timeout) {
-                    Ok(snapshot) => Some(snapshot),
-                    Err(RawBackendFailure::RequestFailed) => None,
-                    Err(_) => return Err(ObservationAdapterError::Model),
+        let snapshot =
+            match backend.snapshot(window, control, remaining_raw_event_budget(deadline)?) {
+                Ok(snapshot) => Some(snapshot),
+                Err(RawBackendFailure::RequestFailed) => {
+                    match backend.snapshot(window, control, remaining_raw_event_budget(deadline)?) {
+                        Ok(snapshot) => Some(snapshot),
+                        Err(RawBackendFailure::RequestFailed) => None,
+                        Err(_) => return Err(ObservationAdapterError::Model),
+                    }
                 }
-            }
-            Err(_) => return Err(ObservationAdapterError::Model),
-        };
+                Err(_) => return Err(ObservationAdapterError::Model),
+            };
+        remaining_raw_event_budget(deadline)?;
         if let Some(snapshot) = snapshot {
             inventory.windows.push(window);
             inputs.push(snapshot);
@@ -4007,7 +5247,18 @@ fn reconcile_from_backend(
             inventory.warnings.push(InventoryWarning::VanishedMember);
         }
     }
-    state.reconcile_raw_with_event_policy(&inventory, &inputs, now, identity_policy, event_policy)
+    remaining_raw_event_budget(deadline)?;
+    state.reconcile_raw_with_event_policy(&inventory, &inputs, now(), identity_policy, event_policy)
+}
+
+fn remaining_raw_event_budget(deadline: Instant) -> Result<Duration, ObservationAdapterError> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or(ObservationAdapterError::Model)?;
+    if remaining.is_zero() {
+        return Err(ObservationAdapterError::Model);
+    }
+    Ok(remaining)
 }
 
 fn monotonic_now(epoch: Instant) -> MonotonicMillis {

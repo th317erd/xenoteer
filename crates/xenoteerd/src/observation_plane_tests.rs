@@ -121,6 +121,12 @@ struct ScriptedBackend {
     panic_on_event: bool,
 }
 
+struct SequentialDelayBackend {
+    inventory: RootInventory,
+    snapshots: VecDeque<WindowSnapshotInput>,
+    delay: Duration,
+}
+
 impl ScriptedBackend {
     fn new(
         inventories: impl IntoIterator<Item = Result<RootInventory, RawBackendFailure>>,
@@ -173,6 +179,37 @@ impl RawObservationBackend for ScriptedBackend {
     fn try_event(&mut self) -> Result<Option<ObservationActorEvent>, RawBackendFailure> {
         assert!(!self.panic_on_event, "scripted observation backend panic");
         self.events.pop_front().transpose()
+    }
+
+    fn shutdown(&mut self, _timeout: Duration) -> ObservationActorExit {
+        ObservationActorExit::Stopped
+    }
+}
+
+impl RawObservationBackend for SequentialDelayBackend {
+    fn reconcile(
+        &mut self,
+        _control: &ModelActorControl,
+        _timeout: Duration,
+    ) -> Result<RootInventory, RawBackendFailure> {
+        std::thread::sleep(self.delay);
+        Ok(self.inventory.clone())
+    }
+
+    fn snapshot(
+        &mut self,
+        _window: u32,
+        _control: &ModelActorControl,
+        _timeout: Duration,
+    ) -> Result<WindowSnapshotInput, RawBackendFailure> {
+        std::thread::sleep(self.delay);
+        self.snapshots
+            .pop_front()
+            .ok_or(RawBackendFailure::RequestFailed)
+    }
+
+    fn try_event(&mut self) -> Result<Option<ObservationActorEvent>, RawBackendFailure> {
+        Ok(None)
     }
 
     fn shutdown(&mut self, _timeout: Duration) -> ObservationActorExit {
@@ -1003,7 +1040,7 @@ fn one_failed_gap_marker_causes_exactly_one_birth_transition() -> Result<(), Box
                 kind: ObservationActorFailureKind::RequestFailed,
             },
         },
-        MonotonicMillis::new(2),
+        &|| MonotonicMillis::new(2),
         Duration::from_millis(10),
     )?;
     assert_eq!(state.model.live_reference(42), Some(&first));
@@ -1014,7 +1051,7 @@ fn one_failed_gap_marker_causes_exactly_one_birth_transition() -> Result<(), Box
         &mut backend,
         &control,
         ObservationActorEvent::ResyncRequired,
-        MonotonicMillis::new(3),
+        &|| MonotonicMillis::new(3),
         Duration::from_millis(10),
     )?;
     let replacement = state.model.live_reference(42).cloned().ok_or("missing")?;
@@ -1062,7 +1099,7 @@ fn transient_snapshot_failure_reconciles_without_false_tombstone() -> Result<(),
                 refresh: xenoteer_x11::WindowRefresh::Metadata,
             },
         },
-        MonotonicMillis::new(2),
+        &|| MonotonicMillis::new(2),
         Duration::from_millis(10),
     )?;
 
@@ -1106,7 +1143,7 @@ fn snapshot_failure_reconcile_removes_only_inventory_confirmed_absence()
                 refresh: xenoteer_x11::WindowRefresh::Metadata,
             },
         },
-        MonotonicMillis::new(2),
+        &|| MonotonicMillis::new(2),
         Duration::from_millis(10),
     )?;
 
@@ -1172,6 +1209,64 @@ fn reconcile_omits_only_members_that_vanish_during_snapshot() -> Result<(), Box<
 }
 
 #[test]
+fn multi_window_reconcile_uses_one_total_raw_event_budget() -> Result<(), Box<dyn Error>> {
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let mut state = ModelState::new(
+        desktop_id,
+        generation,
+        WindowModelLimits::default(),
+        usize::from(MAX_WINDOW_PAGE_LIMIT),
+        1_000,
+        1_000,
+    )?;
+    let first = raw(42)?;
+    let second = raw(43)?;
+    let mut within_budget = SequentialDelayBackend {
+        inventory: inventory(InventorySource::NetClientList, vec![42, 43]),
+        snapshots: VecDeque::from([first.clone(), second.clone()]),
+        delay: Duration::from_millis(5),
+    };
+    process_raw_event(
+        &mut state,
+        &mut within_budget,
+        &ModelActorControl::default(),
+        ObservationActorEvent::Reconcile {
+            decision: ReconcileDecision::RebuildInventory,
+        },
+        &|| MonotonicMillis::new(1),
+        Duration::from_millis(100),
+    )?;
+    let (_, snapshots) = state.model.snapshot_all(MonotonicMillis::new(1))?;
+    assert_eq!(snapshots.len(), 2);
+
+    let revision = state.model.revision();
+    let mut exhausted = SequentialDelayBackend {
+        inventory: inventory(InventorySource::NetClientList, vec![42, 43]),
+        snapshots: VecDeque::from([first, second]),
+        delay: Duration::from_millis(20),
+    };
+    let started = Instant::now();
+    assert!(matches!(
+        process_raw_event(
+            &mut state,
+            &mut exhausted,
+            &ModelActorControl::default(),
+            ObservationActorEvent::Reconcile {
+                decision: ReconcileDecision::RebuildInventory,
+            },
+            &|| MonotonicMillis::new(2),
+            Duration::from_millis(50),
+        ),
+        Err(ObservationAdapterError::Model)
+    ));
+    assert!(started.elapsed() >= Duration::from_millis(50));
+    assert!(started.elapsed() < Duration::from_millis(150));
+    assert_eq!(state.model.revision(), revision);
+    Ok(())
+}
+
+#[test]
 fn resync_waiters_receive_post_rebuild_revision_refs_and_tokens() -> Result<(), Box<dyn Error>> {
     let desktop_id = DesktopId::new();
     let generation = DesktopGeneration::new();
@@ -1212,6 +1307,7 @@ fn resync_waiters_receive_post_rebuild_revision_refs_and_tokens() -> Result<(), 
         principal: "alice".to_owned(),
         request,
         deadline: MonotonicMillis::new(100),
+        wall_deadline: None,
         response,
     }];
     let mut backend = ScriptedBackend::new([Ok(inventory)], [Ok(input)]);
@@ -1222,7 +1318,7 @@ fn resync_waiters_receive_post_rebuild_revision_refs_and_tokens() -> Result<(), 
         &mut backend,
         &ModelActorControl::default(),
         ObservationActorEvent::ResyncRequired,
-        MonotonicMillis::new(2),
+        &|| MonotonicMillis::new(2),
         Duration::from_millis(10),
     )?;
 
@@ -1266,9 +1362,15 @@ fn cursor_claim_rejects_tamper_principal_scope_query_order_and_expiry() -> Resul
         query: WindowContinuationQuery::List,
         next_offset: 1,
     };
+    let correlation_epoch = 3;
     let mut registry =
         OpaqueTokenRegistry::with_entropy(4, 10, 10, Arc::new(ScriptedEntropy::new([[0x44; 32]])))?;
-    let token = registry.mint_cursor("alice", descriptor.clone(), MonotonicMillis::new(5))?;
+    let token = registry.mint_cursor(
+        "alice",
+        descriptor.clone(),
+        Some(correlation_epoch),
+        MonotonicMillis::new(5),
+    )?;
     assert_eq!(
         registry.resolve_cursor(
             &token,
@@ -1277,6 +1379,7 @@ fn cursor_claim_rejects_tamper_principal_scope_query_order_and_expiry() -> Resul
             generation,
             WindowOrder::XidAscending,
             CursorQueryBinding::List,
+            Some(correlation_epoch),
             MonotonicMillis::new(5),
         )?,
         descriptor
@@ -1289,6 +1392,7 @@ fn cursor_claim_rejects_tamper_principal_scope_query_order_and_expiry() -> Resul
             generation,
             WindowOrder::XidAscending,
             CursorQueryBinding::List,
+            Some(correlation_epoch),
             MonotonicMillis::new(5),
         ),
         registry.resolve_cursor(
@@ -1298,6 +1402,7 @@ fn cursor_claim_rejects_tamper_principal_scope_query_order_and_expiry() -> Resul
             generation,
             WindowOrder::XidAscending,
             CursorQueryBinding::List,
+            Some(correlation_epoch),
             MonotonicMillis::new(5),
         ),
         registry.resolve_cursor(
@@ -1307,6 +1412,7 @@ fn cursor_claim_rejects_tamper_principal_scope_query_order_and_expiry() -> Resul
             DesktopGeneration::new(),
             WindowOrder::XidAscending,
             CursorQueryBinding::List,
+            Some(correlation_epoch),
             MonotonicMillis::new(5),
         ),
         registry.resolve_cursor(
@@ -1316,6 +1422,7 @@ fn cursor_claim_rejects_tamper_principal_scope_query_order_and_expiry() -> Resul
             generation,
             WindowOrder::TitleAscending,
             CursorQueryBinding::List,
+            Some(correlation_epoch),
             MonotonicMillis::new(5),
         ),
         registry.resolve_cursor(
@@ -1325,6 +1432,17 @@ fn cursor_claim_rejects_tamper_principal_scope_query_order_and_expiry() -> Resul
             generation,
             WindowOrder::XidAscending,
             CursorQueryBinding::Selector([9; 32]),
+            Some(correlation_epoch),
+            MonotonicMillis::new(5),
+        ),
+        registry.resolve_cursor(
+            &token,
+            "alice",
+            desktop_id,
+            generation,
+            WindowOrder::XidAscending,
+            CursorQueryBinding::List,
+            Some(correlation_epoch + 1),
             MonotonicMillis::new(5),
         ),
     ] {
@@ -1345,6 +1463,7 @@ fn cursor_claim_rejects_tamper_principal_scope_query_order_and_expiry() -> Resul
                 generation,
                 WindowOrder::XidAscending,
                 CursorQueryBinding::List,
+                Some(correlation_epoch),
                 MonotonicMillis::new(5),
             )
             .is_err()
@@ -1358,6 +1477,7 @@ fn cursor_claim_rejects_tamper_principal_scope_query_order_and_expiry() -> Resul
                 generation,
                 WindowOrder::XidAscending,
                 CursorQueryBinding::List,
+                Some(correlation_epoch),
                 MonotonicMillis::new(15),
             )
             .is_err()
@@ -1590,6 +1710,7 @@ fn wait_matching_at_deadline_wins_over_timeout() -> Result<(), Box<dyn Error>> {
                 None,
                 5,
             ),
+            deadline: None,
             response,
         },
         MonotonicMillis::new(1),
@@ -1603,6 +1724,58 @@ fn wait_matching_at_deadline_wins_over_timeout() -> Result<(), Box<dyn Error>> {
     let result = receiver.try_recv()?.map_err(|_| "wait failed")?;
     assert_eq!(result.status, WindowWaitStatus::Matched);
     assert!(result.predicate_satisfied);
+    assert!(waiters.is_empty());
+    Ok(())
+}
+
+#[test]
+fn wait_nonmatching_at_deadline_times_out_instead_of_remaining_registered()
+-> Result<(), Box<dyn Error>> {
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let mut state = ModelState::new(
+        desktop_id,
+        generation,
+        WindowModelLimits::default(),
+        usize::from(MAX_WINDOW_PAGE_LIMIT),
+        1_000,
+        1_000,
+    )?;
+    let input = raw(42)?;
+    state.reconcile_raw(
+        &inventory(InventorySource::NetClientList, vec![42]),
+        std::slice::from_ref(&input),
+        MonotonicMillis::new(1),
+        ReconcileIdentityPolicy::PreserveContinuity,
+    )?;
+    let window = state.model.live_reference(42).cloned().ok_or("missing")?;
+    let (response, mut receiver) = oneshot::channel();
+    let mut waiters = Vec::new();
+    process_model_request(
+        &mut state,
+        &mut waiters,
+        ModelRequest::Wait {
+            principal: "alice".to_owned(),
+            request: wait_request(
+                desktop_id,
+                generation,
+                window,
+                WindowWaitPredicate::Focused { desired: true },
+                None,
+                5,
+            ),
+            deadline: None,
+            response,
+        },
+        MonotonicMillis::new(1),
+        2,
+    );
+    assert_eq!(waiters.len(), 1);
+    process_waiters(&mut state, &mut waiters, MonotonicMillis::new(6));
+
+    let result = receiver.try_recv()?.map_err(|_| "wait failed")?;
+    assert_eq!(result.status, WindowWaitStatus::TimedOut);
+    assert!(!result.predicate_satisfied);
     assert!(waiters.is_empty());
     Ok(())
 }
@@ -1643,6 +1816,7 @@ fn wait_check_register_recheck_honors_revision_boundary_and_immediate_match()
                 None,
                 20,
             ),
+            deadline: None,
             response: immediate_tx,
         },
         MonotonicMillis::new(1),
@@ -1672,6 +1846,7 @@ fn wait_check_register_recheck_honors_revision_boundary_and_immediate_match()
                 Some(boundary),
                 20,
             ),
+            deadline: None,
             response: boundary_tx,
         },
         MonotonicMillis::new(2),
@@ -1728,6 +1903,7 @@ fn wait_timeout_vanish_cancel_and_saturation_are_bounded() -> Result<(), Box<dyn
         ModelRequest::Wait {
             principal: "alice".to_owned(),
             request: pending_request.clone(),
+            deadline: None,
             response: first_tx,
         },
         MonotonicMillis::new(1),
@@ -1739,6 +1915,7 @@ fn wait_timeout_vanish_cancel_and_saturation_are_bounded() -> Result<(), Box<dyn
         ModelRequest::Wait {
             principal: "alice".to_owned(),
             request: pending_request.clone(),
+            deadline: None,
             response: second_tx,
         },
         MonotonicMillis::new(1),
@@ -1759,6 +1936,7 @@ fn wait_timeout_vanish_cancel_and_saturation_are_bounded() -> Result<(), Box<dyn
         ModelRequest::Wait {
             principal: "alice".to_owned(),
             request: pending_request,
+            deadline: None,
             response: timeout_tx,
         },
         MonotonicMillis::new(2),
@@ -2054,6 +2232,19 @@ fn startup_and_settings_fail_closed() {
             DesktopGeneration::new(),
             WindowModelLimits::default(),
             settings,
+        ),
+        Err(ObservationCompositionError::InvalidSettings)
+    ));
+
+    let mut overflowing_settings = ObservationServiceSettings::for_test();
+    overflowing_settings.raw_request_timeout = Duration::MAX;
+    assert!(matches!(
+        spawn_model_actor(
+            Box::new(ScriptedBackend::new([], [])),
+            DesktopId::new(),
+            DesktopGeneration::new(),
+            WindowModelLimits::default(),
+            overflowing_settings,
         ),
         Err(ObservationCompositionError::InvalidSettings)
     ));

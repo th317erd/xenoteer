@@ -8,6 +8,7 @@ import json
 import hashlib
 import inspect
 import ipaddress
+import math
 from collections.abc import AsyncIterable, Awaitable, Callable, Mapping
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
@@ -35,9 +36,7 @@ class AsyncTransport(Protocol):
         headers: Mapping[str, str] | None = None,
     ) -> JsonObject: ...
 
-    async def upload_artifact(
-        self, path: str, content_type: str, body: bytes
-    ) -> JsonObject: ...
+    async def upload_artifact(self, path: str, content_type: str, body: bytes) -> JsonObject: ...
 
     async def upload_artifact_stream(
         self,
@@ -59,6 +58,66 @@ class AsyncTransport(Protocol):
     async def delete_artifact(self, path: str) -> None: ...
 
     async def close(self) -> None: ...
+
+
+@runtime_checkable
+class AsyncDeadlineTransport(Protocol):
+    """Optional additive capability for one exact per-request HTTP deadline."""
+
+    async def request_with_timeout(
+        self,
+        method: str,
+        path: str,
+        body: Mapping[str, Any] | None = None,
+        *,
+        headers: Mapping[str, str] | None = None,
+        timeout: float,
+    ) -> JsonObject: ...
+
+
+def _validated_request_timeout(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise XenoteerError(
+            "invalid_request",
+            "per-request timeout must be greater than zero and at most 305 seconds",
+        )
+    try:
+        timeout = float(value)
+    except (OverflowError, TypeError, ValueError):
+        timeout = math.nan
+    if not math.isfinite(timeout) or not 0 < timeout <= 305:
+        raise XenoteerError(
+            "invalid_request",
+            "per-request timeout must be greater than zero and at most 305 seconds",
+        )
+    return timeout
+
+
+async def request_with_deadline(
+    transport: AsyncTransport,
+    method: str,
+    path: str,
+    body: Mapping[str, Any] | None = None,
+    *,
+    headers: Mapping[str, str] | None = None,
+    timeout: float,
+) -> JsonObject:
+    """Use an exact transport deadline when supported, otherwise bound it locally."""
+
+    timeout = _validated_request_timeout(timeout)
+    try:
+        async with asyncio.timeout(timeout):
+            if isinstance(transport, AsyncDeadlineTransport):
+                return await transport.request_with_timeout(
+                    method,
+                    path,
+                    body,
+                    headers=headers,
+                    timeout=timeout,
+                )
+            return await transport.request(method, path, body, headers=headers)
+    except TimeoutError:
+        raise XenoteerError("request_timeout", "Xenoteer request timed out") from None
 
 
 def normalize_base_url(value: str) -> str:
@@ -149,6 +208,41 @@ class HttpTransport:
     ) -> JsonObject:
         """Perform exactly one exchange; mutations are never replayed."""
 
+        return await self._request(method, path, body, headers=headers, timeout=None)
+
+    async def request_with_timeout(
+        self,
+        method: str,
+        path: str,
+        body: Mapping[str, Any] | None = None,
+        *,
+        headers: Mapping[str, str] | None = None,
+        timeout: float,
+    ) -> JsonObject:
+        """Perform one exchange with an exact bounded override."""
+
+        timeout = _validated_request_timeout(timeout)
+        try:
+            async with asyncio.timeout(timeout):
+                return await self._request(
+                    method,
+                    path,
+                    body,
+                    headers=headers,
+                    timeout=timeout,
+                )
+        except TimeoutError:
+            raise XenoteerError("request_timeout", "Xenoteer request timed out") from None
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        body: Mapping[str, Any] | None,
+        *,
+        headers: Mapping[str, str] | None,
+        timeout: float | None,
+    ) -> JsonObject:
         method = method.upper()
         if method not in {"GET", "POST", "DELETE"}:
             raise XenoteerError("invalid_request", "unsupported HTTP method")
@@ -177,8 +271,15 @@ class HttpTransport:
             request_headers["content-type"] = "application/json"
 
         try:
+            stream_options: dict[str, Any] = {}
+            if timeout is not None:
+                stream_options["timeout"] = timeout
             async with self._client.stream(
-                method, path, headers=request_headers, content=encoded
+                method,
+                path,
+                headers=request_headers,
+                content=encoded,
+                **stream_options,
             ) as response:
                 content = await _collect_bounded(response, self._max_response_bytes)
                 return _decode_json_response(response, content)
@@ -187,9 +288,7 @@ class HttpTransport:
         except Exception as error:
             raise _transport_error(error) from None
 
-    async def upload_artifact(
-        self, path: str, content_type: str, body: bytes
-    ) -> JsonObject:
+    async def upload_artifact(self, path: str, content_type: str, body: bytes) -> JsonObject:
         """Upload one already-bounded immutable clipboard-input body."""
 
         if not body:
@@ -262,9 +361,7 @@ class HttpTransport:
                     f"artifact stream ended after {received} of {content_length} bytes",
                 )
             if digest.hexdigest() != sha256:
-                raise XenoteerError(
-                    "invalid_request", "artifact stream digest did not match"
-                )
+                raise XenoteerError("invalid_request", "artifact stream digest did not match")
 
         headers = {
             "authorization": await self.authorization_header(),
@@ -319,19 +416,13 @@ class HttpTransport:
         try:
             async with self._client.stream("GET", path, headers=headers) as response:
                 if int(response.status_code) != 200:
-                    content = await _collect_bounded(
-                        response, self._max_response_bytes
-                    )
+                    content = await _collect_bounded(response, self._max_response_bytes)
                     _raise_http_error(response, content)
                 _require_exact_header(response.headers, "content-length", str(expected_length))
                 _require_exact_header(response.headers, "content-type", content_type)
-                _require_exact_header(
-                    response.headers, "x-content-sha256", expected_digest
-                )
+                _require_exact_header(response.headers, "x-content-sha256", expected_digest)
                 if response.headers.get("content-range") is not None:
-                    raise XenoteerError(
-                        "invalid_response", "artifact response must not be ranged"
-                    )
+                    raise XenoteerError("invalid_response", "artifact response must not be ranged")
                 received = 0
                 digest = hashlib.sha256()
                 async for chunk in response.aiter_bytes():
@@ -393,16 +484,12 @@ async def _collect_bounded(response: Any, maximum: int) -> bytes:
         except ValueError:
             raise XenoteerError("invalid_response", "invalid Content-Length") from None
         if length < 0 or length > maximum:
-            raise XenoteerError(
-                "response_too_large", f"response exceeds {maximum} bytes"
-            )
+            raise XenoteerError("response_too_large", f"response exceeds {maximum} bytes")
     output = bytearray()
     async for chunk in response.aiter_bytes():
         output.extend(chunk)
         if len(output) > maximum:
-            raise XenoteerError(
-                "response_too_large", f"response exceeds {maximum} bytes"
-            )
+            raise XenoteerError("response_too_large", f"response exceeds {maximum} bytes")
     return bytes(output)
 
 
@@ -411,9 +498,7 @@ def _decode_json_response(response: Any, content: bytes) -> JsonObject:
     try:
         decoded = json.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
-        raise XenoteerError(
-            "invalid_response", "server returned invalid UTF-8 JSON"
-        ) from None
+        raise XenoteerError("invalid_response", "server returned invalid UTF-8 JSON") from None
     if not 200 <= int(response.status_code) < 300:
         if media_type == "application/problem+json" and isinstance(decoded, dict):
             raise error_from_problem(int(response.status_code), decoded)
@@ -423,9 +508,7 @@ def _decode_json_response(response: Any, content: bytes) -> JsonObject:
             status=int(response.status_code),
         )
     if media_type != "application/json":
-        raise XenoteerError(
-            "invalid_response", "successful response was not application/json"
-        )
+        raise XenoteerError("invalid_response", "successful response was not application/json")
     if not isinstance(decoded, dict):
         raise XenoteerError("invalid_response", "response must be a JSON object")
     return decoded
@@ -466,6 +549,4 @@ def _transport_error(error: Exception) -> XenoteerError:
 
 def _require_exact_header(headers: Any, name: str, expected: str) -> None:
     if headers.get(name) != expected:
-        raise XenoteerError(
-            "invalid_response", f"artifact response {name} did not match"
-        )
+        raise XenoteerError("invalid_response", f"artifact response {name} did not match")

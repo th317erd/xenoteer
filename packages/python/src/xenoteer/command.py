@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 from .errors import XenoteerError
 from .protocol_generated import CommandResultWire
-from .transport import AsyncTransport
+from .transport import AsyncTransport, request_with_deadline
 from .wire import canonicalize_uint64_fields, validate_uint64_fields
 
 
@@ -457,8 +457,11 @@ class CommandHandle:
         timeout_ms = max(1, min(30_000, int(timeout * 1000)))
         self._require_current()
         try:
-            response = await self._transport.request(
-                "GET", f"{self._path()}/wait?timeout_ms={timeout_ms}"
+            response = await request_with_deadline(
+                self._transport,
+                "GET",
+                f"{self._path()}/wait?timeout_ms={timeout_ms}",
+                timeout=timeout_ms / 1_000 + 5,
             )
         except XenoteerError as error:
             self._invalidate_from_error(error)

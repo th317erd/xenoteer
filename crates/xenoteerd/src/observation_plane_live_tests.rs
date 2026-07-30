@@ -144,6 +144,7 @@ fn submit_wait(
         .submit(ModelRequest::Wait {
             principal: "live-x11-adversary".to_owned(),
             request,
+            deadline: None,
             response: sender,
         })
         .map_err(control_error)?;

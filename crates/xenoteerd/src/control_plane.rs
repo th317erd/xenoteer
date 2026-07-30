@@ -42,8 +42,8 @@ use xenoteer_core::{
     plan_physical_element_click, revalidate_physical_element_click,
 };
 use xenoteer_processd::{
-    BrokerClient, BrokerClientError, BrokerErrorCode, BrokerEventReplay, BrokerLiveEvent,
-    BrokerProcessEvent, DEFAULT_BROKER_SOCKET,
+    BrokerClient, BrokerClientError, BrokerErrorCode, BrokerEventReplay, BrokerEventStream,
+    BrokerLiveEvent, BrokerProcessEvent, DEFAULT_BROKER_SOCKET,
 };
 use xenoteer_protocol::{
     ACTION_LIFECYCLE_TOPIC, ArtifactRef, COMMAND_LIFECYCLE_TOPIC, ClipboardPasteEvidence,
@@ -125,10 +125,69 @@ const PHYSICAL_TEXT_INTERVAL_MS: u16 = 5;
 const PASTE_CHORD_HOLD_MS: u16 = 35;
 const PROCESS_EVENT_RECONNECT_INITIAL: Duration = Duration::from_millis(50);
 const PROCESS_EVENT_RECONNECT_MAXIMUM: Duration = Duration::from_secs(2);
+const PROCESS_CORRELATION_INVALIDATION_TIMEOUT: Duration = Duration::from_millis(250);
 const RESYNC_BARRIER_RETENTION_CHARGE: usize = 64;
 const EXTERNAL_EVENT_QUEUE_CAPACITY: usize = 1_024;
 
 type RuntimeHandle = CoordinatorHandle<RuntimeCommand, RuntimeResult, RuntimeEvent>;
+type ProcessEventSourceFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<ProcessEventSubscription, ProcessEventSourceError>> + Send + 'a>,
+>;
+type ProcessLiveEventFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<BrokerLiveEvent, ProcessEventSourceError>> + Send + 'a>>;
+
+trait ProcessEventSource: Send + Sync {
+    fn subscribe<'a>(
+        &'a self,
+        generation: DesktopGeneration,
+        cursor: u64,
+    ) -> ProcessEventSourceFuture<'a>;
+}
+
+trait ProcessLiveEventSource: Send {
+    fn receive<'a>(&'a mut self) -> ProcessLiveEventFuture<'a>;
+}
+
+struct ProcessEventSubscription {
+    replay: BrokerEventReplay,
+    live: Box<dyn ProcessLiveEventSource>,
+}
+
+struct BrokerProcessEventSource(BrokerClient);
+
+impl ProcessEventSource for BrokerProcessEventSource {
+    fn subscribe<'a>(
+        &'a self,
+        generation: DesktopGeneration,
+        cursor: u64,
+    ) -> ProcessEventSourceFuture<'a> {
+        Box::pin(async move {
+            let xenoteer_processd::BrokerEventSubscription { replay, live } =
+                self.0.subscribe_events(generation, cursor).await?;
+            Ok(ProcessEventSubscription {
+                replay,
+                live: Box::new(BrokerProcessLiveEventSource(live)),
+            })
+        })
+    }
+}
+
+struct BrokerProcessLiveEventSource(BrokerEventStream);
+
+impl ProcessLiveEventSource for BrokerProcessLiveEventSource {
+    fn receive<'a>(&'a mut self) -> ProcessLiveEventFuture<'a> {
+        Box::pin(async move { self.0.receive().await.map_err(Into::into) })
+    }
+}
+
+#[derive(Debug, Error)]
+enum ProcessEventSourceError {
+    #[error(transparent)]
+    Broker(#[from] BrokerClientError),
+    #[cfg(test)]
+    #[error("injected process event source failure")]
+    Injected,
+}
 
 /// Owned coordinator task and its HTTP adapter.
 pub(crate) struct CoordinatorRuntime {
@@ -329,6 +388,9 @@ fn spawn_inner(
     )?;
     let clock = ClockProjection::capture()?;
     let broker = BrokerClient::new(DEFAULT_BROKER_SOCKET);
+    let process_correlation_invalidator = window_control.as_ref().map(|window_control| {
+        Arc::clone(&window_control.observation) as Arc<dyn ProcessCorrelationInvalidator>
+    });
     let correlation_runtime = accessibility_correlation.clone();
     let executor = RuntimeExecutor {
         input,
@@ -360,6 +422,7 @@ fn spawn_inner(
             broker,
             generation,
             relay_cancellation,
+            process_correlation_invalidator,
         )
         .await
     });
@@ -387,8 +450,75 @@ fn spawn_inner(
 /// Cloneable daemon composition over the dedicated raw window-control actor.
 #[derive(Clone)]
 pub(crate) struct WindowControlRuntime {
-    actor: WindowControlActorHandle,
+    actor: Arc<dyn WindowControlBackend>,
     observation: Arc<DaemonObservationService>,
+}
+
+pub(crate) type WindowControlRevalidator =
+    Box<dyn FnOnce() -> Result<(), RawWindowRevalidationError> + Send + 'static>;
+
+trait WindowControlBackend: Send + Sync {
+    fn execute(
+        &self,
+        request: RawWindowControlRequest,
+        revalidate: WindowControlRevalidator,
+        timeout: Duration,
+    ) -> Result<RawWindowControlEvidence, WindowControlBackendError>;
+}
+
+struct LiveWindowControlBackend {
+    actor: WindowControlActorHandle,
+}
+
+pub(crate) enum WindowControlBackendError {
+    Submit(WindowControlSubmitError),
+    Actor(WindowControlActorFailureKind),
+    ReplyUnavailable,
+}
+
+impl WindowControlBackend for LiveWindowControlBackend {
+    fn execute(
+        &self,
+        request: RawWindowControlRequest,
+        revalidate: WindowControlRevalidator,
+        timeout: Duration,
+    ) -> Result<RawWindowControlEvidence, WindowControlBackendError> {
+        let reply = self
+            .actor
+            .try_submit(request, revalidate)
+            .map_err(WindowControlBackendError::Submit)?;
+        match reply.recv_timeout(timeout) {
+            Ok(Ok(evidence)) => Ok(evidence),
+            Ok(Err(failure)) => Err(WindowControlBackendError::Actor(failure.kind)),
+            Err(_) => Err(WindowControlBackendError::ReplyUnavailable),
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) type ScriptedWindowControlHandler = dyn Fn(
+        RawWindowControlRequest,
+        WindowControlRevalidator,
+        Duration,
+    ) -> Result<RawWindowControlEvidence, WindowControlBackendError>
+    + Send
+    + Sync;
+
+#[cfg(test)]
+struct ScriptedWindowControlBackend {
+    handler: Arc<ScriptedWindowControlHandler>,
+}
+
+#[cfg(test)]
+impl WindowControlBackend for ScriptedWindowControlBackend {
+    fn execute(
+        &self,
+        request: RawWindowControlRequest,
+        revalidate: WindowControlRevalidator,
+        timeout: Duration,
+    ) -> Result<RawWindowControlEvidence, WindowControlBackendError> {
+        (self.handler)(request, revalidate, timeout)
+    }
 }
 
 #[derive(Clone)]
@@ -453,7 +583,21 @@ impl WindowControlRuntime {
         actor: WindowControlActorHandle,
         observation: Arc<DaemonObservationService>,
     ) -> Self {
-        Self { actor, observation }
+        Self {
+            actor: Arc::new(LiveWindowControlBackend { actor }),
+            observation,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_scripted(
+        observation: Arc<DaemonObservationService>,
+        handler: Arc<ScriptedWindowControlHandler>,
+    ) -> Self {
+        Self {
+            actor: Arc::new(ScriptedWindowControlBackend { handler }),
+            observation,
+        }
     }
 }
 
@@ -1189,21 +1333,49 @@ async fn relay_process_events(
     broker: BrokerClient,
     desktop_generation: DesktopGeneration,
     cancellation: CancellationToken,
+    process_correlations: Option<Arc<dyn ProcessCorrelationInvalidator>>,
 ) -> Result<(), ProcessEventRelayError> {
+    let source = BrokerProcessEventSource(broker);
+    let final_authority = process_correlations.clone();
+    let result = relay_process_events_inner(
+        ingress,
+        &source,
+        desktop_generation,
+        cancellation,
+        process_correlations,
+    )
+    .await;
+    if let Some(authority) = final_authority.as_deref() {
+        authority.disable();
+    }
+    match result {
+        Err(ProcessEventRelayError::Cancelled) => Ok(()),
+        result => result,
+    }
+}
+
+async fn relay_process_events_inner(
+    ingress: ExternalEventIngress,
+    source: &dyn ProcessEventSource,
+    desktop_generation: DesktopGeneration,
+    cancellation: CancellationToken,
+    process_correlations: Option<Arc<dyn ProcessCorrelationInvalidator>>,
+) -> Result<(), ProcessEventRelayError> {
+    let authority =
+        ProcessCorrelationAuthorityGuard::new(process_correlations.as_deref(), &cancellation);
     let mut cursor = 0_u64;
     let mut reconnect_delay = PROCESS_EVENT_RECONNECT_INITIAL;
 
     loop {
         let subscription = tokio::select! {
             () = cancellation.cancelled() => return Ok(()),
-            result = broker.subscribe_events(desktop_generation, cursor) => result,
+            result = source.subscribe(desktop_generation, cursor) => result,
         };
         let subscription = match subscription {
-            Ok(subscription) => {
-                reconnect_delay = PROCESS_EVENT_RECONNECT_INITIAL;
-                subscription
-            }
+            Ok(subscription) => subscription,
             Err(error) => {
+                invalidate_process_correlations(process_correlations.as_deref(), &cancellation)
+                    .await?;
                 tracing::warn!(error = %error, "process event stream unavailable; retrying");
                 if wait_for_process_event_reconnect(&cancellation, reconnect_delay).await {
                     return Ok(());
@@ -1216,34 +1388,55 @@ async fn relay_process_events(
             }
         };
 
-        let xenoteer_processd::BrokerEventSubscription { replay, mut live } = subscription;
+        let ProcessEventSubscription { replay, mut live } = subscription;
+        let mut replay_ambiguous = false;
         match replay {
             BrokerEventReplay::Events {
                 latest_sequence,
                 events,
             } => {
                 for event in events {
-                    cursor = relay_process_event(
+                    let outcome = relay_process_event(
                         &ingress,
                         desktop_generation,
                         &cancellation,
                         cursor,
                         event,
+                        process_correlations.as_deref(),
                     )
                     .await?;
+                    cursor = outcome.cursor();
+                    replay_ambiguous |=
+                        matches!(outcome, ProcessRelayEventOutcome::Ambiguous { .. });
                 }
                 if cursor != latest_sequence {
+                    invalidate_process_correlations(process_correlations.as_deref(), &cancellation)
+                        .await?;
                     require_process_resync(&ingress, &cancellation)?;
                     cursor = latest_sequence;
+                    replay_ambiguous = true;
                 }
             }
             BrokerEventReplay::ResyncRequired {
                 latest_sequence, ..
             } => {
+                invalidate_process_correlations(process_correlations.as_deref(), &cancellation)
+                    .await?;
                 require_process_resync(&ingress, &cancellation)?;
                 cursor = latest_sequence;
             }
         }
+        if replay_ambiguous {
+            if wait_for_process_event_reconnect(&cancellation, reconnect_delay).await {
+                return Ok(());
+            }
+            reconnect_delay = reconnect_delay
+                .checked_mul(2)
+                .unwrap_or(PROCESS_EVENT_RECONNECT_MAXIMUM)
+                .min(PROCESS_EVENT_RECONNECT_MAXIMUM);
+            continue;
+        }
+        authority.enable_if_live()?;
 
         let reconnect_after_failure = loop {
             let item = tokio::select! {
@@ -1252,24 +1445,41 @@ async fn relay_process_events(
             };
             match item {
                 Ok(BrokerLiveEvent::Event(event)) => {
-                    cursor = relay_process_event(
+                    let outcome = relay_process_event(
                         &ingress,
                         desktop_generation,
                         &cancellation,
                         cursor,
                         event,
+                        process_correlations.as_deref(),
                     )
                     .await?;
+                    cursor = outcome.cursor();
+                    match outcome {
+                        ProcessRelayEventOutcome::Applied { .. } => {
+                            reconnect_delay = PROCESS_EVENT_RECONNECT_INITIAL;
+                            authority.enable_if_live()?;
+                        }
+                        ProcessRelayEventOutcome::Ambiguous { .. } => break true,
+                    }
                 }
                 Ok(BrokerLiveEvent::ResyncRequired {
                     latest_sequence, ..
                 }) => {
+                    invalidate_process_correlations(process_correlations.as_deref(), &cancellation)
+                        .await?;
                     require_process_resync(&ingress, &cancellation)?;
                     cursor = latest_sequence;
-                    break false;
+                    break true;
                 }
-                Ok(BrokerLiveEvent::Closed) => break true,
+                Ok(BrokerLiveEvent::Closed) => {
+                    invalidate_process_correlations(process_correlations.as_deref(), &cancellation)
+                        .await?;
+                    break true;
+                }
                 Err(error) => {
+                    invalidate_process_correlations(process_correlations.as_deref(), &cancellation)
+                        .await?;
                     tracing::warn!(error = %error, "process event stream failed; retrying");
                     break true;
                 }
@@ -1293,22 +1503,168 @@ async fn relay_process_event(
     cancellation: &CancellationToken,
     cursor: u64,
     event: BrokerProcessEvent,
-) -> Result<u64, ProcessEventRelayError> {
+    process_correlations: Option<&dyn ProcessCorrelationInvalidator>,
+) -> Result<ProcessRelayEventOutcome, ProcessEventRelayError> {
     let sequence = event.sequence();
     if sequence <= cursor {
-        return Ok(cursor);
+        return Ok(ProcessRelayEventOutcome::Applied { cursor });
     }
-    if sequence != cursor.saturating_add(1) {
+    invalidate_process_correlations(process_correlations, cancellation).await?;
+    let sequence_gap = sequence != cursor.saturating_add(1);
+    if sequence_gap {
         require_process_resync(ingress, cancellation)?;
     }
-    match normalize_process_event(desktop_generation, event) {
-        Ok(event) => publish_process_event(ingress, cancellation, event)?,
+    let invalid = match normalize_process_event(desktop_generation, event) {
+        Ok(event) => {
+            publish_process_event(ingress, cancellation, event)?;
+            false
+        }
         Err(error) => {
             tracing::error!(error = %error, "invalid process event rejected");
             require_process_resync(ingress, cancellation)?;
+            true
+        }
+    };
+    if sequence_gap || invalid {
+        Ok(ProcessRelayEventOutcome::Ambiguous { cursor: sequence })
+    } else {
+        Ok(ProcessRelayEventOutcome::Applied { cursor: sequence })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProcessRelayEventOutcome {
+    Applied { cursor: u64 },
+    Ambiguous { cursor: u64 },
+}
+
+impl ProcessRelayEventOutcome {
+    fn cursor(self) -> u64 {
+        match self {
+            Self::Applied { cursor } | Self::Ambiguous { cursor } => cursor,
         }
     }
-    Ok(sequence)
+}
+
+trait ProcessCorrelationInvalidator: Send + Sync {
+    fn disable(&self);
+
+    fn enable(&self);
+
+    fn invalidate<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ControlPlaneError>> + Send + 'a>>;
+}
+
+struct ProcessCorrelationAuthorityGuard<'a> {
+    invalidator: Option<&'a dyn ProcessCorrelationInvalidator>,
+    cancellation: &'a CancellationToken,
+}
+
+impl<'a> ProcessCorrelationAuthorityGuard<'a> {
+    fn new(
+        invalidator: Option<&'a dyn ProcessCorrelationInvalidator>,
+        cancellation: &'a CancellationToken,
+    ) -> Self {
+        if let Some(invalidator) = invalidator {
+            invalidator.disable();
+        }
+        Self {
+            invalidator,
+            cancellation,
+        }
+    }
+
+    fn enable_if_live(&self) -> Result<(), ProcessEventRelayError> {
+        if self.cancellation.is_cancelled() {
+            return Err(ProcessEventRelayError::Cancelled);
+        }
+        if let Some(invalidator) = self.invalidator {
+            invalidator.enable();
+            if self.cancellation.is_cancelled() {
+                invalidator.disable();
+                return Err(ProcessEventRelayError::Cancelled);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ProcessCorrelationAuthorityGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(invalidator) = self.invalidator {
+            invalidator.disable();
+        }
+    }
+}
+
+impl ProcessCorrelationInvalidator for DaemonObservationService {
+    fn disable(&self) {
+        self.disable_process_lifecycle_authority();
+    }
+
+    fn enable(&self) {
+        self.enable_process_lifecycle_authority();
+    }
+
+    fn invalidate<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ControlPlaneError>> + Send + 'a>> {
+        Box::pin(self.invalidate_process_correlations())
+    }
+}
+
+async fn invalidate_process_correlations(
+    invalidator: Option<&dyn ProcessCorrelationInvalidator>,
+    cancellation: &CancellationToken,
+) -> Result<(), ProcessEventRelayError> {
+    let Some(invalidator) = invalidator else {
+        return Ok(());
+    };
+    invalidator.disable();
+    loop {
+        let result = tokio::select! {
+            () = cancellation.cancelled() => return Err(ProcessEventRelayError::Cancelled),
+            result = tokio::time::timeout(
+                PROCESS_CORRELATION_INVALIDATION_TIMEOUT,
+                invalidator.invalidate(),
+            ) => result,
+        };
+        if matches!(result, Ok(Ok(()))) {
+            return Ok(());
+        }
+        tracing::warn!("process correlation invalidation unavailable; retrying while fenced");
+        if wait_for_process_event_reconnect(cancellation, PROCESS_EVENT_RECONNECT_INITIAL).await {
+            return Err(ProcessEventRelayError::Cancelled);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn relay_process_event_for_observation_test(
+    observation: Arc<DaemonObservationService>,
+    desktop_generation: DesktopGeneration,
+    event: BrokerProcessEvent,
+) -> Result<(), ProcessEventRelayError> {
+    let (sender, _receiver) = mpsc::channel(4);
+    let ingress = ExternalEventIngress {
+        sender,
+        resync_state: Arc::new(AtomicU64::new(0)),
+        resync_notify: Arc::new(Notify::new()),
+    };
+    let outcome = relay_process_event(
+        &ingress,
+        desktop_generation,
+        &CancellationToken::new(),
+        0,
+        event,
+        Some(observation.as_ref()),
+    )
+    .await?;
+    if matches!(outcome, ProcessRelayEventOutcome::Applied { .. }) {
+        observation.enable_process_lifecycle_authority();
+    }
+    Ok(())
 }
 
 fn normalize_process_event(
@@ -5036,6 +5392,20 @@ impl WindowControlRuntime {
         self.execute_cancellable(command, Arc::new(AtomicBool::new(false)))
     }
 
+    #[cfg(test)]
+    pub(crate) fn execute_window_control_for_test(
+        &self,
+        command: Command,
+    ) -> Option<WindowControlResult> {
+        match self.execute(command) {
+            RuntimeResult::Success(success) => match success.outcome {
+                CommandOutcome::WindowControl { result } => Some(result),
+                _ => None,
+            },
+            RuntimeResult::Failure(_) => None,
+        }
+    }
+
     fn execute_cancellable(
         &self,
         command: Command,
@@ -5074,33 +5444,36 @@ impl WindowControlRuntime {
         let revalidation_fence = fence;
         let revalidate_target = target.clone();
         let revalidate_sibling = sibling.clone();
-        let reply = match self.actor.try_submit(raw_request.clone(), move || {
-            revalidate_at_window_effect_boundary(&revalidation_fence, || {
-                revalidate_window(&observation, revalidate_target)?;
-                if let Some(sibling) = revalidate_sibling {
-                    revalidate_window(&observation, sibling)?;
-                }
-                Ok(())
-            })
-        }) {
-            Ok(reply) => reply,
-            Err(error) => return map_window_submit_error(error),
-        };
         let reply_timeout = WINDOW_CONTROL_TIMEOUT
             .checked_add(WINDOW_REVALIDATION_TIMEOUT)
             .and_then(|timeout| timeout.checked_add(WINDOW_REVALIDATION_TIMEOUT))
             .and_then(|timeout| timeout.checked_add(WINDOW_CONTROL_REPLY_BACKSTOP))
             .unwrap_or(MAX_WINDOW_CONTROL_TIMEOUT);
-        let evidence = match reply.recv_timeout(reply_timeout) {
-            Ok(Ok(evidence)) => evidence,
-            Ok(Err(failure)) => {
+        let evidence = match self.actor.execute(
+            raw_request.clone(),
+            Box::new(move || {
+                revalidate_at_window_effect_boundary(&revalidation_fence, || {
+                    revalidate_window(&observation, revalidate_target)?;
+                    if let Some(sibling) = revalidate_sibling {
+                        revalidate_window(&observation, sibling)?;
+                    }
+                    Ok(())
+                })
+            }),
+            reply_timeout,
+        ) {
+            Ok(evidence) => evidence,
+            Err(WindowControlBackendError::Submit(error)) => {
+                return map_window_submit_error(error);
+            }
+            Err(WindowControlBackendError::Actor(failure)) => {
                 tracing::debug!(
-                    failure = ?failure.kind,
+                    failure = ?failure,
                     "window-control actor request failed"
                 );
-                return map_window_actor_failure(failure.kind);
+                return map_window_actor_failure(failure);
             }
-            Err(_) => {
+            Err(WindowControlBackendError::ReplyUnavailable) => {
                 tracing::debug!("window-control actor reply timed out or disconnected");
                 return backend_failure(EffectStage::OutcomeUnknown);
             }
@@ -7590,6 +7963,8 @@ pub(crate) enum ProcessEventRelayError {
     InvalidEvent,
     #[error("shared desktop event ingress closed unexpectedly")]
     EventIngressClosed,
+    #[error("process event relay cancelled while correlation authority was fenced")]
+    Cancelled,
 }
 
 /// Nonblocking actor-to-coordinator event publication failure.
@@ -7621,7 +7996,10 @@ mod clipboard_command_tests;
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        collections::VecDeque,
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
 
     use axum::{
         body::{Body, to_bytes},
@@ -7642,6 +8020,331 @@ mod tests {
     };
 
     use super::*;
+
+    #[derive(Default)]
+    struct CountingProcessCorrelationInvalidator {
+        calls: AtomicUsize,
+    }
+
+    impl ProcessCorrelationInvalidator for CountingProcessCorrelationInvalidator {
+        fn disable(&self) {}
+
+        fn enable(&self) {}
+
+        fn invalidate<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ControlPlaneError>> + Send + 'a>> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[derive(Default)]
+    struct LifecycleAuthorityProbe {
+        enabled: AtomicBool,
+        enable_calls: AtomicUsize,
+        disable_calls: AtomicUsize,
+        pending_invalidation: AtomicBool,
+        cancel_on_enable: Mutex<Option<CancellationToken>>,
+    }
+
+    impl ProcessCorrelationInvalidator for LifecycleAuthorityProbe {
+        fn disable(&self) {
+            self.enabled.store(false, Ordering::Release);
+            self.disable_calls.fetch_add(1, Ordering::AcqRel);
+        }
+
+        fn enable(&self) {
+            self.enabled.store(true, Ordering::Release);
+            self.enable_calls.fetch_add(1, Ordering::AcqRel);
+            if let Some(cancellation) = self
+                .cancel_on_enable
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                cancellation.cancel();
+            }
+        }
+
+        fn invalidate<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ControlPlaneError>> + Send + 'a>> {
+            if self.pending_invalidation.load(Ordering::Acquire) {
+                Box::pin(std::future::pending())
+            } else {
+                Box::pin(async { Ok(()) })
+            }
+        }
+    }
+
+    struct ScriptedProcessEventSource {
+        subscriptions: Mutex<VecDeque<Result<ProcessEventSubscription, ProcessEventSourceError>>>,
+        calls: AtomicUsize,
+    }
+
+    impl ScriptedProcessEventSource {
+        fn new(
+            subscriptions: impl IntoIterator<
+                Item = Result<ProcessEventSubscription, ProcessEventSourceError>,
+            >,
+        ) -> Self {
+            Self {
+                subscriptions: Mutex::new(subscriptions.into_iter().collect()),
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl ProcessEventSource for ScriptedProcessEventSource {
+        fn subscribe<'a>(&'a self, _: DesktopGeneration, _: u64) -> ProcessEventSourceFuture<'a> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            let result = self
+                .subscriptions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front();
+            Box::pin(async move {
+                match result {
+                    Some(result) => result,
+                    None => std::future::pending().await,
+                }
+            })
+        }
+    }
+
+    struct ScriptedProcessLiveEvents {
+        events: VecDeque<Result<BrokerLiveEvent, ProcessEventSourceError>>,
+    }
+
+    impl ProcessLiveEventSource for ScriptedProcessLiveEvents {
+        fn receive<'a>(&'a mut self) -> ProcessLiveEventFuture<'a> {
+            let result = self.events.pop_front();
+            Box::pin(async move {
+                match result {
+                    Some(result) => result,
+                    None => std::future::pending().await,
+                }
+            })
+        }
+    }
+
+    fn scripted_subscription(
+        replay: BrokerEventReplay,
+        events: impl IntoIterator<Item = Result<BrokerLiveEvent, ProcessEventSourceError>>,
+    ) -> ProcessEventSubscription {
+        ProcessEventSubscription {
+            replay,
+            live: Box::new(ScriptedProcessLiveEvents {
+                events: events.into_iter().collect(),
+            }),
+        }
+    }
+
+    #[test]
+    fn process_relay_authority_guard_disables_on_normal_exit() {
+        let probe = LifecycleAuthorityProbe::default();
+        let cancellation = CancellationToken::new();
+        {
+            let guard = ProcessCorrelationAuthorityGuard::new(Some(&probe), &cancellation);
+            assert!(guard.enable_if_live().is_ok());
+            assert!(probe.enabled.load(Ordering::Acquire));
+        }
+        assert!(!probe.enabled.load(Ordering::Acquire));
+        assert!(probe.disable_calls.load(Ordering::Acquire) >= 2);
+    }
+
+    #[test]
+    fn cancellation_racing_replay_or_live_enable_cannot_reopen_authority() {
+        let probe = LifecycleAuthorityProbe::default();
+        let cancellation = CancellationToken::new();
+        *probe
+            .cancel_on_enable
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cancellation.clone());
+        let guard = ProcessCorrelationAuthorityGuard::new(Some(&probe), &cancellation);
+        assert!(matches!(
+            guard.enable_if_live(),
+            Err(ProcessEventRelayError::Cancelled)
+        ));
+        assert!(!probe.enabled.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_invalidation_stays_fenced_and_returns_promptly()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let probe = Arc::new(LifecycleAuthorityProbe::default());
+        probe.pending_invalidation.store(true, Ordering::Release);
+        let cancellation = CancellationToken::new();
+        let task_probe = Arc::clone(&probe);
+        let task_cancellation = cancellation.clone();
+        let task = tokio::spawn(async move {
+            invalidate_process_correlations(Some(task_probe.as_ref()), &task_cancellation).await
+        });
+        tokio::task::yield_now().await;
+        cancellation.cancel();
+        let result = tokio::time::timeout(Duration::from_millis(50), task).await??;
+        assert!(matches!(result, Err(ProcessEventRelayError::Cancelled)));
+        assert!(!probe.enabled.load(Ordering::Acquire));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn relay_recovers_only_after_clean_handoffs_and_exits_disabled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let generation = DesktopGeneration::new();
+        let gap: BrokerProcessEvent = serde_json::from_value(serde_json::json!({
+            "sequence": 2,
+            "principal_id": "alice",
+            "payload": process_exit_payload(generation, false, false)?,
+        }))?;
+        let malformed: BrokerProcessEvent = serde_json::from_value(serde_json::json!({
+            "sequence": 3,
+            "principal_id": "alice",
+            "payload": process_exit_payload(DesktopGeneration::new(), false, false)?,
+        }))?;
+        let ambiguous_replay = scripted_subscription(
+            BrokerEventReplay::Events {
+                latest_sequence: 4,
+                events: vec![gap, malformed],
+            },
+            [],
+        );
+        let clean_closed = scripted_subscription(
+            BrokerEventReplay::Events {
+                latest_sequence: 4,
+                events: Vec::new(),
+            },
+            [Ok(BrokerLiveEvent::Closed)],
+        );
+        let clean_error = scripted_subscription(
+            BrokerEventReplay::Events {
+                latest_sequence: 4,
+                events: Vec::new(),
+            },
+            [Err(ProcessEventSourceError::Injected)],
+        );
+        let clean_idle = scripted_subscription(
+            BrokerEventReplay::Events {
+                latest_sequence: 4,
+                events: Vec::new(),
+            },
+            [],
+        );
+        let source = Arc::new(ScriptedProcessEventSource::new([
+            Err(ProcessEventSourceError::Injected),
+            Ok(ambiguous_replay),
+            Ok(clean_closed),
+            Ok(clean_error),
+            Ok(clean_idle),
+        ]));
+        let authority = Arc::new(LifecycleAuthorityProbe::default());
+        let cancellation = CancellationToken::new();
+        let (sender, _receiver) = mpsc::channel(8);
+        let ingress = ExternalEventIngress {
+            sender,
+            resync_state: Arc::new(AtomicU64::new(0)),
+            resync_notify: Arc::new(Notify::new()),
+        };
+        let task_source = Arc::clone(&source);
+        let task_authority: Arc<dyn ProcessCorrelationInvalidator> = authority.clone();
+        let task_cancellation = cancellation.clone();
+        let task = tokio::spawn(async move {
+            relay_process_events_inner(
+                ingress,
+                task_source.as_ref(),
+                generation,
+                task_cancellation,
+                Some(task_authority),
+            )
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while source.calls.load(Ordering::Acquire) < 5
+                || !authority.enabled.load(Ordering::Acquire)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(authority.enable_calls.load(Ordering::Acquire), 3);
+        cancellation.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), task).await??;
+        assert!(result.is_ok());
+        assert!(!authority.enabled.load(Ordering::Acquire));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn repeated_live_resync_boundaries_use_exponential_reconnect_backoff()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let generation = DesktopGeneration::new();
+        let subscriptions = (0_u64..4)
+            .map(|cursor| {
+                Ok(scripted_subscription(
+                    BrokerEventReplay::Events {
+                        latest_sequence: cursor,
+                        events: Vec::new(),
+                    },
+                    [Ok(BrokerLiveEvent::ResyncRequired {
+                        dropped_through: cursor + 1,
+                        latest_sequence: cursor + 1,
+                    })],
+                ))
+            })
+            .chain(std::iter::once(Ok(scripted_subscription(
+                BrokerEventReplay::Events {
+                    latest_sequence: 4,
+                    events: Vec::new(),
+                },
+                [],
+            ))));
+        let source = Arc::new(ScriptedProcessEventSource::new(subscriptions));
+        let authority = Arc::new(LifecycleAuthorityProbe::default());
+        let cancellation = CancellationToken::new();
+        let (sender, _receiver) = mpsc::channel(8);
+        let ingress = ExternalEventIngress {
+            sender,
+            resync_state: Arc::new(AtomicU64::new(0)),
+            resync_notify: Arc::new(Notify::new()),
+        };
+        let task_source = Arc::clone(&source);
+        let task_authority: Arc<dyn ProcessCorrelationInvalidator> = authority.clone();
+        let task_cancellation = cancellation.clone();
+        let started = Instant::now();
+        let task = tokio::spawn(async move {
+            relay_process_events_inner(
+                ingress,
+                task_source.as_ref(),
+                generation,
+                task_cancellation,
+                Some(task_authority),
+            )
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while source.calls.load(Ordering::Acquire) < 5
+                || !authority.enabled.load(Ordering::Acquire)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert!(
+            started.elapsed() >= Duration::from_millis(650),
+            "four immediate resyncs bypassed the expected 50/100/200/400ms backoff"
+        );
+        assert_eq!(source.calls.load(Ordering::Acquire), 5);
+        assert_eq!(authority.enable_calls.load(Ordering::Acquire), 5);
+
+        cancellation.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), task).await??;
+        assert!(result.is_ok());
+        assert!(!authority.enabled.load(Ordering::Acquire));
+        Ok(())
+    }
 
     #[test]
     fn principal_event_filter_hides_payloads_without_renumbering_global_gaps()
@@ -7896,15 +8599,18 @@ mod tests {
             "principal_id": "alice",
             "payload": process_exit_payload(generation, false, false)?,
         }))?;
-        let cursor = relay_process_event(
+        let invalidator = CountingProcessCorrelationInvalidator::default();
+        let outcome = relay_process_event(
             &ingress,
             generation,
             &CancellationToken::new(),
             0,
             process_event,
+            Some(&invalidator),
         )
         .await?;
-        assert_eq!(cursor, 2);
+        assert_eq!(outcome, ProcessRelayEventOutcome::Ambiguous { cursor: 2 });
+        assert_eq!(invalidator.calls.load(Ordering::Acquire), 1);
         assert_eq!(resync_state.load(Ordering::Acquire), 1);
 
         let claimed_epoch = claim_external_resync(&resync_state).ok_or("gap was not claimed")?;

@@ -73,7 +73,7 @@ from .policy import (
     ReferenceLifecycle,
 )
 from .protocol_generated import CanonicalUInt64, JsonObject, JsonValue
-from .transport import AsyncTransport, HttpTransport
+from .transport import AsyncDeadlineTransport, AsyncTransport, HttpTransport
 from .wire import (
     UINT64_MAX,
     as_uint64_string,
@@ -87,6 +87,7 @@ __all__ = [
     "Applications",
     "ArtifactRef",
     "Artifacts",
+    "AsyncDeadlineTransport",
     "AsyncTransport",
     "BearerToken",
     "CanonicalUInt64",

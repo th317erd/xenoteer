@@ -328,6 +328,7 @@ fn correlation_window_snapshot(fixture: &Fixture, revision: u64) -> ObservationC
     .expect("window rect");
     ObservationCorrelationSnapshot {
         revision: model_revision,
+        correlation_epoch: 1,
         observed_at: MonotonicMillis::new(revision),
         windows: vec![xenoteer_protocol::WindowSnapshot {
             xid_hex: window.xid_hex(),

@@ -300,6 +300,10 @@ pub fn api_router_with_services(
         .fallback(status::not_found)
         .layer(DefaultBodyLimit::max(limits.max_body_bytes()))
         .layer(middleware::from_fn_with_state(
+            limits,
+            limits::enforce_semantic_wait,
+        ))
+        .layer(middleware::from_fn_with_state(
             auth::AuthenticationState::new(authentication, abuse),
             auth::require_authentication,
         ))
@@ -370,7 +374,18 @@ pub async fn serve(
 
 #[cfg(test)]
 mod api_tests {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::Poll,
+        time::Duration,
+    };
+
     use axum::{body::to_bytes, http::StatusCode};
+    use bytes::Bytes;
+    use futures_util::stream;
     use tower::ServiceExt;
     use xenoteer_protocol::{DesktopGeneration, Problem};
 
@@ -378,7 +393,74 @@ mod api_tests {
 
     const TOKEN: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
 
-    fn application() -> Result<Router, Box<dyn std::error::Error>> {
+    #[derive(Clone, Default)]
+    struct TrackingObservationPlane {
+        active_waiters: Arc<AtomicUsize>,
+    }
+
+    struct ActiveWaiter(Arc<AtomicUsize>);
+
+    impl Drop for ActiveWaiter {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl ObservationPlane for TrackingObservationPlane {
+        fn list_windows<'a>(
+            &'a self,
+            _: ControlRequestContext,
+            _: xenoteer_protocol::WindowListRequest,
+        ) -> ObservationFuture<'a, Result<xenoteer_protocol::WindowListPage, ControlPlaneError>>
+        {
+            Box::pin(async { Err(ControlPlaneError::CapabilityUnavailable) })
+        }
+
+        fn window_snapshot<'a>(
+            &'a self,
+            _: ControlRequestContext,
+            _: xenoteer_protocol::WindowSnapshotRequest,
+        ) -> ObservationFuture<'a, Result<xenoteer_protocol::WindowSnapshotResult, ControlPlaneError>>
+        {
+            Box::pin(async { Err(ControlPlaneError::CapabilityUnavailable) })
+        }
+
+        fn query_windows<'a>(
+            &'a self,
+            _: ControlRequestContext,
+            _: xenoteer_protocol::WindowQueryRequest,
+        ) -> ObservationFuture<'a, Result<xenoteer_protocol::WindowQueryPage, ControlPlaneError>>
+        {
+            Box::pin(async { Err(ControlPlaneError::CapabilityUnavailable) })
+        }
+
+        fn resolve_window<'a>(
+            &'a self,
+            _: ControlRequestContext,
+            _: xenoteer_protocol::WindowResolveRequest,
+        ) -> ObservationFuture<'a, Result<xenoteer_protocol::WindowResolveResult, ControlPlaneError>>
+        {
+            Box::pin(async { Err(ControlPlaneError::CapabilityUnavailable) })
+        }
+
+        fn wait_window<'a>(
+            &'a self,
+            _: ControlRequestContext,
+            _: xenoteer_protocol::WindowWaitRequest,
+        ) -> ObservationFuture<'a, Result<xenoteer_protocol::WindowWaitResult, ControlPlaneError>>
+        {
+            self.active_waiters.fetch_add(1, Ordering::SeqCst);
+            let waiter = ActiveWaiter(Arc::clone(&self.active_waiters));
+            Box::pin(async move {
+                let _waiter = waiter;
+                std::future::pending().await
+            })
+        }
+    }
+
+    fn application_with_limits(
+        limits: TransportLimits,
+    ) -> Result<Router, Box<dyn std::error::Error>> {
         let readiness = ReadinessHandle::new(ReadinessSnapshot::new(
             DesktopReadiness::Ready,
             Some(DesktopGeneration::new()),
@@ -391,9 +473,148 @@ mod api_tests {
             DesktopId::new(),
             Authentication::bearer(provider),
             StaticCapabilityProvider::empty()?,
-            TransportLimits::default(),
+            limits,
             AllowedOrigins::default(),
         ))
+    }
+
+    fn application() -> Result<Router, Box<dyn std::error::Error>> {
+        application_with_limits(TransportLimits::default())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_semantic_wait_rejects_without_polling_body_and_releases_admission()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let limits = TransportLimits::default()
+            .with_max_concurrent_requests(1)?
+            .with_request_timeout(Duration::from_millis(100))?;
+        let application = application_with_limits(limits)?;
+        let body_polls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&body_polls);
+        let pending_body = Body::from_stream(stream::poll_fn(move |_context| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Poll::Pending::<Option<Result<Bytes, std::io::Error>>>
+        }));
+        let path = format!("/v1/desktops/{}/windows/wait", DesktopId::new());
+
+        let rejected = tokio::time::timeout(
+            Duration::from_millis(50),
+            application
+                .clone()
+                .oneshot(Request::post(path).body(pending_body)?),
+        )
+        .await??;
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body_polls.load(Ordering::SeqCst), 0);
+
+        let next = tokio::time::timeout(
+            Duration::from_millis(50),
+            application.oneshot(Request::get("/v1/status").body(Body::empty())?),
+        )
+        .await??;
+        assert_eq!(next.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelling_real_wait_handler_releases_principal_permit_and_actor_waiter()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let desktop_id = DesktopId::new();
+        let generation = DesktopGeneration::new();
+        let readiness = ReadinessHandle::new(ReadinessSnapshot::new(
+            DesktopReadiness::Ready,
+            Some(generation),
+            None::<String>,
+        ));
+        let provider = StaticTokenProvider::single(TOKEN, Principal::local_operator()?)?;
+        let observation = TrackingObservationPlane::default();
+        let active_waiters = Arc::clone(&observation.active_waiters);
+        let application = api_router_with_planes(
+            readiness,
+            desktop_id,
+            Authentication::bearer(provider),
+            StaticCapabilityProvider::empty()?,
+            TransportLimits::default(),
+            AllowedOrigins::default(),
+            Arc::new(control::UnavailableControlPlane),
+            Arc::new(observation),
+        );
+        let authorization = format!("Bearer {}", std::str::from_utf8(TOKEN)?);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "desktop_id": desktop_id,
+            "desktop_generation": generation,
+            "target": {
+                "type": "selector",
+                "selector": {
+                    "type": "predicate",
+                    "predicate": {"type": "active", "value": true}
+                },
+                "quantifier": "any"
+            },
+            "predicate": {"type": "exists"},
+            "after_revision": null,
+            "timeout_ms": 300000
+        }))?;
+        let path = format!("/v1/desktops/{desktop_id}/windows/wait");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut waits = Vec::new();
+            for _ in 0..DEFAULT_MAX_CONCURRENT_LONG_POLLS_PER_PRINCIPAL {
+                let request = Request::post(&path)
+                    .header(http::header::AUTHORIZATION, &authorization)
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.clone()))?;
+                waits.push(tokio::spawn(application.clone().oneshot(request)));
+            }
+            while active_waiters.load(Ordering::SeqCst)
+                != DEFAULT_MAX_CONCURRENT_LONG_POLLS_PER_PRINCIPAL
+            {
+                tokio::task::yield_now().await;
+            }
+
+            let exhausted = application
+                .clone()
+                .oneshot(
+                    Request::post(&path)
+                        .header(http::header::AUTHORIZATION, &authorization)
+                        .header(http::header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.clone()))?,
+                )
+                .await?;
+            assert_eq!(exhausted.status(), StatusCode::TOO_MANY_REQUESTS);
+
+            let cancelled = waits.remove(0);
+            cancelled.abort();
+            let _cancelled = cancelled.await;
+            while active_waiters.load(Ordering::SeqCst)
+                != DEFAULT_MAX_CONCURRENT_LONG_POLLS_PER_PRINCIPAL - 1
+            {
+                tokio::task::yield_now().await;
+            }
+
+            let replacement = tokio::spawn(
+                application.oneshot(
+                    Request::post(&path)
+                        .header(http::header::AUTHORIZATION, authorization)
+                        .header(http::header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))?,
+                ),
+            );
+            while active_waiters.load(Ordering::SeqCst)
+                != DEFAULT_MAX_CONCURRENT_LONG_POLLS_PER_PRINCIPAL
+            {
+                tokio::task::yield_now().await;
+            }
+            waits.push(replacement);
+            for wait in waits {
+                wait.abort();
+                let _cancelled = wait.await;
+            }
+            assert_eq!(active_waiters.load(Ordering::SeqCst), 0);
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+        .await??;
+        Ok(())
     }
 
     #[tokio::test]

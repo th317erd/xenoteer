@@ -22,7 +22,7 @@ from .errors import XenoteerError
 from .policy import ReferenceLifecycle
 from .protocol_generated import JsonObject
 from .state import GenerationRegistry
-from .transport import AsyncTransport
+from .transport import AsyncTransport, request_with_deadline
 from .wire import canonicalize_uint64_fields, validate_uint64_fields
 
 
@@ -356,7 +356,14 @@ class Windows:
             raise XenoteerError("invalid_request", "window wait request is invalid") from None
         path = f"/v1/desktops/{quote(self._desktop.id, safe='')}/windows/wait"
         return _validate_response(
-            await self._desktop._transport.request("POST", path, body), self._desktop
+            await request_with_deadline(
+                self._desktop._transport,
+                "POST",
+                path,
+                body,
+                timeout=float(body["timeout_ms"]) / 1_000 + 5,
+            ),
+            self._desktop,
         )
 
     async def one(
@@ -607,7 +614,8 @@ class Accessibility:
             "/accessibility/elements/query"
         )
         return _validate_response(
-            await self._desktop._transport.request("POST", path, body), self._desktop
+            await self._desktop._transport.request("POST", path, body),
+            self._desktop,
         )
 
     async def list(self, request: Mapping[str, Any]) -> JsonObject:
@@ -656,15 +664,23 @@ class Accessibility:
         body = _mapping(request, "element wait request")
         body["desktop_id"] = self._desktop.id
         body["desktop_generation"] = self._desktop.generation
-        timeout_ms = body.get("timeout_ms")
-        _bounded_int(timeout_ms, 1, 120_000, "element wait timeout")
+        timeout_ms = _bounded_int(
+            body.get("timeout_ms"), 1, 120_000, "element wait timeout"
+        )
         body = canonicalize_uint64_fields(body)  # type: ignore[assignment]
         path = (
             f"/v1/desktops/{quote(self._desktop.id, safe='')}"
             "/accessibility/elements/wait"
         )
         return _validate_response(
-            await self._desktop._transport.request("POST", path, body), self._desktop
+            await request_with_deadline(
+                self._desktop._transport,
+                "POST",
+                path,
+                body,
+                timeout=float(timeout_ms) / 1_000 + 5,
+            ),
+            self._desktop,
         )
 
     def handle(self, reference: Mapping[str, Any]) -> "Element":
