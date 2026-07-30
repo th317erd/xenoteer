@@ -446,6 +446,53 @@
   live registry and fixture probe. Independent final correlation and deadline
   reviews reported no high- or medium-severity findings. Exact coherent image
   and staged-artifact qualification remain deliberately pending.
+- Clean source `0c7f9ff55a6f790bc167a3dc8bed18b52d9d7e3b` produced diagnostic
+  production image
+  `sha256:6c97c75e222bc602c71b9e9ddefbb91ada640580008f3a14703edc83e81b4588`
+  and exact derived fixture
+  `sha256:d1dddcb29771ad77dc990f7bc9e9827de6e8212ff8f9a445ef3e93dab1f248f9`.
+  Production lifecycle/viewer denial, Phase-4 event flood, real noVNC,
+  desktop-app matrix, a controlled Phase-4 live rerun, and the Phase-5 AT-SPI
+  lane passed. The first Phase-4 live run truthfully returned
+  `converged:false` for Chromium iconification, so these identities are
+  rejected as release candidates despite the passing rerun.
+- The iconification failure exposed a cross-connection handoff race. The
+  window-control X11 connection can observe the ICCCM effect as converged, then
+  `WindowControlRuntime` immediately obtains a pre-effect snapshot from the
+  separate observation/model actor because queued X events are not a
+  cross-connection reconciliation barrier. Public state/minimize translation
+  derives its postcondition from that actor-owned snapshot and can therefore
+  report a false nonconvergence. Closure requires a fail-first delayed-model
+  regression and bounded exact-reference model reconciliation after the raw
+  effect, without replaying the mutation; a genuine manager refusal must still
+  return nonconverged.
+- The handoff race is closed by an additive raw-observation snapshot barrier
+  and exact actor-owned refresh. After a state/minimize effect, control waits on
+  one absolute deadline for the observation connection to finish the snapshot
+  round trip, drain its bounded ordered X11 event lane, update the model, and
+  revalidate the original `WindowRef`; it never redispatches the effect. A
+  stable target read failure tombstones that exact birth before bounded
+  preserve-continuity reconciliation, and an ordinary same-XID replacement
+  fences the predecessor and mints a new birth. An unsettled timeout, event
+  overflow/budget exhaustion, or bounded-work coalescing instead invalidates
+  every previously authoritative birth and defers recovery to a fresh-budget
+  resync. Event-driven refresh uses an iterative bounded work queue so a
+  Refresh immediately followed by Destroy/reuse cannot publish replacement
+  bytes or wake a waiter under the old birth. Identical snapshots are semantic
+  no-ops.
+- The race fix is proven by delayed-model state/minimize regressions,
+  genuine-nonconvergence/no-replay cases, target-loss and same-XID fencing,
+  stable and unstable snapshot failures, deadline recovery, cross-window
+  invalidation, 513-item work coalescing, nested Refresh/Destroy waiter
+  rejection, and direct actor fault/cleanup coverage. Final source gates passed:
+  23/23 X11 observation actor tests; 225 X11 library tests with 8 authenticated
+  live cases ignored in the host-free lane; 338 daemon tests with 2 live cases
+  ignored; full workspace/all-targets/all-features; strict workspace Clippy;
+  doc tests and warnings-as-errors Rustdoc; and the authenticated native harness
+  with 11 X11 integration, 4 capture, and 2 adversarial daemon-observation
+  cases plus the independent XTEST fixture. Two independent final reviews found
+  no remaining high- or medium-severity correctness, security, or API issue
+  after the reviewer-requested fault-branch tests were added.
 - Phase 3 is committed locally as `90b0781`; the verified Phase 4 boundary is
   committed locally as `83b044c`. Phase 5 has completed coherent exact-image
   qualification and closure review and is ready for its local boundary commit.

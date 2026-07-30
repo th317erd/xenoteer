@@ -5,7 +5,7 @@ use std::{
     error::Error,
     future::Future,
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
@@ -89,6 +89,13 @@ struct SingleWindowBackend {
 struct MutableWindowBackendState {
     windows: BTreeMap<u32, WindowSnapshotInput>,
     events: VecDeque<ObservationActorEvent>,
+    transitions_after_snapshot: VecDeque<MutableSnapshotTransition>,
+}
+
+#[derive(Default)]
+struct MutableSnapshotTransition {
+    windows: BTreeMap<u32, WindowSnapshotInput>,
+    events: VecDeque<ObservationActorEvent>,
 }
 
 struct MutableWindowBackend {
@@ -98,6 +105,53 @@ struct MutableWindowBackend {
 struct DelayedMutableWindowBackend {
     state: Arc<Mutex<MutableWindowBackendState>>,
     delay_ms: Arc<AtomicU64>,
+}
+
+#[derive(Default)]
+struct BlockingSnapshotBarrierGate {
+    submitted: Mutex<bool>,
+    submitted_changed: Condvar,
+    released: Mutex<bool>,
+    released_changed: Condvar,
+}
+
+impl BlockingSnapshotBarrierGate {
+    fn wait_until_submitted(&self) {
+        let submitted = self
+            .submitted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (submitted, timeout) = self
+            .submitted_changed
+            .wait_timeout_while(submitted, std::time::Duration::from_secs(1), |submitted| {
+                !*submitted
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(!timeout.timed_out() && *submitted);
+    }
+
+    fn release(&self) {
+        *self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        self.released_changed.notify_all();
+    }
+}
+
+struct BlockingSnapshotBarrierBackend {
+    state: Arc<Mutex<MutableWindowBackendState>>,
+    gate: Arc<BlockingSnapshotBarrierGate>,
+}
+
+struct UnstableTargetRemovalBackend {
+    state: Arc<Mutex<MutableWindowBackendState>>,
+    gate: Arc<BlockingSnapshotBarrierGate>,
+}
+
+struct RequestFailedSlowReconcileBackend {
+    state: Arc<Mutex<MutableWindowBackendState>>,
+    reconcile_calls: usize,
 }
 
 #[derive(Default)]
@@ -180,13 +234,16 @@ impl RawObservationBackend for MutableWindowBackend {
         _control: &ModelActorControl,
         _timeout: std::time::Duration,
     ) -> Result<WindowSnapshotInput, RawBackendFailure> {
-        self.state
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .windows
-            .get(&window)
-            .cloned()
-            .ok_or(RawBackendFailure::RequestFailed)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let snapshot = state.windows.get(&window).cloned();
+        if let Some(transition) = state.transitions_after_snapshot.pop_front() {
+            state.windows.extend(transition.windows);
+            state.events.extend(transition.events);
+        }
+        snapshot.ok_or(RawBackendFailure::RequestFailed)
     }
 
     fn try_event(&mut self) -> Result<Option<ObservationActorEvent>, RawBackendFailure> {
@@ -250,6 +307,248 @@ impl RawObservationBackend for DelayedMutableWindowBackend {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .events
             .pop_front())
+    }
+
+    fn shutdown(&mut self, _timeout: std::time::Duration) -> ObservationActorExit {
+        ObservationActorExit::Stopped
+    }
+}
+
+impl RawObservationBackend for BlockingSnapshotBarrierBackend {
+    fn reconcile(
+        &mut self,
+        _control: &ModelActorControl,
+        _timeout: std::time::Duration,
+    ) -> Result<RootInventory, RawBackendFailure> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(RootInventory {
+            windows: state.windows.keys().copied().collect(),
+            source: InventorySource::NetClientList,
+            warnings: Vec::new(),
+        })
+    }
+
+    fn snapshot(
+        &mut self,
+        window: u32,
+        _control: &ModelActorControl,
+        _timeout: std::time::Duration,
+    ) -> Result<WindowSnapshotInput, RawBackendFailure> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .windows
+            .get(&window)
+            .cloned()
+            .ok_or(RawBackendFailure::RequestFailed)
+    }
+
+    fn snapshot_barrier(
+        &mut self,
+        window: u32,
+        _control: &ModelActorControl,
+        timeout: std::time::Duration,
+    ) -> Result<RawSnapshotBarrier, RawBackendFailure> {
+        let started = std::time::Instant::now();
+        *self
+            .gate
+            .submitted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        self.gate.submitted_changed.notify_all();
+
+        let released = self
+            .gate
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fallback = timeout
+            .checked_add(std::time::Duration::from_millis(250))
+            .unwrap_or(timeout);
+        let _ = self
+            .gate
+            .released_changed
+            .wait_timeout_while(released, fallback, |released| !*released)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(remaining) = timeout.checked_sub(started.elapsed()) {
+            std::thread::sleep(
+                remaining
+                    .checked_add(std::time::Duration::from_millis(25))
+                    .unwrap_or(remaining),
+            );
+        }
+
+        let outcome = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .windows
+            .get(&window)
+            .cloned()
+            .map(Box::new)
+            .map(RawSnapshotOutcome::Snapshot)
+            .unwrap_or(RawSnapshotOutcome::RequestFailed);
+        Ok(RawSnapshotBarrier {
+            outcome,
+            stable: true,
+        })
+    }
+
+    fn try_event(&mut self) -> Result<Option<ObservationActorEvent>, RawBackendFailure> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .events
+            .pop_front())
+    }
+
+    fn shutdown(&mut self, _timeout: std::time::Duration) -> ObservationActorExit {
+        ObservationActorExit::Stopped
+    }
+}
+
+impl RawObservationBackend for UnstableTargetRemovalBackend {
+    fn reconcile(
+        &mut self,
+        _control: &ModelActorControl,
+        _timeout: std::time::Duration,
+    ) -> Result<RootInventory, RawBackendFailure> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(RootInventory {
+            windows: state.windows.keys().copied().collect(),
+            source: InventorySource::NetClientList,
+            warnings: Vec::new(),
+        })
+    }
+
+    fn snapshot(
+        &mut self,
+        window: u32,
+        _control: &ModelActorControl,
+        _timeout: std::time::Duration,
+    ) -> Result<WindowSnapshotInput, RawBackendFailure> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .windows
+            .get(&window)
+            .cloned()
+            .ok_or(RawBackendFailure::RequestFailed)
+    }
+
+    fn snapshot_barrier(
+        &mut self,
+        window: u32,
+        _control: &ModelActorControl,
+        timeout: std::time::Duration,
+    ) -> Result<RawSnapshotBarrier, RawBackendFailure> {
+        *self
+            .gate
+            .submitted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        self.gate.submitted_changed.notify_all();
+        let released = self
+            .gate
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = self
+            .gate
+            .released_changed
+            .wait_timeout_while(released, timeout, |released| !*released)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.windows.remove(&window);
+        state.events.push_back(ObservationActorEvent::Reconcile {
+            decision: ReconcileDecision::RemoveWindow { window },
+        });
+        Ok(RawSnapshotBarrier {
+            outcome: RawSnapshotOutcome::RequestFailed,
+            stable: false,
+        })
+    }
+
+    fn try_event(&mut self) -> Result<Option<ObservationActorEvent>, RawBackendFailure> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .events
+            .pop_front())
+    }
+
+    fn shutdown(&mut self, _timeout: std::time::Duration) -> ObservationActorExit {
+        ObservationActorExit::Stopped
+    }
+}
+
+impl RawObservationBackend for RequestFailedSlowReconcileBackend {
+    fn reconcile(
+        &mut self,
+        _control: &ModelActorControl,
+        timeout: std::time::Duration,
+    ) -> Result<RootInventory, RawBackendFailure> {
+        let call = self.reconcile_calls;
+        self.reconcile_calls += 1;
+        if call == 1 {
+            std::thread::sleep(
+                timeout
+                    .checked_add(std::time::Duration::from_millis(25))
+                    .unwrap_or(timeout),
+            );
+        }
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(RootInventory {
+            windows: state.windows.keys().copied().collect(),
+            source: InventorySource::NetClientList,
+            warnings: Vec::new(),
+        })
+    }
+
+    fn snapshot(
+        &mut self,
+        window: u32,
+        _control: &ModelActorControl,
+        _timeout: std::time::Duration,
+    ) -> Result<WindowSnapshotInput, RawBackendFailure> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .windows
+            .get(&window)
+            .cloned()
+            .ok_or(RawBackendFailure::RequestFailed)
+    }
+
+    fn snapshot_barrier(
+        &mut self,
+        _window: u32,
+        _control: &ModelActorControl,
+        _timeout: std::time::Duration,
+    ) -> Result<RawSnapshotBarrier, RawBackendFailure> {
+        Ok(RawSnapshotBarrier {
+            outcome: RawSnapshotOutcome::RequestFailed,
+            stable: true,
+        })
+    }
+
+    fn try_event(&mut self) -> Result<Option<ObservationActorEvent>, RawBackendFailure> {
+        Ok(None)
     }
 
     fn shutdown(&mut self, _timeout: std::time::Duration) -> ObservationActorExit {
@@ -1203,6 +1502,1122 @@ async fn window_control_final_snapshot_scrubs_process_authority_disabled_after_e
     Ok(())
 }
 
+#[test]
+fn window_state_commands_refresh_model_after_raw_effect_precedes_observation_event()
+-> Result<(), Box<dyn Error>> {
+    use crate::control_plane::{WindowControlBackendError, WindowControlRuntime};
+    use xenoteer_protocol::{
+        Command, WindowControlResult, WindowManagerState, WindowMinimizeCommand,
+        WindowSetStateCommand, WindowStateObservation,
+    };
+    use xenoteer_x11::{
+        ObservedAtom, RawWindowBooleanObservation, RawWindowControlEvidence,
+        RawWindowControlObservation, RawWindowControlOperation, RawWindowControlOutcome,
+    };
+
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let state = Arc::new(Mutex::new(MutableWindowBackendState {
+        windows: BTreeMap::from([(42, titled_raw(42, 101, "Managed editor")?)]),
+        events: VecDeque::new(),
+        transitions_after_snapshot: VecDeque::new(),
+    }));
+    let (service, shutdown, join) = spawn_model_actor_with_correlator(
+        Box::new(MutableWindowBackend {
+            state: Arc::clone(&state),
+        }),
+        desktop_id,
+        generation,
+        WindowModelLimits::default(),
+        ObservationServiceSettings::for_test(),
+        Arc::new(UnavailablePidCorrelator),
+    )?;
+    let window = service
+        .accessibility_correlation_snapshot_blocking(std::time::Duration::from_millis(250))?
+        .windows[0]
+        .window
+        .clone();
+    let effects = Arc::new(AtomicUsize::new(0));
+    let handler_state = Arc::clone(&state);
+    let handler_effects = Arc::clone(&effects);
+    let handler = Arc::new(
+        move |request: xenoteer_x11::RawWindowControlRequest,
+              revalidate: crate::control_plane::WindowControlRevalidator,
+              _timeout: std::time::Duration| {
+            revalidate().map_err(|_| WindowControlBackendError::ReplyUnavailable)?;
+            handler_effects.fetch_add(1, Ordering::AcqRel);
+            let mut state = handler_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let snapshot = state
+                .windows
+                .get_mut(&request.target)
+                .ok_or(WindowControlBackendError::ReplyUnavailable)?;
+            let known = match request.operation {
+                RawWindowControlOperation::SetState {
+                    state: WindowManagerState::Fullscreen,
+                    desired: true,
+                } => KnownAtom::NetWmStateFullscreen,
+                RawWindowControlOperation::Minimize { desired: true, .. } => {
+                    KnownAtom::NetWmStateHidden
+                }
+                _ => return Err(WindowControlBackendError::ReplyUnavailable),
+            };
+            if !snapshot
+                .properties
+                .states
+                .iter()
+                .any(|atom| atom.known == Some(known))
+            {
+                snapshot.properties.states.push(ObservedAtom {
+                    id: 10_000 + known as u32,
+                    known: Some(known),
+                });
+            }
+            Ok(RawWindowControlEvidence {
+                requested: request,
+                outcome: RawWindowControlOutcome::Converged,
+                observed: RawWindowControlObservation::State(RawWindowBooleanObservation::Enabled),
+                capabilities: None,
+                warnings: Vec::new(),
+            })
+        },
+    );
+    let runtime = WindowControlRuntime::new_scripted(Arc::clone(&service), handler);
+
+    let Some(WindowControlResult::StateChanged(state_result)) = runtime
+        .execute_window_control_for_test(Command::WindowSetState(WindowSetStateCommand {
+            window: window.clone(),
+            state: WindowManagerState::Fullscreen,
+            desired: true,
+        }))
+    else {
+        return Err("window state command did not return a state result".into());
+    };
+    assert!(state_result.converged);
+    assert_eq!(state_result.observed, WindowStateObservation::Enabled);
+
+    let Some(WindowControlResult::Minimized(minimize_result)) = runtime
+        .execute_window_control_for_test(Command::WindowMinimize(WindowMinimizeCommand {
+            window,
+            desired: true,
+        }))
+    else {
+        return Err("window minimize command did not return a minimize result".into());
+    };
+    assert!(minimize_result.converged);
+    assert_eq!(minimize_result.observed, WindowStateObservation::Enabled);
+    assert!(minimize_result.final_snapshot.state.minimized);
+    assert!(minimize_result.final_snapshot.state.hidden);
+    assert_eq!(effects.load(Ordering::Acquire), 2);
+
+    shutdown.request();
+    assert_eq!(join.join(), ObservationServiceExit::Stopped);
+    Ok(())
+}
+
+#[test]
+fn window_state_refresh_discards_capture_preceding_a_newer_drained_event()
+-> Result<(), Box<dyn Error>> {
+    use crate::control_plane::{WindowControlBackendError, WindowControlRuntime};
+    use xenoteer_protocol::{
+        Command, WindowControlResult, WindowManagerState, WindowSetStateCommand,
+    };
+    use xenoteer_x11::{
+        ObservedAtom, RawWindowBooleanObservation, RawWindowControlEvidence,
+        RawWindowControlObservation, RawWindowControlOutcome, WindowRefresh,
+    };
+
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let state = Arc::new(Mutex::new(MutableWindowBackendState {
+        windows: BTreeMap::from([(42, titled_raw(42, 101, "Initial")?)]),
+        events: VecDeque::new(),
+        transitions_after_snapshot: VecDeque::new(),
+    }));
+    let (service, shutdown, join) = spawn_model_actor_with_correlator(
+        Box::new(MutableWindowBackend {
+            state: Arc::clone(&state),
+        }),
+        desktop_id,
+        generation,
+        WindowModelLimits::default(),
+        ObservationServiceSettings::for_test(),
+        Arc::new(UnavailablePidCorrelator),
+    )?;
+    let initial = service
+        .accessibility_correlation_snapshot_blocking(std::time::Duration::from_millis(250))?;
+    let window = initial.windows[0].window.clone();
+    let initial_revision = initial.windows[0].model_revision;
+
+    let mut captured = titled_raw(42, 101, "Captured before event")?;
+    let mut newer = titled_raw(42, 101, "Newer drained event")?;
+    for snapshot in [&mut captured, &mut newer] {
+        snapshot.properties.states.push(ObservedAtom {
+            id: 10_000 + KnownAtom::NetWmStateFullscreen as u32,
+            known: Some(KnownAtom::NetWmStateFullscreen),
+        });
+    }
+    let effects = Arc::new(AtomicUsize::new(0));
+    let handler_state = Arc::clone(&state);
+    let handler_effects = Arc::clone(&effects);
+    let handler = Arc::new(
+        move |request: xenoteer_x11::RawWindowControlRequest,
+              revalidate: crate::control_plane::WindowControlRevalidator,
+              _timeout: std::time::Duration| {
+            revalidate().map_err(|_| WindowControlBackendError::ReplyUnavailable)?;
+            handler_effects.fetch_add(1, Ordering::AcqRel);
+            let mut state = handler_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.windows.insert(request.target, captured.clone());
+            state
+                .transitions_after_snapshot
+                .push_back(MutableSnapshotTransition {
+                    windows: BTreeMap::from([(request.target, newer.clone())]),
+                    events: VecDeque::from([ObservationActorEvent::Reconcile {
+                        decision: ReconcileDecision::RefreshWindow {
+                            window: request.target,
+                            refresh: WindowRefresh::State,
+                        },
+                    }]),
+                });
+            Ok(RawWindowControlEvidence {
+                requested: request,
+                outcome: RawWindowControlOutcome::Converged,
+                observed: RawWindowControlObservation::State(RawWindowBooleanObservation::Enabled),
+                capabilities: None,
+                warnings: Vec::new(),
+            })
+        },
+    );
+    let runtime = WindowControlRuntime::new_scripted(Arc::clone(&service), handler);
+
+    let Some(WindowControlResult::StateChanged(result)) =
+        runtime.execute_window_control_for_test(Command::WindowSetState(WindowSetStateCommand {
+            window,
+            state: WindowManagerState::Fullscreen,
+            desired: true,
+        }))
+    else {
+        return Err("window state command did not return a state result".into());
+    };
+    assert!(result.converged);
+    assert_eq!(
+        result
+            .final_snapshot
+            .metadata
+            .title
+            .as_ref()
+            .map(|title| title.value.as_str()),
+        Some("Newer drained event"),
+        "a pre-drain capture must never roll back the event-advanced model"
+    );
+    assert_eq!(
+        result.final_snapshot.model_revision.get(),
+        initial_revision.get() + 1,
+        "the discarded capture must not create a duplicate model revision"
+    );
+    assert_eq!(effects.load(Ordering::Acquire), 1);
+
+    shutdown.request();
+    assert_eq!(join.join(), ObservationServiceExit::Stopped);
+    Ok(())
+}
+
+#[test]
+fn genuine_window_state_nonconvergence_remains_bounded_and_does_not_replay_effect()
+-> Result<(), Box<dyn Error>> {
+    use crate::control_plane::{WindowControlBackendError, WindowControlRuntime};
+    use xenoteer_protocol::{
+        Command, WindowControlResult, WindowManagerState, WindowSetStateCommand,
+        WindowStateObservation,
+    };
+    use xenoteer_x11::{
+        RawWindowBooleanObservation, RawWindowControlEvidence, RawWindowControlObservation,
+        RawWindowControlOutcome,
+    };
+
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let (service, shutdown, join) = spawn_model_actor_with_correlator(
+        Box::new(SingleWindowBackend {
+            snapshot: titled_raw(42, 101, "Managed editor")?,
+        }),
+        desktop_id,
+        generation,
+        WindowModelLimits::default(),
+        ObservationServiceSettings::for_test(),
+        Arc::new(UnavailablePidCorrelator),
+    )?;
+    let window = service
+        .accessibility_correlation_snapshot_blocking(std::time::Duration::from_millis(250))?
+        .windows[0]
+        .window
+        .clone();
+    let effects = Arc::new(AtomicUsize::new(0));
+    let handler_effects = Arc::clone(&effects);
+    let handler = Arc::new(
+        move |request: xenoteer_x11::RawWindowControlRequest,
+              revalidate: crate::control_plane::WindowControlRevalidator,
+              _timeout: std::time::Duration| {
+            revalidate().map_err(|_| WindowControlBackendError::ReplyUnavailable)?;
+            handler_effects.fetch_add(1, Ordering::AcqRel);
+            Ok(RawWindowControlEvidence {
+                requested: request,
+                outcome: RawWindowControlOutcome::TimedOut,
+                observed: RawWindowControlObservation::State(RawWindowBooleanObservation::Disabled),
+                capabilities: None,
+                warnings: Vec::new(),
+            })
+        },
+    );
+    let runtime = WindowControlRuntime::new_scripted(Arc::clone(&service), handler);
+
+    let started = std::time::Instant::now();
+    let Some(WindowControlResult::StateChanged(result)) =
+        runtime.execute_window_control_for_test(Command::WindowSetState(WindowSetStateCommand {
+            window,
+            state: WindowManagerState::Above,
+            desired: true,
+        }))
+    else {
+        return Err("window state command did not return a state result".into());
+    };
+    assert!(!result.converged);
+    assert_eq!(result.observed, WindowStateObservation::Disabled);
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert_eq!(effects.load(Ordering::Acquire), 1);
+
+    shutdown.request();
+    assert_eq!(join.join(), ObservationServiceExit::Stopped);
+    Ok(())
+}
+
+#[test]
+fn window_state_post_effect_target_loss_fails_closed_without_replaying_effect()
+-> Result<(), Box<dyn Error>> {
+    use crate::control_plane::{WindowControlBackendError, WindowControlRuntime};
+    use xenoteer_protocol::{Command, WindowManagerState, WindowSetStateCommand};
+    use xenoteer_x11::{
+        RawWindowBooleanObservation, RawWindowControlEvidence, RawWindowControlObservation,
+        RawWindowControlOutcome,
+    };
+
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let state = Arc::new(Mutex::new(MutableWindowBackendState {
+        windows: BTreeMap::from([(42, titled_raw(42, 101, "Managed editor")?)]),
+        events: VecDeque::new(),
+        transitions_after_snapshot: VecDeque::new(),
+    }));
+    let (service, shutdown, join) = spawn_model_actor_with_correlator(
+        Box::new(MutableWindowBackend {
+            state: Arc::clone(&state),
+        }),
+        desktop_id,
+        generation,
+        WindowModelLimits::default(),
+        ObservationServiceSettings::for_test(),
+        Arc::new(UnavailablePidCorrelator),
+    )?;
+    let window = service
+        .accessibility_correlation_snapshot_blocking(std::time::Duration::from_millis(250))?
+        .windows[0]
+        .window
+        .clone();
+    let effects = Arc::new(AtomicUsize::new(0));
+    let handler_state = Arc::clone(&state);
+    let handler_effects = Arc::clone(&effects);
+    let handler = Arc::new(
+        move |request: xenoteer_x11::RawWindowControlRequest,
+              revalidate: crate::control_plane::WindowControlRevalidator,
+              _timeout: std::time::Duration| {
+            revalidate().map_err(|_| WindowControlBackendError::ReplyUnavailable)?;
+            handler_effects.fetch_add(1, Ordering::AcqRel);
+            handler_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .windows
+                .clear();
+            Ok(RawWindowControlEvidence {
+                requested: request,
+                outcome: RawWindowControlOutcome::Converged,
+                observed: RawWindowControlObservation::State(RawWindowBooleanObservation::Enabled),
+                capabilities: None,
+                warnings: Vec::new(),
+            })
+        },
+    );
+    let runtime = WindowControlRuntime::new_scripted(Arc::clone(&service), handler);
+
+    assert!(
+        runtime
+            .execute_window_control_for_test(Command::WindowSetState(WindowSetStateCommand {
+                window,
+                state: WindowManagerState::Above,
+                desired: true,
+            }))
+            .is_none()
+    );
+    assert_eq!(effects.load(Ordering::Acquire), 1);
+
+    shutdown.request();
+    assert_eq!(join.join(), ObservationServiceExit::Stopped);
+    Ok(())
+}
+
+#[test]
+fn window_state_post_effect_same_xid_replacement_stales_the_old_birth() -> Result<(), Box<dyn Error>>
+{
+    use crate::control_plane::{WindowControlBackendError, WindowControlRuntime};
+    use xenoteer_protocol::{Command, WindowManagerState, WindowSetStateCommand};
+    use xenoteer_x11::{
+        RawWindowBooleanObservation, RawWindowControlEvidence, RawWindowControlObservation,
+        RawWindowControlOutcome,
+    };
+
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let state = Arc::new(Mutex::new(MutableWindowBackendState {
+        windows: BTreeMap::from([(42, titled_raw(42, 101, "Original")?)]),
+        events: VecDeque::new(),
+        transitions_after_snapshot: VecDeque::new(),
+    }));
+    let (service, shutdown, join) = spawn_model_actor_with_correlator(
+        Box::new(MutableWindowBackend {
+            state: Arc::clone(&state),
+        }),
+        desktop_id,
+        generation,
+        WindowModelLimits::default(),
+        ObservationServiceSettings::for_test(),
+        Arc::new(UnavailablePidCorrelator),
+    )?;
+    let window = service
+        .accessibility_correlation_snapshot_blocking(std::time::Duration::from_millis(250))?
+        .windows[0]
+        .window
+        .clone();
+    let effects = Arc::new(AtomicUsize::new(0));
+    let replacement = titled_raw(42, 202, "Replacement")?;
+    let handler_state = Arc::clone(&state);
+    let handler_effects = Arc::clone(&effects);
+    let handler = Arc::new(
+        move |request: xenoteer_x11::RawWindowControlRequest,
+              revalidate: crate::control_plane::WindowControlRevalidator,
+              _timeout: std::time::Duration| {
+            revalidate().map_err(|_| WindowControlBackendError::ReplyUnavailable)?;
+            handler_effects.fetch_add(1, Ordering::AcqRel);
+            let mut state = handler_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.windows.insert(request.target, replacement.clone());
+            state
+                .transitions_after_snapshot
+                .push_back(MutableSnapshotTransition {
+                    windows: BTreeMap::new(),
+                    events: VecDeque::from([
+                        ObservationActorEvent::Reconcile {
+                            decision: ReconcileDecision::RemoveWindow {
+                                window: request.target,
+                            },
+                        },
+                        ObservationActorEvent::Reconcile {
+                            decision: ReconcileDecision::ObserveWindow {
+                                window: request.target,
+                            },
+                        },
+                    ]),
+                });
+            Ok(RawWindowControlEvidence {
+                requested: request,
+                outcome: RawWindowControlOutcome::Converged,
+                observed: RawWindowControlObservation::State(RawWindowBooleanObservation::Enabled),
+                capabilities: None,
+                warnings: Vec::new(),
+            })
+        },
+    );
+    let runtime = WindowControlRuntime::new_scripted(Arc::clone(&service), handler);
+
+    assert!(
+        runtime
+            .execute_window_control_for_test(Command::WindowSetState(WindowSetStateCommand {
+                window: window.clone(),
+                state: WindowManagerState::Above,
+                desired: true,
+            }))
+            .is_none(),
+        "a barrier-visible replacement must not inherit the old command's authority"
+    );
+    assert_eq!(effects.load(Ordering::Acquire), 1);
+    assert!(
+        service
+            .snapshot_exact_blocking(window, std::time::Duration::from_millis(250))
+            .is_err(),
+        "the old exact birth must remain stale after same-XID replacement"
+    );
+
+    shutdown.request();
+    assert_eq!(join.join(), ObservationServiceExit::Stopped);
+    Ok(())
+}
+
+#[test]
+fn expired_submitted_refresh_barrier_invalidates_before_queued_exact_revalidation()
+-> Result<(), Box<dyn Error>> {
+    use crate::control_plane::{WindowControlBackendError, WindowControlRuntime};
+    use xenoteer_protocol::{Command, WindowManagerState, WindowSetStateCommand};
+    use xenoteer_x11::{
+        RawWindowBooleanObservation, RawWindowControlEvidence, RawWindowControlObservation,
+        RawWindowControlOutcome,
+    };
+
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let state = Arc::new(Mutex::new(MutableWindowBackendState {
+        windows: BTreeMap::from([(42, titled_raw(42, 101, "Original")?)]),
+        events: VecDeque::new(),
+        transitions_after_snapshot: VecDeque::new(),
+    }));
+    let gate = Arc::new(BlockingSnapshotBarrierGate::default());
+    let (service, shutdown, join) = spawn_model_actor_with_correlator(
+        Box::new(BlockingSnapshotBarrierBackend {
+            state: Arc::clone(&state),
+            gate: Arc::clone(&gate),
+        }),
+        desktop_id,
+        generation,
+        WindowModelLimits::default(),
+        ObservationServiceSettings::for_test(),
+        Arc::new(UnavailablePidCorrelator),
+    )?;
+    let old = service
+        .accessibility_correlation_snapshot_blocking(std::time::Duration::from_millis(250))?
+        .windows[0]
+        .window
+        .clone();
+
+    let effects = Arc::new(AtomicUsize::new(0));
+    let handler_effects = Arc::clone(&effects);
+    let handler = Arc::new(
+        move |request: xenoteer_x11::RawWindowControlRequest,
+              revalidate: crate::control_plane::WindowControlRevalidator,
+              _timeout: std::time::Duration| {
+            revalidate().map_err(|_| WindowControlBackendError::ReplyUnavailable)?;
+            handler_effects.fetch_add(1, Ordering::AcqRel);
+            Ok(RawWindowControlEvidence {
+                requested: request,
+                outcome: RawWindowControlOutcome::Converged,
+                observed: RawWindowControlObservation::State(RawWindowBooleanObservation::Enabled),
+                capabilities: None,
+                warnings: Vec::new(),
+            })
+        },
+    );
+    let runtime = WindowControlRuntime::new_scripted(Arc::clone(&service), handler);
+    let command_window = old.clone();
+    let control = std::thread::spawn(move || {
+        runtime.execute_window_control_for_test(Command::WindowSetState(WindowSetStateCommand {
+            window: command_window,
+            state: WindowManagerState::Above,
+            desired: true,
+        }))
+    });
+
+    gate.wait_until_submitted();
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .windows
+        .insert(
+            42,
+            titled_raw(42, 202, "Replacement while barrier blocked")?,
+        );
+    let (revalidation_response, revalidation_receiver) = std::sync::mpsc::sync_channel(1);
+    service.submit(ModelRequest::Revalidate {
+        window: old.clone(),
+        response: revalidation_response,
+    })?;
+    gate.release();
+
+    assert!(
+        control
+            .join()
+            .map_err(|_| "window control thread panicked")?
+            .is_none(),
+        "a post-effect barrier timeout must fail closed"
+    );
+    assert_eq!(
+        effects.load(Ordering::Acquire),
+        1,
+        "post-effect refresh failure must never replay the raw effect"
+    );
+    let queued_revalidation =
+        revalidation_receiver.recv_timeout(std::time::Duration::from_secs(4))?;
+    assert!(
+        matches!(
+            queued_revalidation,
+            Err(ControlPlaneError::NotFound | ControlPlaneError::StaleReference { .. })
+        ),
+        "queued exact revalidation resolved authority from before the unsettled barrier"
+    );
+
+    let recovered =
+        service.accessibility_correlation_snapshot_blocking(std::time::Duration::from_secs(4))?;
+    assert_eq!(recovered.windows.len(), 1);
+    assert_eq!(recovered.windows[0].window.xid, old.xid);
+    assert_ne!(recovered.windows[0].window, old);
+    assert_eq!(recovered.windows[0].process.reported_pid, Some(202));
+    assert!(
+        service
+            .snapshot_exact_blocking(old, std::time::Duration::from_millis(250))
+            .is_err(),
+        "the pre-barrier exact birth must remain stale after recovery"
+    );
+
+    shutdown.request();
+    assert_eq!(join.join(), ObservationServiceExit::Stopped);
+    Ok(())
+}
+
+#[test]
+fn unstable_barrier_target_loss_invalidates_other_births_before_queued_revalidation()
+-> Result<(), Box<dyn Error>> {
+    use crate::control_plane::{WindowControlBackendError, WindowControlRuntime};
+    use xenoteer_protocol::{Command, WindowManagerState, WindowSetStateCommand};
+    use xenoteer_x11::{
+        RawWindowBooleanObservation, RawWindowControlEvidence, RawWindowControlObservation,
+        RawWindowControlOutcome,
+    };
+
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let state = Arc::new(Mutex::new(MutableWindowBackendState {
+        windows: BTreeMap::from([
+            (42, titled_raw(42, 101, "Target")?),
+            (43, titled_raw(43, 202, "Other")?),
+        ]),
+        events: VecDeque::new(),
+        transitions_after_snapshot: VecDeque::new(),
+    }));
+    let gate = Arc::new(BlockingSnapshotBarrierGate::default());
+    let (service, shutdown, join) = spawn_model_actor_with_correlator(
+        Box::new(UnstableTargetRemovalBackend {
+            state: Arc::clone(&state),
+            gate: Arc::clone(&gate),
+        }),
+        desktop_id,
+        generation,
+        WindowModelLimits::default(),
+        ObservationServiceSettings::for_test(),
+        Arc::new(UnavailablePidCorrelator),
+    )?;
+    let initial = service
+        .accessibility_correlation_snapshot_blocking(std::time::Duration::from_millis(250))?;
+    let target = initial
+        .windows
+        .iter()
+        .find(|window| window.window.xid == 42)
+        .ok_or("missing target")?
+        .window
+        .clone();
+    let other = initial
+        .windows
+        .iter()
+        .find(|window| window.window.xid == 43)
+        .ok_or("missing other window")?
+        .window
+        .clone();
+
+    let effects = Arc::new(AtomicUsize::new(0));
+    let handler_effects = Arc::clone(&effects);
+    let handler = Arc::new(
+        move |request: xenoteer_x11::RawWindowControlRequest,
+              revalidate: crate::control_plane::WindowControlRevalidator,
+              _timeout: std::time::Duration| {
+            revalidate().map_err(|_| WindowControlBackendError::ReplyUnavailable)?;
+            handler_effects.fetch_add(1, Ordering::AcqRel);
+            Ok(RawWindowControlEvidence {
+                requested: request,
+                outcome: RawWindowControlOutcome::Converged,
+                observed: RawWindowControlObservation::State(RawWindowBooleanObservation::Disabled),
+                capabilities: None,
+                warnings: Vec::new(),
+            })
+        },
+    );
+    let runtime = WindowControlRuntime::new_scripted(Arc::clone(&service), handler);
+    let control = std::thread::spawn(move || {
+        runtime.execute_window_control_for_test(Command::WindowSetState(WindowSetStateCommand {
+            window: target,
+            state: WindowManagerState::Above,
+            desired: true,
+        }))
+    });
+
+    gate.wait_until_submitted();
+    let (revalidation_response, revalidation_receiver) = std::sync::mpsc::sync_channel(1);
+    service.submit(ModelRequest::Revalidate {
+        window: other.clone(),
+        response: revalidation_response,
+    })?;
+    gate.release();
+
+    assert!(
+        control
+            .join()
+            .map_err(|_| "window control thread panicked")?
+            .is_none()
+    );
+    assert_eq!(effects.load(Ordering::Acquire), 1);
+    assert!(matches!(
+        revalidation_receiver.recv_timeout(std::time::Duration::from_secs(2))?,
+        Err(ControlPlaneError::NotFound | ControlPlaneError::StaleReference { .. })
+    ));
+    let recovered =
+        service.accessibility_correlation_snapshot_blocking(std::time::Duration::from_secs(2))?;
+    assert_eq!(recovered.windows.len(), 1);
+    assert_eq!(recovered.windows[0].window.xid, other.xid);
+    assert_ne!(recovered.windows[0].window, other);
+
+    shutdown.request();
+    assert_eq!(join.join(), ObservationServiceExit::Stopped);
+    Ok(())
+}
+
+#[test]
+fn stable_request_failure_reconcile_timeout_defers_a_fresh_remint() -> Result<(), Box<dyn Error>> {
+    use crate::control_plane::{WindowControlBackendError, WindowControlRuntime};
+    use xenoteer_protocol::{Command, WindowManagerState, WindowSetStateCommand};
+    use xenoteer_x11::{
+        RawWindowBooleanObservation, RawWindowControlEvidence, RawWindowControlObservation,
+        RawWindowControlOutcome,
+    };
+
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let state = Arc::new(Mutex::new(MutableWindowBackendState {
+        windows: BTreeMap::from([(42, titled_raw(42, 101, "Original")?)]),
+        events: VecDeque::new(),
+        transitions_after_snapshot: VecDeque::new(),
+    }));
+    let (service, shutdown, join) = spawn_model_actor_with_correlator(
+        Box::new(RequestFailedSlowReconcileBackend {
+            state: Arc::clone(&state),
+            reconcile_calls: 0,
+        }),
+        desktop_id,
+        generation,
+        WindowModelLimits::default(),
+        ObservationServiceSettings::for_test(),
+        Arc::new(UnavailablePidCorrelator),
+    )?;
+    let old = service
+        .accessibility_correlation_snapshot_blocking(std::time::Duration::from_millis(250))?
+        .windows[0]
+        .window
+        .clone();
+
+    let effects = Arc::new(AtomicUsize::new(0));
+    let handler_effects = Arc::clone(&effects);
+    let handler_state = Arc::clone(&state);
+    let handler = Arc::new(
+        move |request: xenoteer_x11::RawWindowControlRequest,
+              revalidate: crate::control_plane::WindowControlRevalidator,
+              _timeout: std::time::Duration| {
+            revalidate().map_err(|_| WindowControlBackendError::ReplyUnavailable)?;
+            handler_effects.fetch_add(1, Ordering::AcqRel);
+            handler_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .windows
+                .insert(
+                    request.target,
+                    titled_raw(request.target, 202, "Replacement")
+                        .map_err(|_| WindowControlBackendError::ReplyUnavailable)?,
+                );
+            Ok(RawWindowControlEvidence {
+                requested: request,
+                outcome: RawWindowControlOutcome::Converged,
+                observed: RawWindowControlObservation::State(RawWindowBooleanObservation::Enabled),
+                capabilities: None,
+                warnings: Vec::new(),
+            })
+        },
+    );
+    let runtime = WindowControlRuntime::new_scripted(Arc::clone(&service), handler);
+
+    assert!(
+        runtime
+            .execute_window_control_for_test(Command::WindowSetState(WindowSetStateCommand {
+                window: old.clone(),
+                state: WindowManagerState::Above,
+                desired: true,
+            }))
+            .is_none()
+    );
+    assert_eq!(effects.load(Ordering::Acquire), 1);
+    let mut recovered =
+        service.accessibility_correlation_snapshot_blocking(std::time::Duration::from_secs(2))?;
+    if recovered.windows.is_empty() {
+        recovered = service
+            .accessibility_correlation_snapshot_blocking(std::time::Duration::from_secs(2))?;
+    }
+    assert_eq!(recovered.windows.len(), 1);
+    assert_ne!(recovered.windows[0].window, old);
+    assert_eq!(recovered.windows[0].process.reported_pid, Some(202));
+
+    shutdown.request();
+    assert_eq!(join.join(), ObservationServiceExit::Stopped);
+    Ok(())
+}
+
+#[test]
+fn stable_request_failure_remints_a_same_xid_replacement() -> Result<(), Box<dyn Error>> {
+    use crate::control_plane::{WindowControlBackendError, WindowControlRuntime};
+    use xenoteer_protocol::{Command, WindowManagerState, WindowSetStateCommand};
+    use xenoteer_x11::{
+        RawWindowBooleanObservation, RawWindowControlEvidence, RawWindowControlObservation,
+        RawWindowControlOutcome,
+    };
+
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let state = Arc::new(Mutex::new(MutableWindowBackendState {
+        windows: BTreeMap::from([(42, titled_raw(42, 101, "Original")?)]),
+        events: VecDeque::new(),
+        transitions_after_snapshot: VecDeque::new(),
+    }));
+    let (service, shutdown, join) = spawn_model_actor_with_correlator(
+        Box::new(MutableWindowBackend {
+            state: Arc::clone(&state),
+        }),
+        desktop_id,
+        generation,
+        WindowModelLimits::default(),
+        ObservationServiceSettings::for_test(),
+        Arc::new(UnavailablePidCorrelator),
+    )?;
+    let old = service
+        .accessibility_correlation_snapshot_blocking(std::time::Duration::from_millis(250))?
+        .windows[0]
+        .window
+        .clone();
+    let replacement = titled_raw(42, 202, "Replacement after failed read")?;
+    let effects = Arc::new(AtomicUsize::new(0));
+    let handler_state = Arc::clone(&state);
+    let handler_effects = Arc::clone(&effects);
+    let handler = Arc::new(
+        move |request: xenoteer_x11::RawWindowControlRequest,
+              revalidate: crate::control_plane::WindowControlRevalidator,
+              _timeout: std::time::Duration| {
+            revalidate().map_err(|_| WindowControlBackendError::ReplyUnavailable)?;
+            handler_effects.fetch_add(1, Ordering::AcqRel);
+            let mut state = handler_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.windows.clear();
+            state
+                .transitions_after_snapshot
+                .push_back(MutableSnapshotTransition {
+                    windows: BTreeMap::from([(request.target, replacement.clone())]),
+                    events: VecDeque::new(),
+                });
+            Ok(RawWindowControlEvidence {
+                requested: request,
+                outcome: RawWindowControlOutcome::Converged,
+                observed: RawWindowControlObservation::State(RawWindowBooleanObservation::Enabled),
+                capabilities: None,
+                warnings: Vec::new(),
+            })
+        },
+    );
+    let runtime = WindowControlRuntime::new_scripted(Arc::clone(&service), handler);
+
+    assert!(
+        runtime
+            .execute_window_control_for_test(Command::WindowSetState(WindowSetStateCommand {
+                window: old.clone(),
+                state: WindowManagerState::Above,
+                desired: true,
+            }))
+            .is_none()
+    );
+    assert_eq!(effects.load(Ordering::Acquire), 1);
+    assert!(
+        service
+            .snapshot_exact_blocking(old.clone(), std::time::Duration::from_millis(250))
+            .is_err()
+    );
+    let current = service
+        .accessibility_correlation_snapshot_blocking(std::time::Duration::from_millis(250))?;
+    assert_eq!(current.windows.len(), 1);
+    assert_ne!(current.windows[0].window, old);
+    assert_eq!(current.windows[0].window.xid, 42);
+    assert_eq!(current.windows[0].process.reported_pid, Some(202));
+
+    shutdown.request();
+    assert_eq!(join.join(), ObservationServiceExit::Stopped);
+    Ok(())
+}
+
+#[test]
+fn window_state_event_work_coalesces_to_resync_without_poisoning_the_model_actor()
+-> Result<(), Box<dyn Error>> {
+    use crate::control_plane::{WindowControlBackendError, WindowControlRuntime};
+    use xenoteer_protocol::{Command, WindowManagerState, WindowSetStateCommand};
+    use xenoteer_x11::{
+        RawWindowBooleanObservation, RawWindowControlEvidence, RawWindowControlObservation,
+        RawWindowControlOutcome, WindowRefresh,
+    };
+
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let state = Arc::new(Mutex::new(MutableWindowBackendState {
+        windows: BTreeMap::from([(42, titled_raw(42, 101, "Original")?)]),
+        events: VecDeque::new(),
+        transitions_after_snapshot: VecDeque::new(),
+    }));
+    let (service, shutdown, join) = spawn_model_actor_with_correlator(
+        Box::new(MutableWindowBackend {
+            state: Arc::clone(&state),
+        }),
+        desktop_id,
+        generation,
+        WindowModelLimits::default(),
+        ObservationServiceSettings::for_test(),
+        Arc::new(UnavailablePidCorrelator),
+    )?;
+    let old = service
+        .accessibility_correlation_snapshot_blocking(std::time::Duration::from_millis(250))?
+        .windows[0]
+        .window
+        .clone();
+    let replacement = titled_raw(42, 202, "Replacement after coalesced churn")?;
+    let effects = Arc::new(AtomicUsize::new(0));
+    let handler_state = Arc::clone(&state);
+    let handler_effects = Arc::clone(&effects);
+    let handler = Arc::new(
+        move |request: xenoteer_x11::RawWindowControlRequest,
+              revalidate: crate::control_plane::WindowControlRevalidator,
+              _timeout: std::time::Duration| {
+            revalidate().map_err(|_| WindowControlBackendError::ReplyUnavailable)?;
+            handler_effects.fetch_add(1, Ordering::AcqRel);
+            let mut state = handler_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for index in 0..=MAX_SNAPSHOT_BARRIER_EVENT_WORK {
+                state
+                    .transitions_after_snapshot
+                    .push_back(MutableSnapshotTransition {
+                        windows: if index == MAX_SNAPSHOT_BARRIER_EVENT_WORK / 2 {
+                            BTreeMap::from([(request.target, replacement.clone())])
+                        } else {
+                            BTreeMap::new()
+                        },
+                        events: VecDeque::from([ObservationActorEvent::Reconcile {
+                            decision: ReconcileDecision::RefreshWindow {
+                                window: request.target,
+                                refresh: WindowRefresh::State,
+                            },
+                        }]),
+                    });
+            }
+            Ok(RawWindowControlEvidence {
+                requested: request,
+                outcome: RawWindowControlOutcome::Converged,
+                observed: RawWindowControlObservation::State(RawWindowBooleanObservation::Enabled),
+                capabilities: None,
+                warnings: Vec::new(),
+            })
+        },
+    );
+    let runtime = WindowControlRuntime::new_scripted(Arc::clone(&service), handler);
+
+    assert!(
+        runtime
+            .execute_window_control_for_test(Command::WindowSetState(WindowSetStateCommand {
+                window: old.clone(),
+                state: WindowManagerState::Above,
+                desired: true,
+            }))
+            .is_none()
+    );
+    assert_eq!(effects.load(Ordering::Acquire), 1);
+    assert!(
+        service
+            .snapshot_exact_blocking(old.clone(), std::time::Duration::from_millis(250))
+            .is_err()
+    );
+    let recovered = service
+        .accessibility_correlation_snapshot_blocking(std::time::Duration::from_millis(250))?;
+    assert_eq!(recovered.windows.len(), 1);
+    assert_ne!(recovered.windows[0].window, old);
+    assert_eq!(recovered.windows[0].process.reported_pid, Some(202));
+
+    shutdown.request();
+    assert_eq!(join.join(), ObservationServiceExit::Stopped);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nested_refresh_barrier_never_publishes_replacement_under_the_old_birth()
+-> Result<(), Box<dyn Error>> {
+    use crate::control_plane::{WindowControlBackendError, WindowControlRuntime};
+    use xenoteer_protocol::{Command, WindowManagerState, WindowSetStateCommand};
+    use xenoteer_x11::{
+        ObservedAtom, RawWindowBooleanObservation, RawWindowControlEvidence,
+        RawWindowControlObservation, RawWindowControlOutcome, WindowRefresh,
+    };
+
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let state = Arc::new(Mutex::new(MutableWindowBackendState {
+        windows: BTreeMap::from([(42, titled_raw(42, 101, "Original")?)]),
+        events: VecDeque::new(),
+        transitions_after_snapshot: VecDeque::new(),
+    }));
+    let sink = Arc::new(RecordingWindowEventSink::default());
+    let (service, shutdown, join) = spawn_model_actor_with_components(
+        Box::new(MutableWindowBackend {
+            state: Arc::clone(&state),
+        }),
+        desktop_id,
+        generation,
+        WindowModelLimits::default(),
+        ObservationServiceSettings::for_test(),
+        Arc::new(UnavailablePidCorrelator),
+        sink.clone(),
+    )?;
+    let window = service
+        .accessibility_correlation_snapshot_blocking(std::time::Duration::from_millis(250))?
+        .windows[0]
+        .window
+        .clone();
+    sink.take();
+
+    let mut old_effect = titled_raw(42, 101, "Old effect snapshot")?;
+    let mut replacement = titled_raw(42, 202, "Replacement")?;
+    replacement.attributes.map_state = WindowMapState::Unmapped;
+    for snapshot in [&mut old_effect, &mut replacement] {
+        snapshot.properties.states.push(ObservedAtom {
+            id: 10_000 + KnownAtom::NetWmStateFullscreen as u32,
+            known: Some(KnownAtom::NetWmStateFullscreen),
+        });
+    }
+    let effects = Arc::new(AtomicUsize::new(0));
+    let waiter_service = Arc::clone(&service);
+    let waiter_window = window.clone();
+    let waiter = tokio::spawn(async move {
+        waiter_service
+            .wait_for_principal(
+                "old-birth-waiter".to_owned(),
+                WindowWaitRequest {
+                    desktop_id,
+                    desktop_generation: generation,
+                    target: WindowWaitTarget::Reference {
+                        window: waiter_window,
+                    },
+                    predicate: WindowWaitPredicate::MapState {
+                        state: WindowMapState::Unmapped,
+                    },
+                    after_revision: None,
+                    timeout_ms: 1_000,
+                },
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    service.accessibility_correlation_snapshot_blocking(std::time::Duration::from_millis(250))?;
+    let handler_state = Arc::clone(&state);
+    let handler_effects = Arc::clone(&effects);
+    let handler = Arc::new(
+        move |request: xenoteer_x11::RawWindowControlRequest,
+              revalidate: crate::control_plane::WindowControlRevalidator,
+              _timeout: std::time::Duration| {
+            revalidate().map_err(|_| WindowControlBackendError::ReplyUnavailable)?;
+            handler_effects.fetch_add(1, Ordering::AcqRel);
+            let mut state = handler_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.windows.insert(request.target, old_effect.clone());
+            state.transitions_after_snapshot.extend([
+                MutableSnapshotTransition {
+                    windows: BTreeMap::from([(request.target, replacement.clone())]),
+                    events: VecDeque::from([ObservationActorEvent::Reconcile {
+                        decision: ReconcileDecision::RefreshWindow {
+                            window: request.target,
+                            refresh: WindowRefresh::State,
+                        },
+                    }]),
+                },
+                MutableSnapshotTransition {
+                    windows: BTreeMap::new(),
+                    events: VecDeque::from([
+                        ObservationActorEvent::Reconcile {
+                            decision: ReconcileDecision::RemoveWindow {
+                                window: request.target,
+                            },
+                        },
+                        ObservationActorEvent::Reconcile {
+                            decision: ReconcileDecision::ObserveWindow {
+                                window: request.target,
+                            },
+                        },
+                    ]),
+                },
+            ]);
+            Ok(RawWindowControlEvidence {
+                requested: request,
+                outcome: RawWindowControlOutcome::Converged,
+                observed: RawWindowControlObservation::State(RawWindowBooleanObservation::Enabled),
+                capabilities: None,
+                warnings: Vec::new(),
+            })
+        },
+    );
+    let runtime = WindowControlRuntime::new_scripted(Arc::clone(&service), handler);
+
+    assert!(
+        runtime
+            .execute_window_control_for_test(Command::WindowSetState(WindowSetStateCommand {
+                window,
+                state: WindowManagerState::Fullscreen,
+                desired: true,
+            }))
+            .is_none()
+    );
+    assert_eq!(effects.load(Ordering::Acquire), 1);
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+        .await
+        .map_err(|_| "old-birth waiter did not settle")???;
+    assert_ne!(waited.status, WindowWaitStatus::Matched);
+    assert_eq!(waited.status, WindowWaitStatus::TargetVanished);
+    let events = sink.take();
+    assert!(
+        events
+            .iter()
+            .all(|event| event.topic.as_str() != WINDOW_CHANGED_TOPIC),
+        "replacement bytes were transiently published under the stale birth"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.topic.as_str() == WINDOW_DESTROYED_TOPIC)
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.topic.as_str() == WINDOW_CREATED_TOPIC)
+    );
+
+    shutdown.request();
+    assert_eq!(join.join(), ObservationServiceExit::Stopped);
+    Ok(())
+}
+
 #[tokio::test]
 async fn relayed_process_exit_invalidates_stale_managed_process_selector_truth()
 -> Result<(), Box<dyn Error>> {
@@ -1746,6 +3161,7 @@ async fn transient_stale_match_rewaits_for_a_later_real_match_before_same_deadli
     let backend_state = Arc::new(Mutex::new(MutableWindowBackendState {
         windows: BTreeMap::from([(42, titled_raw(42, 101, "Managed editor")?)]),
         events: VecDeque::new(),
+        transitions_after_snapshot: VecDeque::new(),
     }));
     let correlator = Arc::new(ControlledPidCorrelator::new(Ok(vec![leader(101, managed)])));
     let (service, shutdown, join) = spawn_model_actor_with_correlator(
@@ -1828,6 +3244,7 @@ async fn multi_window_reconcile_crossing_wait_deadline_cannot_publish_a_late_mat
             (43, titled_raw(43, 102, "also absent")?),
         ]),
         events: VecDeque::new(),
+        transitions_after_snapshot: VecDeque::new(),
     }));
     let delay_ms = Arc::new(AtomicU64::new(0));
     let settings = ObservationServiceSettings::new(

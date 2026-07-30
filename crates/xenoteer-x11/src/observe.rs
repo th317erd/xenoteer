@@ -21,7 +21,8 @@ pub use actor::{
     ObservationActorEvent, ObservationActorEventReceiver, ObservationActorExit,
     ObservationActorFailure, ObservationActorFailureKind, ObservationActorHandle,
     ObservationActorHealth, ObservationActorJoin, ObservationActorState,
-    ObservationActorSubmitError, ObservationReply, spawn_observation_actor,
+    ObservationActorSubmitError, ObservationReply, ObservationSnapshotBarrier,
+    ObservationSnapshotOutcome, spawn_observation_actor,
 };
 pub use atoms::KnownAtom;
 pub use damage::{

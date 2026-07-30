@@ -45,10 +45,11 @@ pub use observe::{
     ObservationActorFailureKind, ObservationActorHandle, ObservationActorHealth,
     ObservationActorJoin, ObservationActorState, ObservationActorSubmitError,
     ObservationEventReceiver, ObservationPollHandle, ObservationPollThread, ObservationReply,
-    ObservedAtom, ObservedPropertyWarning, PollThreadEvent, PropertyWarning, ReconcileDecision,
-    RootDamageBatch, RootDamageCoverage, RootDamageHint, RootDamageRect, RootGeometryInput,
-    RootInventory, RootWindowEvidenceInput, WindowAttributeInput, WindowPropertyInput,
-    WindowRefresh, WindowSnapshotInput, spawn_observation_actor,
+    ObservationSnapshotBarrier, ObservationSnapshotOutcome, ObservedAtom, ObservedPropertyWarning,
+    PollThreadEvent, PropertyWarning, ReconcileDecision, RootDamageBatch, RootDamageCoverage,
+    RootDamageHint, RootDamageRect, RootGeometryInput, RootInventory, RootWindowEvidenceInput,
+    WindowAttributeInput, WindowPropertyInput, WindowRefresh, WindowSnapshotInput,
+    spawn_observation_actor,
 };
 pub use window_control::{
     DEFAULT_WINDOW_CONTROL_REQUEST_CAPACITY, MAX_WINDOW_CONTROL_TIMEOUT,

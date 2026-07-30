@@ -28,7 +28,7 @@ pub const DEFAULT_OBSERVATION_REQUEST_CAPACITY: usize = 128;
 pub const DEFAULT_OBSERVATION_EVENT_CAPACITY: usize = 256;
 
 const MAX_CONTROL_WAITERS: usize = 64;
-const MAX_EVENTS_PER_TURN: usize = 64;
+pub(super) const MAX_EVENTS_PER_TURN: usize = 64;
 const EVENT_POLL_BACKSTOP: Duration = Duration::from_millis(25);
 
 /// Observable lifecycle state of the observation actor.
@@ -134,6 +134,25 @@ impl<T> ObservationReply<T> {
     }
 }
 
+/// Snapshot captured behind one bounded observation-event ordering barrier.
+#[derive(Clone, Debug)]
+pub struct ObservationSnapshotBarrier {
+    /// Snapshot read outcome captured before the post-round-trip event drain.
+    pub outcome: ObservationSnapshotOutcome,
+    /// Whether the bounded drain reached an empty backend event queue without
+    /// leaving an overflow/resync marker latched in the actor.
+    pub stable: bool,
+}
+
+/// Nonterminal result of a snapshot barrier request.
+#[derive(Clone, Debug)]
+pub enum ObservationSnapshotOutcome {
+    /// The requested XID produced a snapshot.
+    Snapshot(Box<WindowSnapshotInput>),
+    /// The XID vanished or rejected the bounded snapshot request.
+    RequestFailed,
+}
+
 /// Bounded event emitted by the actor after pure reconciliation classification.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ObservationActorEvent {
@@ -195,6 +214,19 @@ impl ObservationActorHandle {
     {
         let (reply, receiver) = mpsc::sync_channel(1);
         self.try_send(ObservationRequest::Snapshot { window, reply })?;
+        Ok(ObservationReply { receiver })
+    }
+
+    /// Attempt a snapshot whose reply follows one bounded event drain.
+    pub fn try_snapshot_barrier(
+        &self,
+        window: Window,
+    ) -> std::result::Result<
+        ObservationReply<ObservationSnapshotBarrier>,
+        ObservationActorSubmitError,
+    > {
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.try_send(ObservationRequest::SnapshotBarrier { window, reply })?;
         Ok(ObservationReply { receiver })
     }
 
@@ -648,6 +680,10 @@ enum ObservationRequest {
         window: Window,
         reply: SyncSender<std::result::Result<WindowSnapshotInput, ObservationActorFailure>>,
     },
+    SnapshotBarrier {
+        window: Window,
+        reply: SyncSender<std::result::Result<ObservationSnapshotBarrier, ObservationActorFailure>>,
+    },
     Reconcile {
         reply: SyncSender<std::result::Result<RootInventory, ObservationActorFailure>>,
     },
@@ -660,6 +696,9 @@ impl ObservationRequest {
     fn fail(self, kind: ObservationActorFailureKind) {
         match self {
             Self::Snapshot { reply, .. } => {
+                let _ignored = reply.send(Err(ObservationActorFailure::new(kind)));
+            }
+            Self::SnapshotBarrier { reply, .. } => {
                 let _ignored = reply.send(Err(ObservationActorFailure::new(kind)));
             }
             Self::Reconcile { reply } => {
@@ -752,7 +791,8 @@ fn run_actor<B: ObservationBackend>(
         match ordinary.try_recv() {
             Ok(request) => {
                 did_work = true;
-                if let RequestFlow::Poison(failure) = process_request(&mut backend, request, health)
+                if let RequestFlow::Poison(failure) =
+                    process_request(&mut backend, request, &mut emitter, &mut damage, health)
                 {
                     return poison(&ordinary, &mut emitter, control, health, accepting, failure);
                 }
@@ -817,6 +857,8 @@ fn process_event<B: ObservationBackend>(
 fn process_request<B: ObservationBackend>(
     backend: &mut B,
     request: ObservationRequest,
+    emitter: &mut ActorEventEmitter,
+    damage: &mut DamageAccumulator,
     health: &RwLock<ObservationActorHealth>,
 ) -> RequestFlow {
     match request {
@@ -824,6 +866,25 @@ fn process_request<B: ObservationBackend>(
             let result = backend.snapshot(window);
             finish_request(result, reply, health)
         }
+        ObservationRequest::SnapshotBarrier { window, reply } => match backend.snapshot(window) {
+            Ok(snapshot) => finish_snapshot_barrier(
+                backend,
+                ObservationSnapshotOutcome::Snapshot(Box::new(snapshot)),
+                reply,
+                emitter,
+                damage,
+                health,
+            ),
+            Err(fault) if fault.terminal => finish_fault(fault, reply, health),
+            Err(_) => finish_snapshot_barrier(
+                backend,
+                ObservationSnapshotOutcome::RequestFailed,
+                reply,
+                emitter,
+                damage,
+                health,
+            ),
+        },
         ObservationRequest::Reconcile { reply } => {
             let result = backend.reconcile();
             finish_request(result, reply, health)
@@ -837,6 +898,65 @@ fn process_request<B: ObservationBackend>(
             Err(fault) => finish_fault(fault, reply, health),
         },
     }
+}
+
+fn finish_snapshot_barrier<B: ObservationBackend>(
+    backend: &mut B,
+    outcome: ObservationSnapshotOutcome,
+    reply: SyncSender<std::result::Result<ObservationSnapshotBarrier, ObservationActorFailure>>,
+    emitter: &mut ActorEventEmitter,
+    damage: &mut DamageAccumulator,
+    health: &RwLock<ObservationActorHealth>,
+) -> RequestFlow {
+    let mut reached_empty = false;
+    for _ in 0..MAX_EVENTS_PER_TURN {
+        match backend.poll_event() {
+            Ok(Some(PollThreadEvent::RootDamage { hint })) => {
+                damage.offer(hint, Instant::now());
+            }
+            Ok(Some(event)) => {
+                if let RequestFlow::Poison(failure) = process_event(backend, event, emitter) {
+                    return finish_snapshot_barrier_poison(failure, reply, health);
+                }
+            }
+            Ok(None) => {
+                reached_empty = true;
+                break;
+            }
+            Err(fault) if fault.terminal => {
+                return finish_fault(fault, reply, health);
+            }
+            Err(fault) => {
+                emitter.offer(ObservationActorEvent::Failed {
+                    failure: ObservationActorFailure::new(fault.kind),
+                });
+                break;
+            }
+        }
+    }
+    if let Some(batch) = damage.take_due(Instant::now()) {
+        emitter.offer(ObservationActorEvent::RootDamaged { damage: batch });
+    }
+    emitter.flush_resync();
+    let stable = reached_empty && !emitter.has_pending_barrier();
+    if matches!(outcome, ObservationSnapshotOutcome::Snapshot(_)) {
+        complete_request(health);
+    }
+    let _ignored = reply.send(Ok(ObservationSnapshotBarrier { outcome, stable }));
+    RequestFlow::Continue
+}
+
+fn finish_snapshot_barrier_poison(
+    failure: ObservationActorFailure,
+    reply: SyncSender<std::result::Result<ObservationSnapshotBarrier, ObservationActorFailure>>,
+    health: &RwLock<ObservationActorHealth>,
+) -> RequestFlow {
+    let mut snapshot = write_lock(health);
+    snapshot.state = ObservationActorState::Poisoned;
+    snapshot.last_failure = Some(failure.kind);
+    drop(snapshot);
+    let _ignored = reply.send(Err(failure));
+    RequestFlow::Poison(failure)
 }
 
 fn finish_request<T>(
@@ -975,6 +1095,10 @@ impl ActorEventEmitter {
             Ok(()) | Err(TrySendError::Disconnected(_)) => self.full_damage_latched = false,
             Err(TrySendError::Full(_)) => {}
         }
+    }
+
+    const fn has_pending_barrier(&self) -> bool {
+        self.resync_latched || self.full_damage_latched
     }
 
     fn latch_resync(&mut self) {

@@ -170,6 +170,25 @@ Plan: `plans/15-phased-implementation.md`
     - [x] Preserve the ordinary-handler cutoff, command-wait clamp, exact route
           classification, cancellation, response limits, and TypeScript's
           existing per-operation deadline behavior
+  - [x] Close the cross-connection window-state handoff race exposed by the
+        coherent-image Phase-4 lane
+    - [x] Reproduce fail-first when the raw X11 control connection observes
+          converged iconification before the observation/model actor commits
+          the matching hidden state
+    - [x] Reconcile state/minimize postconditions through the exact
+          actor-owned WindowRef without replaying the effect, while preserving
+          bounded genuine-nonconvergence and stale-reference behavior
+    - [x] Prove the observation actor's bounded snapshot barrier orders both
+          successful and nonterminal-failed snapshot round trips behind emitted
+          X11 events, including exact event-budget and overflow/resync cases
+    - [x] Prevent an event-driven refresh immediately before Destroy/reuse from
+          publishing replacement bytes or waking a waiter under the old birth;
+          cover unrelated-event instability without dropping the original
+          refresh
+    - [x] Run focused, workspace, native-X11, and independent review gates
+  - [x] Build and exercise diagnostic coherent candidates at source `0c7f9ff`;
+        reject them after the first Phase-4 live run exposed the handoff race
+        even though the controlled rerun and all other live lanes passed
   - [ ] Build the final coherent Phase 6 image, run the gate against its exact
         immutable ID, and record only that successful image/package identity
 - [ ] Complete Phase 6 closure review, update implementation details, and commit

@@ -47,8 +47,8 @@ use xenoteer_server::{
     ControlPlaneError, ControlRequestContext, Grant, ObservationFuture, ObservationPlane,
 };
 use xenoteer_x11::{
-    FocusAncestryStatus, KnownAtom, MAX_SNAPSHOT_INPUT_WARNINGS, ObservedAtom,
-    ObservedPropertyWarning, PropertyWarning, WindowSnapshotInput,
+    FocusAncestryStatus, KnownAtom, MAX_SNAPSHOT_INPUT_WARNINGS, ObservationSnapshotOutcome,
+    ObservedAtom, ObservedPropertyWarning, PropertyWarning, WindowSnapshotInput,
 };
 use xenoteer_x11::{
     InventorySource, InventoryWarning, MAX_ROOT_WINDOWS, ObservationActorEvent,
@@ -67,6 +67,7 @@ const MAX_TOKEN_MINT_ATTEMPTS: usize = 16;
 /// Maximum total time advisory process correlation may add to one response.
 const PROCESS_CORRELATION_TOTAL_TIMEOUT: Duration = Duration::from_millis(250);
 const PROCESS_CORRELATION_REFRESH_ATTEMPTS: usize = 3;
+const MAX_SNAPSHOT_BARRIER_EVENT_WORK: usize = 512;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ProcessCorrelationFence {
@@ -1506,6 +1507,7 @@ struct ModelState {
     process_correlation_available: bool,
     model_changes: Option<Arc<ProcessCorrelationModelChanges>>,
     process_lifecycle_authority: Arc<ProcessLifecycleAuthority>,
+    raw_resync_pending: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1561,6 +1563,7 @@ impl ModelState {
             process_correlation_available: false,
             model_changes: None,
             process_lifecycle_authority: Arc::new(ProcessLifecycleAuthority::new()),
+            raw_resync_pending: false,
         })
     }
 
@@ -1597,6 +1600,26 @@ impl ModelState {
             self.desktop_generation,
             damage,
         ));
+    }
+
+    fn invalidate_for_pending_resync(
+        &mut self,
+        now: MonotonicMillis,
+    ) -> Result<(), ObservationAdapterError> {
+        self.events.require_resync();
+        self.reconcile_raw_with_event_policy(
+            &RootInventory {
+                windows: Vec::new(),
+                source: InventorySource::QueryTreeFallback,
+                warnings: Vec::new(),
+            },
+            &[],
+            now,
+            ReconcileIdentityPolicy::InvalidateAll,
+            ReconcileEventPolicy::Rebuilt(WindowModelRebuildReason::EventOverflow),
+        )?;
+        self.raw_resync_pending = true;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -2146,6 +2169,9 @@ impl ModelState {
         snapshot.has_accessibility_application = previous
             .as_ref()
             .is_some_and(|snapshot| snapshot.has_accessibility_application);
+        if previous.as_ref() == Some(&snapshot) {
+            return Ok(());
+        }
         let change = self
             .model
             .observe(snapshot, now)
@@ -2211,6 +2237,17 @@ impl ModelState {
             &previous,
         );
         Ok(())
+    }
+
+    fn remove_exact(
+        &mut self,
+        window: &WindowRef,
+        now: MonotonicMillis,
+    ) -> Result<(), ObservationAdapterError> {
+        self.model
+            .resolve_exact(window, now)
+            .map_err(|_| ObservationAdapterError::Model)?;
+        self.remove_xid(window.xid, now)
     }
 
     fn list(
@@ -3908,6 +3945,49 @@ impl DaemonObservationService {
         Ok(snapshot)
     }
 
+    /// Refreshes one exact live birth from the raw observation owner.
+    ///
+    /// Window control uses this after state-changing raw evidence so a delayed
+    /// event handoff between the independent control and observation X11
+    /// connections cannot publish a stale pre-effect model snapshot.
+    pub(crate) fn refresh_exact_blocking(
+        &self,
+        window: WindowRef,
+        timeout: Duration,
+    ) -> Result<WindowSnapshot, ControlPlaneError> {
+        if timeout.is_zero() || window.validate_shape().is_err() {
+            return Err(ControlPlaneError::InvalidRequest);
+        }
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or(ControlPlaneError::InvalidRequest)?;
+        let lifecycle_authority = self.process_lifecycle_authority.capture();
+        let (response, receiver) = mpsc::sync_channel(1);
+        self.submit(ModelRequest::RefreshExact {
+            window,
+            deadline,
+            response,
+        })?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(ControlPlaneError::CapabilityUnavailable)?;
+        let mut snapshot = receiver
+            .recv_timeout(remaining)
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected => {
+                    ControlPlaneError::CapabilityUnavailable
+                }
+            })??;
+        if !self
+            .process_lifecycle_authority
+            .accepts(lifecycle_authority)
+        {
+            snapshot.process = baseline_process_correlation(snapshot.process.reported_pid);
+        }
+        Ok(snapshot)
+    }
+
     /// Reads fresh bounded stacking evidence for one exact target birth.
     ///
     /// Raw events are drained before this model request. The synchronous seam is
@@ -4371,6 +4451,11 @@ enum ModelRequest {
         window: WindowRef,
         response: SyncSender<Result<WindowSnapshot, ControlPlaneError>>,
     },
+    RefreshExact {
+        window: WindowRef,
+        deadline: Instant,
+        response: SyncSender<Result<WindowSnapshot, ControlPlaneError>>,
+    },
     AccessibilityCorrelationSnapshot {
         response: oneshot::Sender<Result<ObservationCorrelationSnapshot, ControlPlaneError>>,
     },
@@ -4424,6 +4509,9 @@ impl ModelRequest {
                 let _ = response.send(Err(error));
             }
             Self::InternalSnapshot { response, .. } => {
+                let _ = response.send(Err(error));
+            }
+            Self::RefreshExact { response, .. } => {
                 let _ = response.send(Err(error));
             }
             Self::AccessibilityCorrelationSnapshot { response } => {
@@ -4748,6 +4836,36 @@ fn run_model_actor(
         let now = monotonic_now(epoch);
         process_waiters(&mut state, &mut waiters, now);
         let mut did_work = false;
+        if state.raw_resync_pending {
+            let recovery_deadline = Instant::now()
+                .checked_add(settings.raw_request_timeout)
+                .unwrap_or_else(Instant::now);
+            let before_revision = state.model.revision();
+            let before_correlation_epoch = state.correlation_epoch;
+            match reconcile_from_backend_until(
+                &mut state,
+                backend.as_mut(),
+                &control,
+                &|| monotonic_now(epoch),
+                recovery_deadline,
+                ReconcileIdentityPolicy::InvalidateAll,
+                ReconcileEventPolicy::Rebuilt(WindowModelRebuildReason::EventOverflow),
+            ) {
+                Ok(()) => {
+                    did_work = true;
+                    state.raw_resync_pending = false;
+                    if state.model.revision() != before_revision
+                        || state.correlation_epoch != before_correlation_epoch
+                    {
+                        state.publish_model_change();
+                    }
+                    process_waiters(&mut state, &mut waiters, monotonic_now(epoch));
+                }
+                Err(error) => {
+                    tracing::warn!(?error, "deferred observation resync remains pending");
+                }
+            }
+        }
         for _ in 0..64 {
             if control.shutdown.load(Ordering::Acquire) {
                 break;
@@ -4809,13 +4927,55 @@ fn run_model_actor(
             match requests.try_recv() {
                 Ok(request) => {
                     did_work = true;
-                    process_model_request(
-                        &mut state,
-                        &mut waiters,
-                        request,
-                        monotonic_now(epoch),
-                        settings.max_waiters,
-                    );
+                    match request {
+                        ModelRequest::RefreshExact {
+                            window,
+                            deadline,
+                            response,
+                        } => {
+                            let result = refresh_exact_from_backend(
+                                &mut state,
+                                &mut waiters,
+                                backend.as_mut(),
+                                &control,
+                                &window,
+                                deadline,
+                                &|| monotonic_now(epoch),
+                            );
+                            match result {
+                                Ok(snapshot) => {
+                                    process_waiters(&mut state, &mut waiters, monotonic_now(epoch));
+                                    let _ = response.send(Ok(snapshot));
+                                }
+                                Err(RefreshExactFailure::Control(error)) => {
+                                    process_waiters(&mut state, &mut waiters, monotonic_now(epoch));
+                                    let _ = response.send(Err(error));
+                                }
+                                Err(RefreshExactFailure::Actor(error)) => {
+                                    tracing::error!(
+                                        ?error,
+                                        "post-effect observation barrier failed"
+                                    );
+                                    let _ = response
+                                        .send(Err(ControlPlaneError::CapabilityUnavailable));
+                                    fail_pending(
+                                        &requests,
+                                        &mut waiters,
+                                        ControlPlaneError::CapabilityUnavailable,
+                                    );
+                                    let _ = backend.shutdown(settings.raw_request_timeout);
+                                    return ObservationServiceExit::Poisoned;
+                                }
+                            }
+                        }
+                        request => process_model_request(
+                            &mut state,
+                            &mut waiters,
+                            request,
+                            monotonic_now(epoch),
+                            settings.max_waiters,
+                        ),
+                    }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -4939,6 +5099,11 @@ fn process_model_request(
                 .map(|resolved| resolved.snapshot)
                 .map_err(map_model_error);
             let _ = response.send(result);
+        }
+        ModelRequest::RefreshExact { response, .. } => {
+            // Refresh requests are intercepted by the model actor because
+            // they need exclusive access to its raw observation backend.
+            let _ = response.send(Err(ControlPlaneError::Internal));
         }
         ModelRequest::AccessibilityCorrelationSnapshot { response } => {
             let _ = response.send(state.correlation_snapshot(now));
@@ -5068,6 +5233,182 @@ fn fail_pending(
     }
 }
 
+enum RefreshExactFailure {
+    Control(ControlPlaneError),
+    Actor(ObservationAdapterError),
+}
+
+fn refresh_exact_from_backend(
+    state: &mut ModelState,
+    waiters: &mut Vec<PendingWait>,
+    backend: &mut dyn RawObservationBackend,
+    control: &ModelActorControl,
+    window: &WindowRef,
+    deadline: Instant,
+    now: &dyn Fn() -> MonotonicMillis,
+) -> Result<WindowSnapshot, RefreshExactFailure> {
+    let mut barrier_unsettled = false;
+    let captured = loop {
+        let remaining = refresh_exact_budget(state, waiters, deadline, barrier_unsettled, now)?;
+        if let Err(error) = state.model.resolve_exact(window, now()) {
+            return refresh_exact_control_failure(
+                state,
+                waiters,
+                barrier_unsettled,
+                now,
+                map_model_error(error),
+            );
+        }
+        barrier_unsettled = true;
+        let barrier = match backend.snapshot_barrier(window.xid, control, remaining) {
+            Ok(barrier) => barrier,
+            Err(_) => {
+                return refresh_exact_control_failure(
+                    state,
+                    waiters,
+                    barrier_unsettled,
+                    now,
+                    ControlPlaneError::CapabilityUnavailable,
+                );
+            }
+        };
+        refresh_exact_budget(state, waiters, deadline, barrier_unsettled, now)?;
+
+        // The snapshot reply is an observation-connection round-trip barrier.
+        // Any event visible after that barrier can advance the model beyond
+        // the captured bytes, so process it, revalidate the exact birth, and
+        // repeat instead of risking a rollback. The absolute deadline bounds
+        // this stabilization loop under a continuous event flood.
+        let mut drained = false;
+        loop {
+            refresh_exact_budget(state, waiters, deadline, barrier_unsettled, now)?;
+            match backend.try_event() {
+                Ok(Some(event)) => {
+                    drained = true;
+                    if let Err(error) = process_actor_event_until(
+                        state, waiters, backend, control, event, now, deadline,
+                    ) {
+                        coalesce_barrier_work_to_resync(state, waiters, now)
+                            .map_err(RefreshExactFailure::Actor)?;
+                        return Err(RefreshExactFailure::Actor(error));
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    coalesce_barrier_work_to_resync(state, waiters, now)
+                        .map_err(RefreshExactFailure::Actor)?;
+                    return Err(RefreshExactFailure::Actor(ObservationAdapterError::Model));
+                }
+            }
+        }
+        barrier_unsettled = !barrier.stable;
+        refresh_exact_budget(state, waiters, deadline, barrier_unsettled, now)?;
+        if let Err(error) = state.model.resolve_exact(window, now()) {
+            return refresh_exact_control_failure(
+                state,
+                waiters,
+                barrier_unsettled,
+                now,
+                map_model_error(error),
+            );
+        }
+        if !drained && barrier.stable {
+            break match barrier.outcome {
+                RawSnapshotOutcome::Snapshot(snapshot) => Ok(snapshot),
+                RawSnapshotOutcome::RequestFailed => Err(RawBackendFailure::RequestFailed),
+            };
+        }
+    };
+
+    let before_revision = state.model.revision();
+    let before_correlation_epoch = state.correlation_epoch;
+    let refresh = match captured {
+        Ok(input) if input.window == window.xid => {
+            refresh_exact_budget(state, waiters, deadline, barrier_unsettled, now)?;
+            state
+                .observe_raw(&input, now())
+                .map_err(RefreshExactFailure::Actor)
+        }
+        Ok(_) => Err(RefreshExactFailure::Actor(ObservationAdapterError::Model)),
+        Err(RawBackendFailure::RequestFailed) => {
+            state
+                .remove_exact(window, now())
+                .map_err(RefreshExactFailure::Actor)?;
+            barrier_unsettled = true;
+            refresh_exact_budget(state, waiters, deadline, barrier_unsettled, now)?;
+            match reconcile_from_backend_until(
+                state,
+                backend,
+                control,
+                now,
+                deadline,
+                ReconcileIdentityPolicy::PreserveContinuity,
+                ReconcileEventPolicy::Incremental,
+            ) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    if raw_event_budget(deadline).is_none() {
+                        refresh_exact_budget(state, waiters, deadline, barrier_unsettled, now)?;
+                        unreachable!("an exhausted refresh budget always returns an error");
+                    }
+                    Err(RefreshExactFailure::Actor(error))
+                }
+            }
+        }
+        Err(
+            RawBackendFailure::Unavailable
+            | RawBackendFailure::TimedOut
+            | RawBackendFailure::Stopped,
+        ) => Err(RefreshExactFailure::Control(
+            ControlPlaneError::CapabilityUnavailable,
+        )),
+    };
+    if state.model.revision() != before_revision
+        || state.correlation_epoch != before_correlation_epoch
+    {
+        state.publish_model_change();
+    }
+    refresh?;
+    state
+        .model
+        .resolve_exact(window, now())
+        .map(|resolved| resolved.snapshot)
+        .map_err(map_model_error)
+        .map_err(RefreshExactFailure::Control)
+}
+
+fn refresh_exact_budget(
+    state: &mut ModelState,
+    waiters: &mut Vec<PendingWait>,
+    deadline: Instant,
+    barrier_unsettled: bool,
+    now: &dyn Fn() -> MonotonicMillis,
+) -> Result<Duration, RefreshExactFailure> {
+    if let Some(remaining) = raw_event_budget(deadline) {
+        return Ok(remaining);
+    }
+    refresh_exact_control_failure(
+        state,
+        waiters,
+        barrier_unsettled,
+        now,
+        ControlPlaneError::CapabilityUnavailable,
+    )
+}
+
+fn refresh_exact_control_failure<T>(
+    state: &mut ModelState,
+    waiters: &mut Vec<PendingWait>,
+    barrier_unsettled: bool,
+    now: &dyn Fn() -> MonotonicMillis,
+    error: ControlPlaneError,
+) -> Result<T, RefreshExactFailure> {
+    if barrier_unsettled {
+        coalesce_barrier_work_to_resync(state, waiters, now).map_err(RefreshExactFailure::Actor)?;
+    }
+    Err(RefreshExactFailure::Control(error))
+}
+
 fn process_actor_event(
     state: &mut ModelState,
     waiters: &mut Vec<PendingWait>,
@@ -5077,24 +5418,13 @@ fn process_actor_event(
     now: &dyn Fn() -> MonotonicMillis,
     timeout: Duration,
 ) -> Result<(), ObservationAdapterError> {
-    let resync = matches!(&event, ObservationActorEvent::ResyncRequired);
-    let before_revision = state.model.revision();
-    let before_correlation_epoch = state.correlation_epoch;
-    process_raw_event(state, backend, control, event, now, timeout)?;
-    if state.model.revision() != before_revision
-        || state.correlation_epoch != before_correlation_epoch
-    {
-        state.publish_model_change();
-    }
-    let now = now();
-    if resync {
-        complete_resync_waiters(state, waiters, now);
-    } else {
-        process_waiters(state, waiters, now);
-    }
-    Ok(())
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or(ObservationAdapterError::ClockOverflow)?;
+    process_actor_event_until(state, waiters, backend, control, event, now, deadline)
 }
 
+#[cfg(test)]
 fn process_raw_event(
     state: &mut ModelState,
     backend: &mut dyn RawObservationBackend,
@@ -5103,9 +5433,120 @@ fn process_raw_event(
     now: &dyn Fn() -> MonotonicMillis,
     timeout: Duration,
 ) -> Result<(), ObservationAdapterError> {
-    let raw_deadline = Instant::now()
-        .checked_add(timeout)
-        .ok_or(ObservationAdapterError::ClockOverflow)?;
+    process_actor_event(
+        state,
+        &mut Vec::new(),
+        backend,
+        control,
+        event,
+        now,
+        timeout,
+    )
+}
+
+enum ActorEventWork {
+    Event(ObservationActorEvent),
+    RetryWindow {
+        event: ObservationActorEvent,
+        window: u32,
+        exact: Option<WindowRef>,
+    },
+}
+
+enum ActorEventWorkResult {
+    Completed {
+        resync: bool,
+    },
+    RetryWindow {
+        event: ObservationActorEvent,
+        window: u32,
+        exact: Option<WindowRef>,
+        ordered_events: Vec<ObservationActorEvent>,
+    },
+    CoalesceResync,
+}
+
+fn process_actor_event_until(
+    state: &mut ModelState,
+    waiters: &mut Vec<PendingWait>,
+    backend: &mut dyn RawObservationBackend,
+    control: &ModelActorControl,
+    event: ObservationActorEvent,
+    now: &dyn Fn() -> MonotonicMillis,
+    deadline: Instant,
+) -> Result<(), ObservationAdapterError> {
+    let mut pending = VecDeque::from([ActorEventWork::Event(event)]);
+    let mut work_count = 0_usize;
+    while let Some(work) = pending.pop_front() {
+        if work_count >= MAX_SNAPSHOT_BARRIER_EVENT_WORK {
+            return coalesce_barrier_work_to_resync(state, waiters, now);
+        }
+        work_count += 1;
+        let before_revision = state.model.revision();
+        let before_correlation_epoch = state.correlation_epoch;
+        let result = process_actor_event_work(state, backend, control, work, now, deadline)?;
+        match result {
+            ActorEventWorkResult::Completed { resync } => {
+                if state.model.revision() != before_revision
+                    || state.correlation_epoch != before_correlation_epoch
+                {
+                    state.publish_model_change();
+                }
+                let now = now();
+                if resync {
+                    complete_resync_waiters(state, waiters, now);
+                } else {
+                    process_waiters(state, waiters, now);
+                }
+            }
+            ActorEventWorkResult::RetryWindow {
+                event,
+                window,
+                exact,
+                ordered_events,
+            } => {
+                if pending
+                    .len()
+                    .saturating_add(ordered_events.len())
+                    .saturating_add(1)
+                    > MAX_SNAPSHOT_BARRIER_EVENT_WORK
+                {
+                    return coalesce_barrier_work_to_resync(state, waiters, now);
+                }
+                pending.push_front(ActorEventWork::RetryWindow {
+                    event,
+                    window,
+                    exact,
+                });
+                for event in ordered_events.into_iter().rev() {
+                    pending.push_front(ActorEventWork::Event(event));
+                }
+            }
+            ActorEventWorkResult::CoalesceResync => {
+                return coalesce_barrier_work_to_resync(state, waiters, now);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn process_actor_event_work(
+    state: &mut ModelState,
+    backend: &mut dyn RawObservationBackend,
+    control: &ModelActorControl,
+    work: ActorEventWork,
+    now: &dyn Fn() -> MonotonicMillis,
+    raw_deadline: Instant,
+) -> Result<ActorEventWorkResult, ObservationAdapterError> {
+    let (event, retry) = match work {
+        ActorEventWork::Event(event) => (event, None),
+        ActorEventWork::RetryWindow {
+            event,
+            window,
+            exact,
+        } => (event, Some((window, exact))),
+    };
+    let resync = matches!(&event, ObservationActorEvent::ResyncRequired);
     let (decision, identity_policy, event_policy) = match event {
         ObservationActorEvent::Reconcile { decision } => {
             let event_policy = if decision == ReconcileDecision::FullResync {
@@ -5133,7 +5574,7 @@ fn process_raw_event(
         }
         ObservationActorEvent::RootDamaged { damage } => {
             state.emit_root_damage(damage);
-            return Ok(());
+            return Ok(ActorEventWorkResult::Completed { resync: false });
         }
         // The X11 actor pairs this nonterminal diagnostic with one
         // ResyncRequired marker. Waiting for that marker prevents one gap from
@@ -5141,7 +5582,7 @@ fn process_raw_event(
         ObservationActorEvent::Failed { failure }
             if failure.kind == ObservationActorFailureKind::RequestFailed =>
         {
-            return Ok(());
+            return Ok(ActorEventWorkResult::Completed { resync: false });
         }
         ObservationActorEvent::Failed { .. } => {
             return Err(ObservationAdapterError::Model);
@@ -5150,38 +5591,134 @@ fn process_raw_event(
     match decision {
         ReconcileDecision::ObserveWindow { window }
         | ReconcileDecision::RefreshWindow { window, .. } => {
-            match backend.snapshot(window, control, remaining_raw_event_budget(raw_deadline)?) {
-                Ok(input) => {
-                    remaining_raw_event_budget(raw_deadline)?;
-                    state.observe_raw(&input, now())
+            let exact = retry
+                .and_then(|(retry_window, exact)| (retry_window == window).then_some(exact))
+                .flatten()
+                .or_else(|| state.model.live_reference(window).cloned());
+            if let Some(exact) = &exact
+                && state.model.resolve_exact(exact, now()).is_err()
+            {
+                return Ok(ActorEventWorkResult::Completed { resync: false });
+            }
+            let Some(remaining) = raw_event_budget(raw_deadline) else {
+                return Ok(ActorEventWorkResult::CoalesceResync);
+            };
+            let barrier = backend
+                .snapshot_barrier(window, control, remaining)
+                .map_err(|error| match error {
+                    RawBackendFailure::TimedOut => ObservationAdapterError::ClockOverflow,
+                    _ => ObservationAdapterError::Model,
+                });
+            let barrier = match barrier {
+                Ok(barrier) => barrier,
+                Err(ObservationAdapterError::ClockOverflow) => {
+                    return Ok(ActorEventWorkResult::CoalesceResync);
                 }
-                Err(RawBackendFailure::RequestFailed) => reconcile_from_backend_until(
-                    state,
-                    backend,
-                    control,
-                    now,
-                    raw_deadline,
-                    ReconcileIdentityPolicy::PreserveContinuity,
-                    ReconcileEventPolicy::Incremental,
-                ),
-                Err(_) => Err(ObservationAdapterError::Model),
+                Err(error) => return Err(error),
+            };
+            if raw_event_budget(raw_deadline).is_none() {
+                return Ok(ActorEventWorkResult::CoalesceResync);
+            }
+            let mut ordered_events = Vec::new();
+            loop {
+                if raw_event_budget(raw_deadline).is_none() {
+                    return Ok(ActorEventWorkResult::CoalesceResync);
+                }
+                match backend.try_event() {
+                    Ok(Some(event)) => {
+                        if ordered_events.len() >= MAX_SNAPSHOT_BARRIER_EVENT_WORK {
+                            return Ok(ActorEventWorkResult::CoalesceResync);
+                        }
+                        ordered_events.push(event);
+                    }
+                    Ok(None) => break,
+                    Err(_) => return Err(ObservationAdapterError::Model),
+                }
+            }
+            if !ordered_events.is_empty() || !barrier.stable {
+                return Ok(ActorEventWorkResult::RetryWindow {
+                    event: ObservationActorEvent::Reconcile { decision },
+                    window,
+                    exact,
+                    ordered_events,
+                });
+            }
+            if let Some(exact) = &exact
+                && state.model.resolve_exact(exact, now()).is_err()
+            {
+                return Ok(ActorEventWorkResult::Completed { resync: false });
+            }
+            match barrier.outcome {
+                RawSnapshotOutcome::Snapshot(input) => {
+                    if raw_event_budget(raw_deadline).is_none() {
+                        return Ok(ActorEventWorkResult::CoalesceResync);
+                    }
+                    state.observe_raw(&input, now())?;
+                }
+                RawSnapshotOutcome::RequestFailed => {
+                    if let Some(exact) = &exact {
+                        state.remove_exact(exact, now())?;
+                    }
+                    if raw_event_budget(raw_deadline).is_none() {
+                        return Ok(ActorEventWorkResult::CoalesceResync);
+                    }
+                    if let Err(error) = reconcile_from_backend_until(
+                        state,
+                        backend,
+                        control,
+                        now,
+                        raw_deadline,
+                        ReconcileIdentityPolicy::PreserveContinuity,
+                        ReconcileEventPolicy::Incremental,
+                    ) {
+                        if raw_event_budget(raw_deadline).is_none() {
+                            return Ok(ActorEventWorkResult::CoalesceResync);
+                        }
+                        return Err(error);
+                    }
+                }
             }
         }
-        ReconcileDecision::RemoveWindow { window } => state.remove_xid(window, now()),
+        ReconcileDecision::RemoveWindow { window } => state.remove_xid(window, now())?,
         ReconcileDecision::RefreshFocus
         | ReconcileDecision::RebuildInventory
-        | ReconcileDecision::FullResync => reconcile_from_backend_until(
-            state,
-            backend,
-            control,
-            now,
-            raw_deadline,
-            identity_policy,
-            event_policy,
-        ),
-        ReconcileDecision::ConnectionFailed => Err(ObservationAdapterError::Model),
-        ReconcileDecision::Ignore => Ok(()),
+        | ReconcileDecision::FullResync => {
+            if let Err(error) = reconcile_from_backend_until(
+                state,
+                backend,
+                control,
+                now,
+                raw_deadline,
+                identity_policy,
+                event_policy,
+            ) {
+                if raw_event_budget(raw_deadline).is_none() {
+                    return Ok(ActorEventWorkResult::CoalesceResync);
+                }
+                return Err(error);
+            }
+        }
+        ReconcileDecision::ConnectionFailed => return Err(ObservationAdapterError::Model),
+        ReconcileDecision::Ignore => {}
     }
+    Ok(ActorEventWorkResult::Completed { resync })
+}
+
+fn coalesce_barrier_work_to_resync(
+    state: &mut ModelState,
+    waiters: &mut Vec<PendingWait>,
+    now: &dyn Fn() -> MonotonicMillis,
+) -> Result<(), ObservationAdapterError> {
+    let before_revision = state.model.revision();
+    let before_correlation_epoch = state.correlation_epoch;
+    state.invalidate_for_pending_resync(now())?;
+    if state.model.revision() != before_revision
+        || state.correlation_epoch != before_correlation_epoch
+    {
+        state.publish_model_change();
+    }
+    complete_resync_waiters(state, waiters, now());
+    Ok(())
 }
 
 #[cfg(test)]
@@ -5252,13 +5789,13 @@ fn reconcile_from_backend_until(
 }
 
 fn remaining_raw_event_budget(deadline: Instant) -> Result<Duration, ObservationAdapterError> {
-    let remaining = deadline
+    raw_event_budget(deadline).ok_or(ObservationAdapterError::Model)
+}
+
+fn raw_event_budget(deadline: Instant) -> Option<Duration> {
+    deadline
         .checked_duration_since(Instant::now())
-        .ok_or(ObservationAdapterError::Model)?;
-    if remaining.is_zero() {
-        return Err(ObservationAdapterError::Model);
-    }
-    Ok(remaining)
+        .filter(|remaining| !remaining.is_zero())
 }
 
 fn monotonic_now(epoch: Instant) -> MonotonicMillis {
@@ -5274,6 +5811,16 @@ enum RawBackendFailure {
     Stopped,
 }
 
+struct RawSnapshotBarrier {
+    outcome: RawSnapshotOutcome,
+    stable: bool,
+}
+
+enum RawSnapshotOutcome {
+    Snapshot(Box<WindowSnapshotInput>),
+    RequestFailed,
+}
+
 trait RawObservationBackend: Send + 'static {
     fn reconcile(
         &mut self,
@@ -5286,6 +5833,24 @@ trait RawObservationBackend: Send + 'static {
         control: &ModelActorControl,
         timeout: Duration,
     ) -> Result<WindowSnapshotInput, RawBackendFailure>;
+    fn snapshot_barrier(
+        &mut self,
+        window: u32,
+        control: &ModelActorControl,
+        timeout: Duration,
+    ) -> Result<RawSnapshotBarrier, RawBackendFailure> {
+        match self.snapshot(window, control, timeout) {
+            Ok(snapshot) => Ok(RawSnapshotBarrier {
+                outcome: RawSnapshotOutcome::Snapshot(Box::new(snapshot)),
+                stable: true,
+            }),
+            Err(RawBackendFailure::RequestFailed) => Ok(RawSnapshotBarrier {
+                outcome: RawSnapshotOutcome::RequestFailed,
+                stable: true,
+            }),
+            Err(error) => Err(error),
+        }
+    }
     fn try_event(&mut self) -> Result<Option<ObservationActorEvent>, RawBackendFailure>;
     fn shutdown(&mut self, timeout: Duration) -> ObservationActorExit;
 }
@@ -5331,6 +5896,27 @@ impl RawObservationBackend for LiveRawBackend {
             .try_snapshot(window)
             .map_err(map_raw_submit_error)?;
         wait_raw_reply(&reply, control, timeout, true)
+    }
+
+    fn snapshot_barrier(
+        &mut self,
+        window: u32,
+        control: &ModelActorControl,
+        timeout: Duration,
+    ) -> Result<RawSnapshotBarrier, RawBackendFailure> {
+        let reply = self
+            .handle
+            .try_snapshot_barrier(window)
+            .map_err(map_raw_submit_error)?;
+        wait_raw_reply(&reply, control, timeout, true).map(|barrier| RawSnapshotBarrier {
+            outcome: match barrier.outcome {
+                ObservationSnapshotOutcome::Snapshot(snapshot) => {
+                    RawSnapshotOutcome::Snapshot(snapshot)
+                }
+                ObservationSnapshotOutcome::RequestFailed => RawSnapshotOutcome::RequestFailed,
+            },
+            stable: barrier.stable,
+        })
     }
 
     fn try_event(&mut self) -> Result<Option<ObservationActorEvent>, RawBackendFailure> {

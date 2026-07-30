@@ -1064,7 +1064,8 @@ fn one_failed_gap_marker_causes_exactly_one_birth_transition() -> Result<(), Box
 }
 
 #[test]
-fn transient_snapshot_failure_reconciles_without_false_tombstone() -> Result<(), Box<dyn Error>> {
+fn stable_snapshot_failure_tombstones_the_old_birth_before_reconcile() -> Result<(), Box<dyn Error>>
+{
     let desktop_id = DesktopId::new();
     let generation = DesktopGeneration::new();
     let mut state = ModelState::new(
@@ -1103,7 +1104,73 @@ fn transient_snapshot_failure_reconciles_without_false_tombstone() -> Result<(),
         Duration::from_millis(10),
     )?;
 
-    assert_eq!(state.model.live_reference(42), Some(&first));
+    let replacement = state.model.live_reference(42).cloned().ok_or("missing")?;
+    assert_ne!(replacement, first);
+    assert_eq!(
+        replacement.observed_generation,
+        first.observed_generation + 1
+    );
+    assert!(matches!(
+        state.model.resolve_exact(&first, MonotonicMillis::new(2)),
+        Err(WindowModelError::DestroyedReference | WindowModelError::StaleReference)
+    ));
+    Ok(())
+}
+
+#[test]
+fn expired_resync_invalidates_immediately_and_remints_with_a_fresh_budget()
+-> Result<(), Box<dyn Error>> {
+    let desktop_id = DesktopId::new();
+    let generation = DesktopGeneration::new();
+    let mut state = ModelState::new(
+        desktop_id,
+        generation,
+        WindowModelLimits::default(),
+        usize::from(MAX_WINDOW_PAGE_LIMIT),
+        1_000,
+        1_000,
+    )?;
+    let original = raw(42)?;
+    let inventory = inventory(InventorySource::NetClientList, vec![42]);
+    state.reconcile_raw(
+        &inventory,
+        std::slice::from_ref(&original),
+        MonotonicMillis::new(1),
+        ReconcileIdentityPolicy::PreserveContinuity,
+    )?;
+    let old = state.model.live_reference(42).cloned().ok_or("missing")?;
+    let replacement = raw(42)?;
+    let mut backend = ScriptedBackend::new([Ok(inventory)], [Ok(replacement)]);
+    let mut waiters = Vec::new();
+
+    process_actor_event_until(
+        &mut state,
+        &mut waiters,
+        &mut backend,
+        &ModelActorControl::default(),
+        ObservationActorEvent::ResyncRequired,
+        &|| MonotonicMillis::new(2),
+        Instant::now(),
+    )?;
+    assert!(state.raw_resync_pending);
+    assert!(matches!(
+        state.model.resolve_exact(&old, MonotonicMillis::new(2)),
+        Err(WindowModelError::DestroyedReference)
+    ));
+
+    reconcile_from_backend_until(
+        &mut state,
+        &mut backend,
+        &ModelActorControl::default(),
+        &|| MonotonicMillis::new(3),
+        Instant::now() + Duration::from_millis(50),
+        ReconcileIdentityPolicy::InvalidateAll,
+        ReconcileEventPolicy::Rebuilt(WindowModelRebuildReason::EventOverflow),
+    )?;
+    state.raw_resync_pending = false;
+    let current = state.model.live_reference(42).cloned().ok_or("missing")?;
+    assert_ne!(current, old);
+    assert_eq!(current.observed_generation, old.observed_generation + 1);
     Ok(())
 }
 
@@ -1241,28 +1308,31 @@ fn multi_window_reconcile_uses_one_total_raw_event_budget() -> Result<(), Box<dy
     assert_eq!(snapshots.len(), 2);
 
     let revision = state.model.revision();
+    let old = state.model.live_reference(42).cloned().ok_or("missing")?;
     let mut exhausted = SequentialDelayBackend {
         inventory: inventory(InventorySource::NetClientList, vec![42, 43]),
         snapshots: VecDeque::from([first, second]),
         delay: Duration::from_millis(20),
     };
     let started = Instant::now();
-    assert!(matches!(
-        process_raw_event(
-            &mut state,
-            &mut exhausted,
-            &ModelActorControl::default(),
-            ObservationActorEvent::Reconcile {
-                decision: ReconcileDecision::RebuildInventory,
-            },
-            &|| MonotonicMillis::new(2),
-            Duration::from_millis(50),
-        ),
-        Err(ObservationAdapterError::Model)
-    ));
+    process_raw_event(
+        &mut state,
+        &mut exhausted,
+        &ModelActorControl::default(),
+        ObservationActorEvent::Reconcile {
+            decision: ReconcileDecision::RebuildInventory,
+        },
+        &|| MonotonicMillis::new(2),
+        Duration::from_millis(50),
+    )?;
     assert!(started.elapsed() >= Duration::from_millis(50));
     assert!(started.elapsed() < Duration::from_millis(150));
-    assert_eq!(state.model.revision(), revision);
+    assert!(state.model.revision() > revision);
+    assert!(state.raw_resync_pending);
+    assert!(matches!(
+        state.model.resolve_exact(&old, MonotonicMillis::new(2)),
+        Err(WindowModelError::DestroyedReference)
+    ));
     Ok(())
 }
 
@@ -1515,7 +1585,9 @@ fn list_cursor_is_rejected_after_model_revision_drift() -> Result<(), Box<dyn Er
         .list("alice", &request, MonotonicMillis::new(1))
         .map_err(|_| "first list failed")?;
     request.cursor = first.next_cursor;
-    state.observe_raw(&inputs[0], MonotonicMillis::new(2))?;
+    let mut changed = inputs[0].clone();
+    changed.properties.title = Some(WindowText::new("Changed", false)?);
+    state.observe_raw(&changed, MonotonicMillis::new(2))?;
     assert!(matches!(
         state.list("alice", &request, MonotonicMillis::new(2)),
         Err(ControlPlaneError::NotFound)
@@ -1853,7 +1925,9 @@ fn wait_check_register_recheck_honors_revision_boundary_and_immediate_match()
         2,
     );
     assert_eq!(waiters.len(), 1);
-    state.observe_raw(&input, MonotonicMillis::new(3))?;
+    let mut changed = input;
+    changed.properties.title = Some(WindowText::new("Changed", false)?);
+    state.observe_raw(&changed, MonotonicMillis::new(3))?;
     process_waiters(&mut state, &mut waiters, MonotonicMillis::new(3));
     assert_eq!(
         boundary_rx

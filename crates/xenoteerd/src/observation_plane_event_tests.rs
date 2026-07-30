@@ -440,7 +440,7 @@ fn root_physical_geometry_changes_emit_checked_before_and_after() -> Result<(), 
 }
 
 #[test]
-fn duplicate_refreshes_advance_no_public_event() -> Result<(), Box<dyn Error>> {
+fn duplicate_refreshes_are_semantic_no_ops() -> Result<(), Box<dyn Error>> {
     let sink = Arc::new(FakeWindowEventSink::new(SinkMode::Accept));
     let (mut state, _, _) = state(sink.clone())?;
     let unchanged = raw(42)?;
@@ -454,7 +454,7 @@ fn duplicate_refreshes_advance_no_public_event() -> Result<(), Box<dyn Error>> {
     sink.clear();
     let before_revision = state.model.revision();
     state.observe_raw(&unchanged, MonotonicMillis::new(2))?;
-    assert!(state.model.revision() > before_revision);
+    assert_eq!(state.model.revision(), before_revision);
     assert!(sink.events().is_empty());
     Ok(())
 }

@@ -5505,10 +5505,18 @@ impl WindowControlRuntime {
         }
 
         let raw_outcome = evidence.outcome;
-        let post_effect = self
-            .observation
-            .snapshot_exact_blocking(target, WINDOW_REVALIDATION_TIMEOUT)
-            .ok();
+        let post_effect = if matches!(
+            &command,
+            Command::WindowSetState(_) | Command::WindowMinimize(_)
+        ) {
+            self.observation
+                .refresh_exact_blocking(target, WINDOW_REVALIDATION_TIMEOUT)
+                .ok()
+        } else {
+            self.observation
+                .snapshot_exact_blocking(target, WINDOW_REVALIDATION_TIMEOUT)
+                .ok()
+        };
         let result = match translate_window_evidence(command, &pre_effect, post_effect, evidence) {
             Ok(result) => result,
             Err(stage) => {
