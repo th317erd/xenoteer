@@ -309,6 +309,7 @@ fn reconcile_error_class(error: &SemanticError) -> &'static str {
         SemanticError::StaleApplicationGeneration { .. } => "stale_application",
         SemanticError::StaleCacheRevision { .. } => "stale_revision",
         SemanticError::StaleIdentity => "stale_identity",
+        SemanticError::PreDispatchConflict => "pre_dispatch_conflict",
         SemanticError::InterfaceUnavailable(_) => "interface_unavailable",
         SemanticError::UnclassifiedTextDenied => "unclassified_text",
         SemanticError::ActionNotFound => "action_not_found",
@@ -334,6 +335,9 @@ fn reconcile_error_class(error: &SemanticError) -> &'static str {
             match failure.kind {
                 xenoteer_atspi::BackendFailureKind::Timeout => "backend_timeout",
                 xenoteer_atspi::BackendFailureKind::Connection => "backend_connection",
+                xenoteer_atspi::BackendFailureKind::PreDispatchConflict => {
+                    "backend_pre_dispatch_conflict"
+                }
                 xenoteer_atspi::BackendFailureKind::Protocol => "backend_protocol",
                 xenoteer_atspi::BackendFailureKind::Stream => "backend_stream",
                 xenoteer_atspi::BackendFailureKind::ActionNotFound => "backend_action_not_found",
@@ -350,7 +354,8 @@ fn map_reconcile_error(error: SemanticError) -> AccessibilityPlaneError {
         SemanticError::StaleAccessibilityGeneration { .. }
         | SemanticError::StaleApplicationGeneration { .. }
         | SemanticError::StaleCacheRevision { .. }
-        | SemanticError::StaleIdentity => AccessibilityPlaneError::StaleReference {
+        | SemanticError::StaleIdentity
+        | SemanticError::PreDispatchConflict => AccessibilityPlaneError::StaleReference {
             current_generation: None,
         },
         SemanticError::InterfaceUnavailable(_)

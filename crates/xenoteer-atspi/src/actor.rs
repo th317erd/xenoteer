@@ -198,6 +198,8 @@ impl Default for AtspiActorConfig {
 pub enum BackendFailureKind {
     /// Session or accessibility bus connection failed.
     Connection,
+    /// Backend ingress or changed live evidence invalidated admitted work before dispatch.
+    PreDispatchConflict,
     /// Toolkit or bus data violated the supported protocol.
     Protocol,
     /// A backend operation exceeded its actor-owned deadline.
@@ -1715,7 +1717,7 @@ async fn execute_semantic_request<B: AtspiBackend>(
             match failure.kind {
                 BackendFailureKind::ActionNotFound => SemanticError::ActionNotFound,
                 BackendFailureKind::AmbiguousAction => SemanticError::AmbiguousAction,
-                _ => SemanticError::Backend(failure),
+                _ => map_pre_dispatch_backend_failure(failure),
             }
         }
     })?;
@@ -1768,7 +1770,7 @@ async fn execute_observation_request<B: AtspiBackend>(
         biased;
         () = cancellation.cancelled() => return Err(SemanticError::CancelledBeforeDispatch),
         () = sleep_until(deadline) => return Err(SemanticError::DeadlineBeforeDispatch),
-        result = &mut call => result.map_err(SemanticError::Backend)?,
+        result = &mut call => result.map_err(map_pre_dispatch_backend_failure)?,
     };
     let next_epoch = read_epoch
         .checked_add(1)
@@ -1930,11 +1932,11 @@ async fn reconcile_semantic_target_request<B: AtspiBackend>(
         biased;
         () = cancellation.cancelled() => return Err(SemanticError::CancelledBeforeDispatch),
         () = sleep_until(deadline) => return Err(SemanticError::DeadlineBeforeDispatch),
-        result = &mut call => result.map_err(SemanticError::Backend)?,
+        result = &mut call => result.map_err(map_pre_dispatch_backend_failure)?,
     };
     read_permit
         .ensure_current()
-        .map_err(SemanticError::Backend)?;
+        .map_err(map_pre_dispatch_backend_failure)?;
     if refreshed.item.object != target.object || refreshed.item.application != target.application {
         return Err(SemanticError::Backend(BackendFailure::new(
             BackendFailureKind::Protocol,
@@ -1972,6 +1974,14 @@ async fn reconcile_semantic_target_request<B: AtspiBackend>(
         node_revision,
         changed,
     })
+}
+
+fn map_pre_dispatch_backend_failure(failure: BackendFailure) -> SemanticError {
+    if failure.kind == BackendFailureKind::PreDispatchConflict {
+        SemanticError::PreDispatchConflict
+    } else {
+        SemanticError::Backend(failure)
+    }
 }
 
 fn validate_semantic_target(

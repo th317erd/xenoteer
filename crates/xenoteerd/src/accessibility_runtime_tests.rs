@@ -58,6 +58,12 @@ fn state_words(states: &[u32]) -> Vec<u32> {
 
 type BootstrapPlan = Result<Vec<NormalizedCacheItem>, BackendFailure>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FakeSemanticFailure {
+    ProtocolBeforeDispatch,
+    ProtocolAfterDispatch,
+}
+
 #[derive(Debug, Default)]
 struct RecordingAccessibilityEventSink {
     events: Mutex<Vec<NormalizedEvent>>,
@@ -98,7 +104,10 @@ struct FakeConnector {
     ingresses: Arc<Mutex<Vec<BackendEventIngress>>>,
     connections: Arc<AtomicUsize>,
     shutdowns: Arc<AtomicUsize>,
+    semantic_attempts: Arc<AtomicUsize>,
     semantic_calls: Arc<Mutex<Vec<&'static str>>>,
+    semantic_pre_dispatch_conflicts: Arc<AtomicUsize>,
+    semantic_failures: Arc<Mutex<VecDeque<FakeSemanticFailure>>>,
     exact_text_matches: Arc<Mutex<VecDeque<Option<bool>>>>,
 }
 
@@ -109,9 +118,28 @@ impl FakeConnector {
             ingresses: Arc::new(Mutex::new(Vec::new())),
             connections: Arc::new(AtomicUsize::new(0)),
             shutdowns: Arc::new(AtomicUsize::new(0)),
+            semantic_attempts: Arc::new(AtomicUsize::new(0)),
             semantic_calls: Arc::new(Mutex::new(Vec::new())),
+            semantic_pre_dispatch_conflicts: Arc::new(AtomicUsize::new(0)),
+            semantic_failures: Arc::new(Mutex::new(VecDeque::new())),
             exact_text_matches: Arc::new(Mutex::new(VecDeque::new())),
         }
+    }
+
+    fn with_semantic_pre_dispatch_conflicts(self, conflicts: usize) -> Self {
+        self.semantic_pre_dispatch_conflicts
+            .store(conflicts, Ordering::SeqCst);
+        self
+    }
+
+    fn with_semantic_failures(
+        self,
+        failures: impl IntoIterator<Item = FakeSemanticFailure>,
+    ) -> Self {
+        if let Ok(mut configured) = self.semantic_failures.lock() {
+            configured.extend(failures);
+        }
+        self
     }
 
     fn with_exact_text_matches(self, matches: impl IntoIterator<Item = Option<bool>>) -> Self {
@@ -137,13 +165,21 @@ impl FakeConnector {
             .map_err(|_| "fake semantic-call lock poisoned")?
             .clone())
     }
+
+    fn semantic_attempts(&self) -> usize {
+        self.semantic_attempts.load(Ordering::SeqCst)
+    }
 }
 
 #[derive(Debug)]
 struct FakeBackend {
     bootstrap: Option<BootstrapPlan>,
+    ingress: BackendEventIngress,
     shutdowns: Arc<AtomicUsize>,
+    semantic_attempts: Arc<AtomicUsize>,
     semantic_calls: Arc<Mutex<Vec<&'static str>>>,
+    semantic_pre_dispatch_conflicts: Arc<AtomicUsize>,
+    semantic_failures: Arc<Mutex<VecDeque<FakeSemanticFailure>>>,
     exact_text_matches: Arc<Mutex<VecDeque<Option<bool>>>>,
 }
 
@@ -172,9 +208,44 @@ impl AtspiBackend for FakeBackend {
         request: BackendSemanticRequest,
         dispatch: SemanticDispatchMarker,
     ) -> BackendFuture<'_, Result<SemanticEvidence, BackendFailure>> {
+        let ingress = self.ingress.clone();
+        let semantic_attempts = Arc::clone(&self.semantic_attempts);
         let calls = Arc::clone(&self.semantic_calls);
+        let conflicts = Arc::clone(&self.semantic_pre_dispatch_conflicts);
+        let failures = Arc::clone(&self.semantic_failures);
         let exact_text_matches = Arc::clone(&self.exact_text_matches);
         Box::pin(async move {
+            semantic_attempts.fetch_add(1, Ordering::SeqCst);
+            if conflicts
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+                && ingress.offer(BackendEvent::ObjectChanged {
+                    source: None,
+                    kind: "semantic-pre-dispatch-conflict".to_owned(),
+                }) != EventOfferResult::Accepted
+            {
+                return Err(BackendFailure::new(
+                    BackendFailureKind::Protocol,
+                    "fake semantic ingress conflict was not accepted",
+                ));
+            }
+            let failure = failures
+                .lock()
+                .map_err(|_| {
+                    BackendFailure::new(
+                        BackendFailureKind::Protocol,
+                        "fake semantic-failure lock poisoned",
+                    )
+                })?
+                .pop_front();
+            if failure == Some(FakeSemanticFailure::ProtocolBeforeDispatch) {
+                return Err(BackendFailure::new(
+                    BackendFailureKind::Protocol,
+                    "deterministic generic pre-dispatch protocol failure",
+                ));
+            }
             request.dispatch_permit.ensure_current()?;
             dispatch.mark_dispatched();
             let (kind, evidence) = match request.operation {
@@ -262,6 +333,12 @@ impl AtspiBackend for FakeBackend {
                     BackendFailure::new(BackendFailureKind::Protocol, "semantic lock poisoned")
                 })?
                 .push(kind);
+            if failure == Some(FakeSemanticFailure::ProtocolAfterDispatch) {
+                return Err(BackendFailure::new(
+                    BackendFailureKind::Protocol,
+                    "deterministic post-dispatch protocol failure",
+                ));
+            }
             Ok(evidence)
         })
     }
@@ -310,7 +387,7 @@ impl AtspiBackendConnector for FakeConnector {
     ) -> BackendFuture<'_, Result<Self::Backend, BackendFailure>> {
         self.connections.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut ingresses) = self.ingresses.lock() {
-            ingresses.push(ingress);
+            ingresses.push(ingress.clone());
         }
         let plan = self
             .plans
@@ -318,14 +395,21 @@ impl AtspiBackendConnector for FakeConnector {
             .ok()
             .and_then(|mut plans| plans.pop_front());
         let shutdowns = Arc::clone(&self.shutdowns);
+        let semantic_attempts = Arc::clone(&self.semantic_attempts);
         let semantic_calls = Arc::clone(&self.semantic_calls);
+        let semantic_pre_dispatch_conflicts = Arc::clone(&self.semantic_pre_dispatch_conflicts);
+        let semantic_failures = Arc::clone(&self.semantic_failures);
         let exact_text_matches = Arc::clone(&self.exact_text_matches);
         Box::pin(async move {
             match plan {
                 Some(bootstrap) => Ok(FakeBackend {
                     bootstrap: Some(bootstrap),
+                    ingress,
                     shutdowns,
+                    semantic_attempts,
                     semantic_calls,
+                    semantic_pre_dispatch_conflicts,
+                    semantic_failures,
                     exact_text_matches,
                 }),
                 None => Err(BackendFailure::new(
@@ -1551,6 +1635,380 @@ async fn secret_text_insert_retries_forward_observation_revision_before_dispatch
     assert!(!format!("{result:?}").contains(SECRET));
     assert_eq!(hook_calls.load(Ordering::SeqCst), 2);
     assert_eq!(connector.semantic_calls()?, vec!["insert_text"]);
+    let exit = runtime.shutdown().await;
+    assert_eq!(exit.actor_exit, Some(AtspiActorExit::Stopped));
+    assert!(exit.mirror_stopped);
+    Ok(())
+}
+
+#[tokio::test]
+async fn protected_set_text_retries_one_ingress_conflict_before_dispatch()
+-> Result<(), Box<dyn Error>> {
+    const SECRET: &str = "phase5-protected-set-conflict";
+    let desktop_id = DesktopId::new();
+    let desktop_generation = DesktopGeneration::new();
+    let connector = FakeConnector::new(vec![Ok(vec![
+        app(":1.1601")?,
+        protected_semantic_child(":1.1601")?,
+    ])])
+    .with_semantic_pre_dispatch_conflicts(1);
+    let runtime = spawn_accessibility_runtime_with_connector(
+        configured(None)?,
+        desktop_id,
+        desktop_generation,
+        connector.clone(),
+    )?;
+    wait_for_runtime(&runtime.reader(), |snapshot| snapshot.mirror_ready).await?;
+    let element = runtime
+        .plane()
+        .list_for(
+            "protected-set-conflict-test",
+            list_request(desktop_id, desktop_generation),
+        )
+        .await
+        .map_err(|error| format!("protected semantic list failed: {error:?}"))?
+        .elements
+        .into_iter()
+        .find(|entry| entry.snapshot.role.role == xenoteer_protocol::ElementRole::PasswordText)
+        .ok_or("missing protected semantic element")?
+        .snapshot
+        .element;
+
+    let result = execute_semantic_action(
+        &runtime.semantic_runtime(),
+        Command::ElementSetText(ElementSetTextCommand {
+            element,
+            text: SemanticTextInput::new(SECRET)?,
+            selection: EditableTextSelectionPolicy::CollapseAfter,
+            verify_length_only: true,
+            postcondition: None,
+        }),
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .map_err(|error| format!("protected set after ingress conflict failed: {error:?}"))?;
+    assert_eq!(result.operation, ElementActionOperation::SetText);
+    assert_eq!(
+        result.evidence.observed_text_length,
+        Some(u32::try_from(SECRET.chars().count())?)
+    );
+    assert!(result.evidence.protected_text_verified_by_length_only);
+    assert_eq!(connector.semantic_attempts(), 2);
+    assert_eq!(connector.semantic_calls()?, vec!["set_text"]);
+    assert!(!format!("{result:?}").contains(SECRET));
+    let exit = runtime.shutdown().await;
+    assert_eq!(exit.actor_exit, Some(AtspiActorExit::Stopped));
+    assert!(exit.mirror_stopped);
+    Ok(())
+}
+
+#[tokio::test]
+async fn semantic_text_insert_retries_one_ingress_conflict_before_dispatch()
+-> Result<(), Box<dyn Error>> {
+    const SECRET: &str = "phase5-protected-insert-conflict";
+    let desktop_id = DesktopId::new();
+    let desktop_generation = DesktopGeneration::new();
+    let connector = FakeConnector::new(vec![Ok(vec![
+        app(":1.1602")?,
+        protected_semantic_child(":1.1602")?,
+    ])])
+    .with_semantic_pre_dispatch_conflicts(1);
+    let runtime = spawn_accessibility_runtime_with_connector(
+        configured(None)?,
+        desktop_id,
+        desktop_generation,
+        connector.clone(),
+    )?;
+    wait_for_runtime(&runtime.reader(), |snapshot| snapshot.mirror_ready).await?;
+    let element = runtime
+        .plane()
+        .list_for(
+            "protected-insert-conflict-test",
+            list_request(desktop_id, desktop_generation),
+        )
+        .await
+        .map_err(|error| format!("protected semantic list failed: {error:?}"))?
+        .elements
+        .into_iter()
+        .find(|entry| entry.snapshot.role.role == xenoteer_protocol::ElementRole::PasswordText)
+        .ok_or("missing protected semantic element")?
+        .snapshot
+        .element;
+
+    let result = execute_semantic_text_insert(
+        &runtime.semantic_runtime(),
+        element,
+        SECRET.to_owned(),
+        SemanticTextInsertOptions {
+            insertion_point: SemanticTextInsertionPoint::Caret,
+            selection: EditableTextSelectionPolicy::CollapseAfter,
+            verify_length_only: true,
+            postcondition: None,
+        },
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .map_err(|error| format!("semantic insert after ingress conflict failed: {error:?}"))?;
+    let inserted_characters = u32::try_from(SECRET.chars().count())?;
+    assert_eq!(result.character_count_before, 2);
+    assert_eq!(result.character_count_after, 2 + inserted_characters);
+    assert!(result.verified_length_only);
+    assert_eq!(connector.semantic_attempts(), 2);
+    assert_eq!(connector.semantic_calls()?, vec!["insert_text"]);
+    assert!(!format!("{result:?}").contains(SECRET));
+    let exit = runtime.shutdown().await;
+    assert_eq!(exit.actor_exit, Some(AtspiActorExit::Stopped));
+    assert!(exit.mirror_stopped);
+    Ok(())
+}
+
+#[tokio::test]
+async fn generic_pre_dispatch_protocol_failure_is_terminal_without_dispatch()
+-> Result<(), Box<dyn Error>> {
+    const SECRET: &str = "phase5-protected-generic-pre-dispatch";
+    let desktop_id = DesktopId::new();
+    let desktop_generation = DesktopGeneration::new();
+    let connector = FakeConnector::new(vec![Ok(vec![
+        app(":1.1605")?,
+        protected_semantic_child(":1.1605")?,
+    ])])
+    .with_semantic_failures([FakeSemanticFailure::ProtocolBeforeDispatch]);
+    let runtime = spawn_accessibility_runtime_with_connector(
+        configured(None)?,
+        desktop_id,
+        desktop_generation,
+        connector.clone(),
+    )?;
+    wait_for_runtime(&runtime.reader(), |snapshot| snapshot.mirror_ready).await?;
+    let element = runtime
+        .plane()
+        .list_for(
+            "protected-generic-pre-dispatch-test",
+            list_request(desktop_id, desktop_generation),
+        )
+        .await
+        .map_err(|error| format!("protected semantic list failed: {error:?}"))?
+        .elements
+        .into_iter()
+        .find(|entry| entry.snapshot.role.role == xenoteer_protocol::ElementRole::PasswordText)
+        .ok_or("missing protected semantic element")?
+        .snapshot
+        .element;
+
+    let result = execute_semantic_action(
+        &runtime.semantic_runtime(),
+        Command::ElementSetText(ElementSetTextCommand {
+            element,
+            text: SemanticTextInput::new(SECRET)?,
+            selection: EditableTextSelectionPolicy::CollapseAfter,
+            verify_length_only: true,
+            postcondition: None,
+        }),
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(SemanticActionFailure::Actor(
+            xenoteer_atspi::SemanticError::Backend(BackendFailure {
+                kind: BackendFailureKind::Protocol,
+                ..
+            })
+        ))
+    ));
+    assert_eq!(connector.semantic_attempts(), 1);
+    assert!(connector.semantic_calls()?.is_empty());
+    assert!(!format!("{result:?}").contains(SECRET));
+    let exit = runtime.shutdown().await;
+    assert_eq!(exit.actor_exit, Some(AtspiActorExit::Stopped));
+    assert!(exit.mirror_stopped);
+    Ok(())
+}
+
+#[tokio::test]
+async fn post_dispatch_protocol_failure_is_terminal_with_unknown_outcome()
+-> Result<(), Box<dyn Error>> {
+    const SECRET: &str = "phase5-protected-post-dispatch";
+    let desktop_id = DesktopId::new();
+    let desktop_generation = DesktopGeneration::new();
+    let connector = FakeConnector::new(vec![Ok(vec![
+        app(":1.1606")?,
+        protected_semantic_child(":1.1606")?,
+    ])])
+    .with_semantic_failures([FakeSemanticFailure::ProtocolAfterDispatch]);
+    let runtime = spawn_accessibility_runtime_with_connector(
+        configured(None)?,
+        desktop_id,
+        desktop_generation,
+        connector.clone(),
+    )?;
+    wait_for_runtime(&runtime.reader(), |snapshot| snapshot.mirror_ready).await?;
+    let element = runtime
+        .plane()
+        .list_for(
+            "protected-post-dispatch-test",
+            list_request(desktop_id, desktop_generation),
+        )
+        .await
+        .map_err(|error| format!("protected semantic list failed: {error:?}"))?
+        .elements
+        .into_iter()
+        .find(|entry| entry.snapshot.role.role == xenoteer_protocol::ElementRole::PasswordText)
+        .ok_or("missing protected semantic element")?
+        .snapshot
+        .element;
+
+    let result = execute_semantic_action(
+        &runtime.semantic_runtime(),
+        Command::ElementSetText(ElementSetTextCommand {
+            element,
+            text: SemanticTextInput::new(SECRET)?,
+            selection: EditableTextSelectionPolicy::CollapseAfter,
+            verify_length_only: true,
+            postcondition: None,
+        }),
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(SemanticActionFailure::Actor(
+            xenoteer_atspi::SemanticError::BackendAfterDispatch(BackendFailure {
+                kind: BackendFailureKind::Protocol,
+                ..
+            })
+        ))
+    ));
+    assert_eq!(connector.semantic_attempts(), 1);
+    assert_eq!(connector.semantic_calls()?, vec!["set_text"]);
+    assert!(!format!("{result:?}").contains(SECRET));
+    let exit = runtime.shutdown().await;
+    assert_eq!(exit.actor_exit, Some(AtspiActorExit::Stopped));
+    assert!(exit.mirror_stopped);
+    Ok(())
+}
+
+#[tokio::test]
+async fn protected_set_text_bounds_repeated_ingress_conflicts_without_dispatch()
+-> Result<(), Box<dyn Error>> {
+    const SECRET: &str = "phase5-protected-set-repeated-conflict";
+    let desktop_id = DesktopId::new();
+    let desktop_generation = DesktopGeneration::new();
+    let connector = FakeConnector::new(vec![Ok(vec![
+        app(":1.1603")?,
+        protected_semantic_child(":1.1603")?,
+    ])])
+    .with_semantic_pre_dispatch_conflicts(2);
+    let runtime = spawn_accessibility_runtime_with_connector(
+        configured(None)?,
+        desktop_id,
+        desktop_generation,
+        connector.clone(),
+    )?;
+    wait_for_runtime(&runtime.reader(), |snapshot| snapshot.mirror_ready).await?;
+    let element = runtime
+        .plane()
+        .list_for(
+            "protected-set-repeated-conflict-test",
+            list_request(desktop_id, desktop_generation),
+        )
+        .await
+        .map_err(|error| format!("protected semantic list failed: {error:?}"))?
+        .elements
+        .into_iter()
+        .find(|entry| entry.snapshot.role.role == xenoteer_protocol::ElementRole::PasswordText)
+        .ok_or("missing protected semantic element")?
+        .snapshot
+        .element;
+
+    let result = execute_semantic_action(
+        &runtime.semantic_runtime(),
+        Command::ElementSetText(ElementSetTextCommand {
+            element,
+            text: SemanticTextInput::new(SECRET)?,
+            selection: EditableTextSelectionPolicy::CollapseAfter,
+            verify_length_only: true,
+            postcondition: None,
+        }),
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(SemanticActionFailure::Actor(
+            xenoteer_atspi::SemanticError::PreDispatchConflict
+        ))
+    ));
+    assert!(!format!("{result:?}").contains(SECRET));
+    assert_eq!(connector.semantic_attempts(), 2);
+    assert!(connector.semantic_calls()?.is_empty());
+    let exit = runtime.shutdown().await;
+    assert_eq!(exit.actor_exit, Some(AtspiActorExit::Stopped));
+    assert!(exit.mirror_stopped);
+    Ok(())
+}
+
+#[tokio::test]
+async fn semantic_text_insert_bounds_repeated_ingress_conflicts_without_dispatch()
+-> Result<(), Box<dyn Error>> {
+    const SECRET: &str = "phase5-protected-insert-repeated-conflict";
+    let desktop_id = DesktopId::new();
+    let desktop_generation = DesktopGeneration::new();
+    let connector = FakeConnector::new(vec![Ok(vec![
+        app(":1.1604")?,
+        protected_semantic_child(":1.1604")?,
+    ])])
+    .with_semantic_pre_dispatch_conflicts(2);
+    let runtime = spawn_accessibility_runtime_with_connector(
+        configured(None)?,
+        desktop_id,
+        desktop_generation,
+        connector.clone(),
+    )?;
+    wait_for_runtime(&runtime.reader(), |snapshot| snapshot.mirror_ready).await?;
+    let element = runtime
+        .plane()
+        .list_for(
+            "protected-insert-repeated-conflict-test",
+            list_request(desktop_id, desktop_generation),
+        )
+        .await
+        .map_err(|error| format!("protected semantic list failed: {error:?}"))?
+        .elements
+        .into_iter()
+        .find(|entry| entry.snapshot.role.role == xenoteer_protocol::ElementRole::PasswordText)
+        .ok_or("missing protected semantic element")?
+        .snapshot
+        .element;
+
+    let result = execute_semantic_text_insert(
+        &runtime.semantic_runtime(),
+        element,
+        SECRET.to_owned(),
+        SemanticTextInsertOptions {
+            insertion_point: SemanticTextInsertionPoint::Caret,
+            selection: EditableTextSelectionPolicy::CollapseAfter,
+            verify_length_only: true,
+            postcondition: None,
+        },
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(SemanticActionFailure::Actor(
+            xenoteer_atspi::SemanticError::PreDispatchConflict
+        ))
+    ));
+    assert!(!format!("{result:?}").contains(SECRET));
+    assert_eq!(connector.semantic_attempts(), 2);
+    assert!(connector.semantic_calls()?.is_empty());
     let exit = runtime.shutdown().await;
     assert_eq!(exit.actor_exit, Some(AtspiActorExit::Stopped));
     assert!(exit.mirror_stopped);

@@ -2599,7 +2599,8 @@ fn map_semantic_failure(error: SemanticActionFailure) -> RuntimeResult {
             xenoteer_atspi::SemanticError::StaleAccessibilityGeneration { .. }
             | xenoteer_atspi::SemanticError::StaleApplicationGeneration { .. }
             | xenoteer_atspi::SemanticError::StaleCacheRevision { .. }
-            | xenoteer_atspi::SemanticError::StaleIdentity => stale_element_reference(),
+            | xenoteer_atspi::SemanticError::StaleIdentity
+            | xenoteer_atspi::SemanticError::PreDispatchConflict => stale_element_reference(),
             xenoteer_atspi::SemanticError::InterfaceUnavailable(_) => RuntimeResult::failure(
                 422,
                 ErrorCode::InterfaceNotSupported,
@@ -3021,7 +3022,8 @@ fn map_physical_correlation_failure(
             xenoteer_atspi::SemanticError::StaleAccessibilityGeneration { .. }
             | xenoteer_atspi::SemanticError::StaleApplicationGeneration { .. }
             | xenoteer_atspi::SemanticError::StaleCacheRevision { .. }
-            | xenoteer_atspi::SemanticError::StaleIdentity => stale_element_reference(),
+            | xenoteer_atspi::SemanticError::StaleIdentity
+            | xenoteer_atspi::SemanticError::PreDispatchConflict => stale_element_reference(),
             xenoteer_atspi::SemanticError::Stopped | xenoteer_atspi::SemanticError::Unavailable => {
                 capability_unavailable()
             }
@@ -9813,6 +9815,29 @@ mod tests {
         assert_eq!(queue_full.code, ErrorCode::ResourceExhausted);
         assert_eq!(queue_full.effect_stage, EffectStage::None);
 
+        let ingress_conflict = map_semantic_failure(SemanticActionFailure::Actor(
+            xenoteer_atspi::SemanticError::PreDispatchConflict,
+        ));
+        let RuntimeResult::Failure(ingress_conflict) = ingress_conflict else {
+            return;
+        };
+        assert_eq!(ingress_conflict.code, ErrorCode::StaleReference);
+        assert_eq!(ingress_conflict.effect_stage, EffectStage::None);
+        assert_eq!(ingress_conflict.retry, RetryAdvice::AfterResync);
+
+        let protocol = map_semantic_failure(SemanticActionFailure::Actor(
+            xenoteer_atspi::SemanticError::Backend(xenoteer_atspi::BackendFailure::new(
+                xenoteer_atspi::BackendFailureKind::Protocol,
+                "generic protocol failure",
+            )),
+        ));
+        let RuntimeResult::Failure(protocol) = protocol else {
+            return;
+        };
+        assert_eq!(protocol.code, ErrorCode::BackendFailure);
+        assert_eq!(protocol.effect_stage, EffectStage::None);
+        assert_eq!(protocol.retry, RetryAdvice::Never);
+
         let cancelled_after = map_semantic_failure(SemanticActionFailure::Actor(
             xenoteer_atspi::SemanticError::CancelledAfterDispatch,
         ));
@@ -9835,6 +9860,22 @@ mod tests {
         };
         assert_eq!(reply_lost.code, ErrorCode::RequestOutcomeUnknown);
         assert_eq!(reply_lost.effect_stage, EffectStage::OutcomeUnknown);
+        assert_eq!(reply_lost.retry, RetryAdvice::SameCommandId);
+
+        let backend_after = map_semantic_failure(SemanticActionFailure::Actor(
+            xenoteer_atspi::SemanticError::BackendAfterDispatch(
+                xenoteer_atspi::BackendFailure::new(
+                    xenoteer_atspi::BackendFailureKind::Protocol,
+                    "post-dispatch protocol failure",
+                ),
+            ),
+        ));
+        let RuntimeResult::Failure(backend_after) = backend_after else {
+            return;
+        };
+        assert_eq!(backend_after.code, ErrorCode::RequestOutcomeUnknown);
+        assert_eq!(backend_after.effect_stage, EffectStage::OutcomeUnknown);
+        assert_eq!(backend_after.retry, RetryAdvice::SameCommandId);
     }
 
     #[tokio::test]

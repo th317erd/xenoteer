@@ -43,6 +43,9 @@ struct FakeControl {
     semantic_dispatches: Arc<AtomicUsize>,
     refresh_calls: Arc<AtomicUsize>,
     refresh_states: Option<Vec<u32>>,
+    wait_in_refresh: bool,
+    refresh_started: Arc<AtomicUsize>,
+    refresh_release: Arc<tokio::sync::Notify>,
     refresh_flood_first_connection: bool,
     observation_calls: Arc<AtomicUsize>,
     wait_in_observation: bool,
@@ -70,6 +73,9 @@ impl FakeControl {
             semantic_dispatches: Arc::new(AtomicUsize::new(0)),
             refresh_calls: Arc::new(AtomicUsize::new(0)),
             refresh_states: None,
+            wait_in_refresh: false,
+            refresh_started: Arc::new(AtomicUsize::new(0)),
+            refresh_release: Arc::new(tokio::sync::Notify::new()),
             refresh_flood_first_connection: false,
             observation_calls: Arc::new(AtomicUsize::new(0)),
             wait_in_observation: false,
@@ -107,6 +113,11 @@ impl FakeControl {
 
     fn refresh_states(mut self, states: Vec<u32>) -> Self {
         self.refresh_states = Some(states);
+        self
+    }
+
+    fn wait_in_refresh(mut self) -> Self {
+        self.wait_in_refresh = true;
         self
     }
 
@@ -154,6 +165,9 @@ struct FakeBackend {
     refresh_calls: Arc<AtomicUsize>,
     refresh_item: Option<NormalizedCacheItem>,
     refresh_states: Option<Vec<u32>>,
+    wait_in_refresh: bool,
+    refresh_started: Arc<AtomicUsize>,
+    refresh_release: Arc<tokio::sync::Notify>,
     observation_calls: Arc<AtomicUsize>,
     wait_in_observation: bool,
     observation_started: Arc<AtomicUsize>,
@@ -223,7 +237,14 @@ impl AtspiBackend for FakeBackend {
         self.refresh_calls.fetch_add(1, Ordering::SeqCst);
         let mut item = self.refresh_item.clone();
         let states = self.refresh_states.clone();
+        let wait = self.wait_in_refresh;
+        let started = Arc::clone(&self.refresh_started);
+        let release = Arc::clone(&self.refresh_release);
         Box::pin(async move {
+            if wait {
+                started.fetch_add(1, Ordering::SeqCst);
+                release.notified().await;
+            }
             let mut item = item.take().ok_or_else(|| {
                 BackendFailure::new(
                     BackendFailureKind::Protocol,
@@ -357,6 +378,9 @@ impl AtspiBackendConnector for FakeControl {
         let semantic_dispatches = Arc::clone(&self.semantic_dispatches);
         let refresh_calls = Arc::clone(&self.refresh_calls);
         let refresh_states = self.refresh_states.clone();
+        let wait_in_refresh = self.wait_in_refresh;
+        let refresh_started = Arc::clone(&self.refresh_started);
+        let refresh_release = Arc::clone(&self.refresh_release);
         let observation_calls = Arc::clone(&self.observation_calls);
         let wait_in_observation = self.wait_in_observation;
         let observation_started = Arc::clone(&self.observation_started);
@@ -377,6 +401,9 @@ impl AtspiBackendConnector for FakeControl {
                 refresh_calls,
                 refresh_item,
                 refresh_states,
+                wait_in_refresh,
+                refresh_started,
+                refresh_release,
                 observation_calls,
                 wait_in_observation,
                 observation_started,
@@ -623,6 +650,64 @@ async fn explicit_reconcile_emits_change_once_and_preserves_revision_on_noop()
 }
 
 #[tokio::test]
+async fn ingress_change_during_targeted_reconcile_rejects_before_cache_mutation()
+-> Result<(), Box<dyn Error>> {
+    let control = FakeControl::new(vec![Ok(vec![node(":1.1041", "root")?])])
+        .refresh_states(vec![9])
+        .wait_in_refresh();
+    let observation = control.clone();
+    let started = Arc::clone(&control.refresh_started);
+    let release = Arc::clone(&control.refresh_release);
+    let spawned = spawn_atspi_actor(true, test_config(), control)?;
+    let initial = wait_for_health(&spawned.handle, |health| {
+        health.state == AtspiActorState::Healthy && health.cached_nodes == 1
+    })
+    .await?;
+    let page = spawned
+        .handle
+        .cache_page(
+            Some(initial.accessibility_generation),
+            Some(initial.cache_revision),
+            None,
+            CancellationToken::new(),
+        )
+        .await?;
+    let request = semantic_target_request(&initial, &page.nodes[0]);
+    let handle = spawned.handle.clone();
+    let reconcile = tokio::spawn(async move {
+        handle
+            .reconcile_semantic_target(
+                request,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                CancellationToken::new(),
+            )
+            .await
+    });
+    wait_for_atomic(&started).await?;
+    assert_eq!(
+        observation
+            .latest_ingress()?
+            .offer(BackendEvent::ObjectChanged {
+                source: None,
+                kind: "during-targeted-reconcile".to_owned(),
+            }),
+        EventOfferResult::Accepted
+    );
+    release.notify_waiters();
+    let Err(error) = reconcile.await? else {
+        return Err("changed reconcile ingress unexpectedly mutated the cache".into());
+    };
+    assert_eq!(error, SemanticError::PreDispatchConflict);
+    assert!(error.effect_definitely_not_dispatched());
+    assert_eq!(
+        spawned.handle.health().cache_revision,
+        initial.cache_revision
+    );
+    assert_eq!(spawned.join.shutdown().await, AtspiActorExit::Stopped);
+    Ok(())
+}
+
+#[tokio::test]
 async fn semantic_target_materializer_enforces_every_cache_coordinate() -> Result<(), Box<dyn Error>>
 {
     let control = FakeControl::new(vec![Ok(vec![node(":1.111", "root")?])]);
@@ -836,7 +921,11 @@ async fn ingress_change_during_fresh_observation_rejects_the_read() -> Result<()
         EventOfferResult::Accepted
     );
     release.notify_waiters();
-    assert!(matches!(read.await?, Err(SemanticError::Backend(_))));
+    let Err(error) = read.await? else {
+        return Err("changed observation ingress unexpectedly returned evidence".into());
+    };
+    assert_eq!(error, SemanticError::PreDispatchConflict);
+    assert!(error.effect_definitely_not_dispatched());
     assert_eq!(spawned.join.shutdown().await, AtspiActorExit::Stopped);
     Ok(())
 }
@@ -1775,7 +1864,7 @@ async fn ingress_event_during_semantic_preflight_prevents_dispatch() -> Result<(
         Err(error) => error,
         Ok(_) => return Err("changed ingress epoch unexpectedly dispatched".into()),
     };
-    assert!(matches!(error, SemanticError::Backend(_)));
+    assert_eq!(error, SemanticError::PreDispatchConflict);
     assert!(error.effect_definitely_not_dispatched());
     assert_eq!(dispatches.load(Ordering::SeqCst), 0);
     assert_eq!(spawned.join.shutdown().await, AtspiActorExit::Stopped);

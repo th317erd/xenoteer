@@ -522,6 +522,7 @@ fn is_pre_dispatch_stale(error: &SemanticError) -> bool {
             | SemanticError::StaleApplicationGeneration { .. }
             | SemanticError::StaleCacheRevision { .. }
             | SemanticError::StaleIdentity
+            | SemanticError::PreDispatchConflict
     )
 }
 

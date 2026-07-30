@@ -1247,14 +1247,7 @@ async fn execute_live_semantic(
                 identity.cache_limits.max_item_bytes,
             )
             .await?;
-            validate_actions(&immediate_actions)?;
-            let immediate_index = resolve_action(&immediate_actions, &selector)?;
-            if immediate_index != index || immediate_actions != actions {
-                return Err(BackendFailure::new(
-                    BackendFailureKind::Protocol,
-                    "live action metadata changed during semantic preflight",
-                ));
-            }
+            validate_action_preflight(&actions, index, &immediate_actions, &selector)?;
             dispatch_permit.ensure_current()?;
             dispatch.mark_dispatched();
             let accepted = timed_call(
@@ -1322,12 +1315,7 @@ async fn execute_live_semantic(
                 timed_call(call_timeout, "Value.MinimumValue", proxy.minimum_value()).await?;
             let maximum =
                 timed_call(call_timeout, "Value.MaximumValue", proxy.maximum_value()).await?;
-            if !minimum.is_finite() || !maximum.is_finite() || value < minimum || value > maximum {
-                return Err(BackendFailure::new(
-                    BackendFailureKind::Protocol,
-                    "requested value is outside finite live bounds",
-                ));
-            }
+            validate_live_value_bounds(value, minimum, maximum)?;
             revalidate_live_identity(connection, &identity, false).await?;
             dispatch_permit.ensure_current()?;
             dispatch.mark_dispatched();
@@ -1518,12 +1506,7 @@ async fn observe_live_exact(
         )
         .await?,
     )?;
-    if application != request.application {
-        return Err(BackendFailure::new(
-            BackendFailureKind::Protocol,
-            "fresh observation application identity changed",
-        ));
-    }
+    validate_fresh_observation_application(&application, &request.application)?;
     let mut parent = raw_optional_object_property(
         connection,
         &request.object,
@@ -1603,15 +1586,12 @@ async fn observe_live_exact(
         request.cache_limits,
     )
     .map_err(|error| backend_error(BackendFailureKind::Protocol, error))?;
-    if normalized.identity_fingerprint() != request.expected_identity
-        || normalized.index_in_parent != request.expected_index_in_parent
-        || normalized.role != request.expected_role
-    {
-        return Err(BackendFailure::new(
-            BackendFailureKind::Protocol,
-            "fresh observation target identity changed",
-        ));
-    }
+    validate_fresh_observation_identity(
+        &normalized,
+        &request.expected_identity,
+        request.expected_index_in_parent,
+        request.expected_role,
+    )?;
     let live = read_live_metadata(
         connection,
         &request.object,
@@ -1682,12 +1662,7 @@ async fn refresh_live_object(
             "targeted refresh common accessible metadata failed",
         )
     })?;
-    if node.application != request.expected_application {
-        return Err(BackendFailure::new(
-            BackendFailureKind::Protocol,
-            "targeted refresh application identity changed",
-        ));
-    }
+    validate_targeted_refresh_application(&node.application, &request.expected_application)?;
     let item = normalize_modern(
         ModernCacheItem {
             object: request.object.clone(),
@@ -2217,24 +2192,7 @@ async fn execute_text_write(
     )
     .await?;
     let before = read_text_evidence(&text_proxy, call_timeout).await?;
-    let insertion_start = match position {
-        Some(TextInsertPosition::Offset(position)) => position,
-        Some(TextInsertPosition::LiveCaret) => {
-            u32::try_from(before.caret_offset).map_err(|_| {
-                BackendFailure::new(
-                    BackendFailureKind::Protocol,
-                    "editable-text target reported no live caret",
-                )
-            })?
-        }
-        None => 0,
-    };
-    if insertion_start > before.character_count {
-        return Err(BackendFailure::new(
-            BackendFailureKind::Protocol,
-            "editable-text insertion offset exceeds live character count",
-        ));
-    }
+    let insertion_start = resolve_text_insertion_start(position, &before)?;
     let inserted_characters = u32::try_from(text.character_len()).map_err(|_| {
         BackendFailure::new(
             BackendFailureKind::Protocol,
@@ -2251,12 +2209,7 @@ async fn execute_text_write(
         })?;
     revalidate_live_identity(connection, identity, true).await?;
     let immediate = read_text_evidence(&text_proxy, call_timeout).await?;
-    if immediate != before {
-        return Err(BackendFailure::new(
-            BackendFailureKind::Protocol,
-            "live text caret, count, or selection changed during semantic preflight",
-        ));
-    }
+    validate_text_preflight(&before, &immediate)?;
     dispatch_permit.ensure_current()?;
     dispatch.mark_dispatched();
     let accepted = if position.is_some() {
@@ -2753,12 +2706,7 @@ async fn revalidate_live_identity(
         )
         .await?,
     )?;
-    if application != identity.application {
-        return Err(BackendFailure::new(
-            BackendFailureKind::Protocol,
-            "live semantic application identity changed before dispatch",
-        ));
-    }
+    validate_live_semantic_application(&application, &identity.application)?;
     let parent = raw_optional_object_property(
         connection,
         &identity.object,
@@ -2813,26 +2761,13 @@ async fn revalidate_live_identity(
         description,
         identity.cache_limits,
     )?;
-    if normalized.identity_fingerprint() != identity.expected_identity
-        || normalized.index_in_parent != identity.expected_index_in_parent
-    {
-        return Err(BackendFailure::new(
-            BackendFailureKind::Protocol,
-            "live semantic identity fingerprint changed before dispatch",
-        ));
-    }
-    if role != identity.expected_role {
-        return Err(BackendFailure::new(
-            BackendFailureKind::Protocol,
-            "live semantic role changed before dispatch",
-        ));
-    }
-    if require_classified_text && !(0..=129).contains(&role) {
-        return Err(BackendFailure::new(
-            BackendFailureKind::Protocol,
-            "live unclassified text write denied",
-        ));
-    }
+    validate_live_semantic_identity(
+        &normalized,
+        &identity.expected_identity,
+        identity.expected_index_in_parent,
+    )?;
+    validate_live_semantic_role(role, identity.expected_role)?;
+    validate_classified_text_role(role, require_classified_text)?;
     let states = read_raw_states(
         connection,
         &identity.object,
@@ -2841,9 +2776,197 @@ async fn revalidate_live_identity(
         identity.cache_limits.max_states,
     )
     .await?;
-    if states != identity.expected_states {
+    validate_live_semantic_states(&states, &identity.expected_states)?;
+    Ok(())
+}
+
+fn validate_action_preflight(
+    actions: &[atspi_proxies::common::Action],
+    index: u32,
+    immediate_actions: &[atspi_proxies::common::Action],
+    selector: &ActionSelector,
+) -> Result<(), BackendFailure> {
+    validate_actions(immediate_actions)?;
+    if immediate_actions != actions {
+        return Err(BackendFailure::new(
+            BackendFailureKind::PreDispatchConflict,
+            "live action metadata changed during semantic preflight",
+        ));
+    }
+    let immediate_index = resolve_action(immediate_actions, selector)?;
+    if immediate_index != index {
+        return Err(BackendFailure::new(
+            BackendFailureKind::PreDispatchConflict,
+            "live action resolution changed during semantic preflight",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_live_value_bounds(
+    requested: f64,
+    minimum: f64,
+    maximum: f64,
+) -> Result<(), BackendFailure> {
+    // These are the first live bounds read in this request. A non-finite range
+    // or a request outside it is terminal validation, not evidence that became
+    // stale after an earlier successful preflight read.
+    if !minimum.is_finite() || !maximum.is_finite() || requested < minimum || requested > maximum {
         return Err(BackendFailure::new(
             BackendFailureKind::Protocol,
+            "requested value is outside finite live bounds",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_fresh_observation_application(
+    application: &ObjectAddress,
+    expected_application: &ObjectAddress,
+) -> Result<(), BackendFailure> {
+    if application != expected_application {
+        return Err(BackendFailure::new(
+            BackendFailureKind::PreDispatchConflict,
+            "fresh observation application identity changed",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_fresh_observation_identity(
+    normalized: &NormalizedCacheItem,
+    expected_identity: &IdentityFingerprint,
+    expected_index_in_parent: Option<usize>,
+    expected_role: u32,
+) -> Result<(), BackendFailure> {
+    if normalized.identity_fingerprint() != *expected_identity
+        || normalized.index_in_parent != expected_index_in_parent
+        || normalized.role != expected_role
+    {
+        return Err(BackendFailure::new(
+            BackendFailureKind::PreDispatchConflict,
+            "fresh observation target identity changed",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_targeted_refresh_application(
+    application: &ObjectAddress,
+    expected_application: &ObjectAddress,
+) -> Result<(), BackendFailure> {
+    if application != expected_application {
+        return Err(BackendFailure::new(
+            BackendFailureKind::PreDispatchConflict,
+            "targeted refresh application identity changed",
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_text_insertion_start(
+    position: Option<TextInsertPosition>,
+    before: &TextReadbackEvidence,
+) -> Result<u32, BackendFailure> {
+    // `before` is the first text evidence in this request. A missing caret or
+    // caller offset outside that first live count is terminal invalid input;
+    // only a later read disagreeing with `before` is a retryable conflict.
+    let insertion_start = match position {
+        Some(TextInsertPosition::Offset(position)) => position,
+        Some(TextInsertPosition::LiveCaret) => {
+            u32::try_from(before.caret_offset).map_err(|_| {
+                BackendFailure::new(
+                    BackendFailureKind::Protocol,
+                    "editable-text target reported no live caret",
+                )
+            })?
+        }
+        None => 0,
+    };
+    if insertion_start > before.character_count {
+        return Err(BackendFailure::new(
+            BackendFailureKind::Protocol,
+            "editable-text insertion offset exceeds live character count",
+        ));
+    }
+    Ok(insertion_start)
+}
+
+fn validate_text_preflight(
+    before: &TextReadbackEvidence,
+    immediate: &TextReadbackEvidence,
+) -> Result<(), BackendFailure> {
+    if immediate != before {
+        return Err(BackendFailure::new(
+            BackendFailureKind::PreDispatchConflict,
+            "live text caret, count, or selection changed during semantic preflight",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_live_semantic_application(
+    application: &ObjectAddress,
+    expected_application: &ObjectAddress,
+) -> Result<(), BackendFailure> {
+    if application != expected_application {
+        return Err(BackendFailure::new(
+            BackendFailureKind::PreDispatchConflict,
+            "live semantic application identity changed before dispatch",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_live_semantic_identity(
+    normalized: &NormalizedCacheItem,
+    expected_identity: &IdentityFingerprint,
+    expected_index_in_parent: Option<usize>,
+) -> Result<(), BackendFailure> {
+    if normalized.identity_fingerprint() != *expected_identity
+        || normalized.index_in_parent != expected_index_in_parent
+    {
+        return Err(BackendFailure::new(
+            BackendFailureKind::PreDispatchConflict,
+            "live semantic identity fingerprint changed before dispatch",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_live_semantic_role(role: u32, expected_role: u32) -> Result<(), BackendFailure> {
+    if role != expected_role {
+        return Err(BackendFailure::new(
+            BackendFailureKind::PreDispatchConflict,
+            "live semantic role changed before dispatch",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_classified_text_role(
+    role: u32,
+    require_classified_text: bool,
+) -> Result<(), BackendFailure> {
+    // A stable but unknown role cannot prove that a text write is safe. This is
+    // intrinsic unsupported evidence, distinct from a role changing after the
+    // target was admitted (which `validate_live_semantic_role` reports above).
+    if require_classified_text && !(0..=129).contains(&role) {
+        return Err(BackendFailure::new(
+            BackendFailureKind::Protocol,
+            "live unclassified text write denied",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_live_semantic_states(
+    states: &[u32],
+    expected_states: &[u32],
+) -> Result<(), BackendFailure> {
+    if states != expected_states {
+        return Err(BackendFailure::new(
+            BackendFailureKind::PreDispatchConflict,
             "live semantic states changed before dispatch",
         ));
     }
@@ -4835,6 +4958,381 @@ mod tests {
     }
 
     #[test]
+    fn action_metadata_or_resolved_index_drift_is_a_pre_dispatch_conflict() {
+        let action = |name: &str| atspi_proxies::common::Action {
+            name: name.to_owned(),
+            description: String::new(),
+            keybinding: String::new(),
+        };
+        let initial = vec![action("click"), action("activate")];
+        let changed = vec![action("press"), action("activate")];
+        for result in [
+            validate_action_preflight(&initial, 0, &changed, &ActionSelector::Index(0)),
+            validate_action_preflight(&initial, 1, &initial, &ActionSelector::Index(0)),
+        ] {
+            assert!(matches!(
+                result,
+                Err(BackendFailure {
+                    kind: BackendFailureKind::PreDispatchConflict,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn removed_named_action_is_pre_dispatch_drift_before_second_resolution() {
+        let action = |name: &str| atspi_proxies::common::Action {
+            name: name.to_owned(),
+            description: String::new(),
+            keybinding: String::new(),
+        };
+        let initial = vec![action("activate")];
+        let selector = ActionSelector::Name("activate".to_owned());
+        assert_eq!(resolve_action(&initial, &selector), Ok(0));
+        assert!(matches!(
+            validate_action_preflight(&initial, 0, &[], &selector),
+            Err(BackendFailure {
+                kind: BackendFailureKind::PreDispatchConflict,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn removed_default_action_is_pre_dispatch_drift_before_second_resolution() {
+        let action = |name: &str| atspi_proxies::common::Action {
+            name: name.to_owned(),
+            description: String::new(),
+            keybinding: String::new(),
+        };
+        let initial = vec![action("click")];
+        let selector = ActionSelector::Default;
+        assert_eq!(resolve_action(&initial, &selector), Ok(0));
+        assert!(matches!(
+            validate_action_preflight(&initial, 0, &[action("custom")], &selector),
+            Err(BackendFailure {
+                kind: BackendFailureKind::PreDispatchConflict,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn new_action_name_ambiguity_is_pre_dispatch_drift_before_second_resolution() {
+        let action = |name: &str| atspi_proxies::common::Action {
+            name: name.to_owned(),
+            description: String::new(),
+            keybinding: String::new(),
+        };
+        let initial = vec![action("activate")];
+        let selector = ActionSelector::Name("activate".to_owned());
+        assert_eq!(resolve_action(&initial, &selector), Ok(0));
+        assert!(matches!(
+            validate_action_preflight(
+                &initial,
+                0,
+                &[action("activate"), action("activate")],
+                &selector,
+            ),
+            Err(BackendFailure {
+                kind: BackendFailureKind::PreDispatchConflict,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn action_index_shrink_is_pre_dispatch_drift_before_second_resolution() {
+        let action = |name: &str| atspi_proxies::common::Action {
+            name: name.to_owned(),
+            description: String::new(),
+            keybinding: String::new(),
+        };
+        let initial = vec![action("custom"), action("activate")];
+        let selector = ActionSelector::Index(1);
+        assert_eq!(resolve_action(&initial, &selector), Ok(1));
+        assert!(matches!(
+            validate_action_preflight(&initial, 1, &[action("custom")], &selector),
+            Err(BackendFailure {
+                kind: BackendFailureKind::PreDispatchConflict,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn action_preflight_preserves_initial_and_malformed_terminal_failures() {
+        let action = |name: &str| atspi_proxies::common::Action {
+            name: name.to_owned(),
+            description: String::new(),
+            keybinding: String::new(),
+        };
+        assert!(matches!(
+            resolve_action(&[], &ActionSelector::Default),
+            Err(BackendFailure {
+                kind: BackendFailureKind::ActionNotFound,
+                ..
+            })
+        ));
+        assert!(matches!(
+            resolve_action(
+                &[action("activate"), action("activate")],
+                &ActionSelector::Name("activate".to_owned()),
+            ),
+            Err(BackendFailure {
+                kind: BackendFailureKind::AmbiguousAction,
+                ..
+            })
+        ));
+
+        let initial = vec![action("activate")];
+        let malformed = vec![action("activate\nsecond-line")];
+        assert!(matches!(
+            validate_action_preflight(
+                &initial,
+                0,
+                &malformed,
+                &ActionSelector::Name("activate".to_owned()),
+            ),
+            Err(BackendFailure {
+                kind: BackendFailureKind::Protocol,
+                ..
+            })
+        ));
+        assert_eq!(
+            validate_action_preflight(
+                &initial,
+                0,
+                &initial,
+                &ActionSelector::Name("activate".to_owned()),
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn fresh_observation_application_and_target_drift_are_pre_dispatch_conflicts()
+    -> Result<(), Box<dyn Error>> {
+        let application = address(":1.781", "app")?;
+        let replacement_application = address(":1.781", "replacement-app")?;
+        assert!(matches!(
+            validate_fresh_observation_application(&replacement_application, &application),
+            Err(BackendFailure {
+                kind: BackendFailureKind::PreDispatchConflict,
+                ..
+            })
+        ));
+
+        let object = address(":1.781", "node")?;
+        let parent = address(":1.781", "parent")?;
+        let baseline = normalize_live_identity(
+            object.clone(),
+            application.clone(),
+            Some(parent.clone()),
+            0,
+            43,
+            "before".to_owned(),
+            String::new(),
+            CacheLimits::default(),
+        )?;
+        let expected_identity = baseline.identity_fingerprint();
+        let identity_drift = normalize_live_identity(
+            object.clone(),
+            application.clone(),
+            Some(parent.clone()),
+            0,
+            43,
+            "after".to_owned(),
+            String::new(),
+            CacheLimits::default(),
+        )?;
+        let index_drift = normalize_live_identity(
+            object.clone(),
+            application.clone(),
+            Some(parent.clone()),
+            1,
+            43,
+            "before".to_owned(),
+            String::new(),
+            CacheLimits::default(),
+        )?;
+        let role_drift = normalize_live_identity(
+            object,
+            application,
+            Some(parent),
+            0,
+            44,
+            "before".to_owned(),
+            String::new(),
+            CacheLimits::default(),
+        )?;
+        for result in [
+            validate_fresh_observation_identity(
+                &identity_drift,
+                &expected_identity,
+                baseline.index_in_parent,
+                baseline.role,
+            ),
+            validate_fresh_observation_identity(
+                &index_drift,
+                &expected_identity,
+                baseline.index_in_parent,
+                baseline.role,
+            ),
+            validate_fresh_observation_identity(
+                &role_drift,
+                &expected_identity,
+                baseline.index_in_parent,
+                baseline.role,
+            ),
+        ] {
+            assert!(matches!(
+                result,
+                Err(BackendFailure {
+                    kind: BackendFailureKind::PreDispatchConflict,
+                    ..
+                })
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn targeted_refresh_application_drift_is_a_pre_dispatch_conflict() -> Result<(), Box<dyn Error>>
+    {
+        let application = address(":1.782", "app")?;
+        let replacement_application = address(":1.782", "replacement-app")?;
+        assert!(matches!(
+            validate_targeted_refresh_application(&replacement_application, &application),
+            Err(BackendFailure {
+                kind: BackendFailureKind::PreDispatchConflict,
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn text_count_caret_or_selection_drift_is_a_pre_dispatch_conflict() {
+        let before = TextReadbackEvidence {
+            character_count: 2,
+            caret_offset: 2,
+            selections: vec![SelectionRangeEvidence { start: 0, end: 2 }],
+        };
+        let mut count_drift = before.clone();
+        count_drift.character_count = 3;
+        let mut caret_drift = before.clone();
+        caret_drift.caret_offset = 1;
+        let mut selection_drift = before.clone();
+        selection_drift.selections.clear();
+        for immediate in [count_drift, caret_drift, selection_drift] {
+            assert!(matches!(
+                validate_text_preflight(&before, &immediate),
+                Err(BackendFailure {
+                    kind: BackendFailureKind::PreDispatchConflict,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn live_semantic_identity_role_and_state_drift_are_pre_dispatch_conflicts()
+    -> Result<(), Box<dyn Error>> {
+        let application = address(":1.783", "app")?;
+        let replacement_application = address(":1.783", "replacement-app")?;
+        assert!(matches!(
+            validate_live_semantic_application(&replacement_application, &application),
+            Err(BackendFailure {
+                kind: BackendFailureKind::PreDispatchConflict,
+                ..
+            })
+        ));
+
+        let object = address(":1.783", "node")?;
+        let parent = address(":1.783", "parent")?;
+        let baseline = normalize_live_identity(
+            object.clone(),
+            application.clone(),
+            Some(parent.clone()),
+            0,
+            43,
+            "before".to_owned(),
+            String::new(),
+            CacheLimits::default(),
+        )?;
+        let expected_identity = baseline.identity_fingerprint();
+        let fingerprint_drift = normalize_live_identity(
+            object.clone(),
+            application.clone(),
+            Some(parent.clone()),
+            0,
+            43,
+            "after".to_owned(),
+            String::new(),
+            CacheLimits::default(),
+        )?;
+        let index_drift = normalize_live_identity(
+            object,
+            application,
+            Some(parent),
+            1,
+            43,
+            "before".to_owned(),
+            String::new(),
+            CacheLimits::default(),
+        )?;
+        for result in [
+            validate_live_semantic_identity(
+                &fingerprint_drift,
+                &expected_identity,
+                baseline.index_in_parent,
+            ),
+            validate_live_semantic_identity(
+                &index_drift,
+                &expected_identity,
+                baseline.index_in_parent,
+            ),
+            validate_live_semantic_role(44, 43),
+            validate_live_semantic_states(&[1, 2], &[1, 3]),
+        ] {
+            assert!(matches!(
+                result,
+                Err(BackendFailure {
+                    kind: BackendFailureKind::PreDispatchConflict,
+                    ..
+                })
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn first_live_evidence_invalidity_remains_a_terminal_protocol_failure() {
+        let no_caret = TextReadbackEvidence {
+            character_count: 2,
+            caret_offset: -1,
+            selections: Vec::new(),
+        };
+        for result in [
+            validate_live_value_bounds(3.0, 0.0, 2.0),
+            validate_live_value_bounds(1.0, f64::NAN, 2.0),
+            resolve_text_insertion_start(Some(TextInsertPosition::LiveCaret), &no_caret).map(drop),
+            resolve_text_insertion_start(Some(TextInsertPosition::Offset(3)), &no_caret).map(drop),
+            validate_classified_text_role(130, true),
+        ] {
+            assert!(matches!(
+                result,
+                Err(BackendFailure {
+                    kind: BackendFailureKind::Protocol,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
     fn application_cache_root_rejects_missing_multiple_and_mixed_roots()
     -> Result<(), Box<dyn Error>> {
         let application = address(":1.79", "app")?;
@@ -5380,15 +5878,24 @@ mod tests {
                 keybinding: "k".repeat(4_096),
             })
             .collect::<Vec<_>>();
-        assert!(validate_actions(&oversized).is_err());
-        assert!(
+        assert!(matches!(
+            validate_actions(&oversized),
+            Err(BackendFailure {
+                kind: BackendFailureKind::Protocol,
+                ..
+            })
+        ));
+        assert!(matches!(
             validate_actions(&[atspi_proxies::common::Action {
                 name: "click\nsecond-line".to_owned(),
                 description: String::new(),
                 keybinding: String::new(),
-            }])
-            .is_err()
-        );
+            }]),
+            Err(BackendFailure {
+                kind: BackendFailureKind::Protocol,
+                ..
+            })
+        ));
     }
 
     #[test]

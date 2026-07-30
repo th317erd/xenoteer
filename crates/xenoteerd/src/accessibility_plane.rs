@@ -1300,7 +1300,8 @@ fn correlation_error_is_stale(error: &AccessibilityCorrelationCoordinatorError) 
             SemanticError::StaleAccessibilityGeneration { .. }
                 | SemanticError::StaleApplicationGeneration { .. }
                 | SemanticError::StaleCacheRevision { .. }
-                | SemanticError::StaleIdentity,
+                | SemanticError::StaleIdentity
+                | SemanticError::PreDispatchConflict,
         )
     )
 }

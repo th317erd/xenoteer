@@ -861,12 +861,8 @@ async fn coordinator_retries_only_stale_evidence_and_exhausts_boundedly() {
     let nodes = correlation_nodes();
     fixture.bootstrap(nodes.clone()).await;
     let button = element_by_name(&fixture, "Go").await;
-    let stale = || {
-        AccessibilityCorrelationCoordinatorError::Actor(SemanticError::StaleCacheRevision {
-            expected: 1,
-            current: 2,
-        })
-    };
+    let stale =
+        || AccessibilityCorrelationCoordinatorError::Actor(SemanticError::PreDispatchConflict);
     let observer = Arc::new(FakeCorrelationObserver::new([
         (address(BUTTON_PATH), Err(stale())),
         (

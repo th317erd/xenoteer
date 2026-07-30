@@ -794,3 +794,39 @@
   valid accessibility results can reach 16 MiB, clipboard artifacts 16 MiB,
   and other private artifacts 32 MiB. Artifact transfer is bounded streaming
   with exact scope, length, purpose, content type, and SHA-256 validation.
+- Source `aff69fadc10c506c2837099d6d866fe4348d425a` produced coherent
+  diagnostic production image
+  `sha256:0fea36dfbf24dab8a5c17cae7da3a519930d4e5dfa34fe94077ff5bf92d99799`
+  and exact derived fixture
+  `sha256:7272c87b60b8513ea7bde327529dba419f7f8469b5c736f2d51076df6895c488`.
+  Production acceptance, Phase-4 live API/event-flood, real noVNC, and the
+  normal+hardened desktop-app matrix passed. The first Phase-5 live run failed
+  protected `element_set_text` as `backend_failure / none / never`, so both
+  image identities are rejected and no controlled rerun can qualify them.
+- That failure exposed a latent AT-SPI pre-dispatch classification defect.
+  Backend ingress epoch changes and legitimate second-read drift in action
+  metadata, text evidence, admitted semantic identity/state, fresh observation,
+  and targeted refresh are now one typed `PreDispatchConflict`. Mutation,
+  observation, and reconcile paths preserve that no effect was dispatched; the
+  daemon may reacquire evidence once and then returns
+  `stale_reference / none / after_resync` if conflict repeats. First-read
+  invalidity, malformed/oversized/unsupported data, decoding and limit failures,
+  and generic protocol errors remain terminal. Any backend failure after the
+  dispatch marker remains outcome-unknown and permits only same-command-ID
+  dedupe/retrieval, never a new effect replay.
+- Fail-first tests reproduce the original generic-Protocol result at the permit
+  boundary and all five live evidence-drift families. Composition tests prove
+  one conflict yields two attempts and exactly one dispatch for protected
+  set-text and semantic text-insert; repeated conflicts yield two attempts and
+  zero dispatches; generic pre-dispatch Protocol yields one attempt/zero
+  dispatches; post-dispatch Protocol yields one attempt/one dispatch. Protected
+  text remains absent from all evidence and diagnostics. The expanded source
+  passed all-target/all-feature workspace tests, strict Clippy, doctests,
+  warnings-as-errors Rustdoc, the isolated live AT-SPI fixture, and the full
+  authenticated X11/XTEST/capture/daemon native harness. Two independent final
+  reviews found no remaining correctness, security, or test-realism issue.
+- `BackendFailureKind` and `SemanticError` remain exhaustive internal Rust
+  boundaries so future effect classifications force every consumer to update.
+  Adding `PreDispatchConflict` is an intentional pre-1.0 source break in a
+  `publish = false` server-side crate; no wire protocol or public SDK contract
+  changed.

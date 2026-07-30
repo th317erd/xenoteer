@@ -632,6 +632,9 @@ pub enum SemanticError {
     /// Target disappeared or its application, role, state, or node revision changed.
     #[error("AT-SPI semantic target identity changed")]
     StaleIdentity,
+    /// A backend event invalidated the admitted preflight before any dispatch.
+    #[error("AT-SPI semantic pre-dispatch ingress changed")]
+    PreDispatchConflict,
     /// Required semantic interface was absent from the exact cached node.
     #[error("AT-SPI semantic target lacks interface {0}")]
     InterfaceUnavailable(&'static str),
@@ -760,7 +763,7 @@ impl SemanticDispatchPermit {
             Ok(())
         } else {
             Err(BackendFailure::new(
-                crate::BackendFailureKind::Protocol,
+                crate::BackendFailureKind::PreDispatchConflict,
                 "backend ingress changed during semantic preflight",
             ))
         }

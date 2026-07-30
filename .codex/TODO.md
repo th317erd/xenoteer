@@ -191,6 +191,27 @@ Plan: `plans/15-phased-implementation.md`
         even though the controlled rerun and all other live lanes passed
   - [ ] Build the final coherent Phase 6 image, run the gate against its exact
         immutable ID, and record only that successful image/package identity
+    - [ ] Diagnose and close the first-run Phase-5 live `element_set_text`
+          backend failure on fresh source `aff69fa`; do not accept or blindly
+          rerun production `0fea36df` / fixture `7272c87b` until the failure
+          class has a fail-first regression and verified disposition
+      - [x] Trace the failure to an ingress-epoch change during AT-SPI
+            pre-dispatch work that is incorrectly classified as a generic
+            protocol/backend failure; rule out a harness readiness workaround
+      - [x] Introduce a typed, definitely-pre-dispatch ingress-conflict result
+            across mutation, fresh observation, and targeted reconcile paths
+        - [x] Classify every legitimate live preflight evidence-drift branch
+              (action metadata, identity/state, text evidence, observation, and
+              targeted refresh) as the same retryable conflict while keeping
+              malformed, oversized, and unsupported protocol data terminal
+      - [x] Prove one conflict is retried once with exactly one eventual
+            dispatch for both protected `element_set_text` and semantic
+            `text_insert`
+      - [x] Prove repeated conflicts terminate boundedly as stale/no-effect,
+            while generic protocol and every post-dispatch failure remain
+            terminal and unreplayed
+      - [x] Run focused AT-SPI/daemon tests plus complete workspace lint,
+            documentation, and native gates before building another image
 - [ ] Complete Phase 6 closure review, update implementation details, and commit
       and push the verified phase boundary
 
