@@ -119,6 +119,8 @@ novnc_container_name=xenoteer-novnc-$novnc_alias_nonce
 
 xenoteer_prepare_local_image_iidfile
 xenoteer_run_guarded_local_image_command docker build \
+    --provenance=false \
+    --sbom=false \
     --cpu-quota 200000 \
     --cpu-period 100000 \
     --memory 6g \

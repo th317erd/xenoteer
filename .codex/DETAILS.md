@@ -1661,3 +1661,116 @@
   Phase-7 Cargo or Docker work to overlap existing heavy gates, so the design
   remains closed to implementation until a corrected artifact is independently
   accepted.
+- Repair commit `17c2f29febca343f16f7defcaf96cabacea7f9d7` produced clean
+  production image
+  `sha256:68c8b65acf1a3398e27c210a103cc6c7730caf9eb131a653bf6c1fc2d6d99018`
+  and exact derived desktop fixture
+  `sha256:ff435909cbcc41dbd1530fcadcdf3157915f67a9ca110b6a27ebfc877a62e2b4`.
+  Both record source tree
+  `0ee3396f3c1b7a1051b6949d9b32137dc4cf3bddc010682e38e2789ce5876e21`,
+  dependency lock
+  `b7db3b0586412ff866441664a8ce11eaee23cc3172f1d9733e41e3d5f2524151`,
+  and `dirty=false`; the fixture records the exact production ID and preserves
+  its 28-layer prefix in 32 total layers. Production and fixture build logs
+  have SHA-256
+  `d57a2d8ccc39c1fe26ab155161bbf22b4b2ca2d637e07fcd2ab38d2e69447627`
+  and
+  `5832ee4f3e3efd08687927be80fb93861b6f125caf5a3bdd34bd7c761e5aeaa6`.
+- That pair is permanently rejected after its only canonical attempt. Phase-5
+  AT-SPI, production lifecycle, Phase-4 live fixtures, and Phase-4 event flood
+  passed in lanes 1-4 with log SHA-256 values
+  `28ef8088296cea1f7fb32eeb47b42dab0f807125f2373f184f9bbba2321854d6`,
+  `e342ebb8d2afd1b31bfe74173adbbf8c08dc09b33f15df48bc0adc27ce4f8081`,
+  `8120aa31a608be5db7cd85384cf5ffc5bff6ff0107a8aa1c32b819a62cdb6ea7`,
+  and
+  `d370f0f9dbbd96edf6ef70a191728cb51e90eb8ffba2087648b954977184244f`.
+  Lane 5 then rejected before noVNC runtime assertions in 4.072 seconds with
+  log SHA-256
+  `fe2c788eed905717c4399583e6a565ba37315379d7bddc41d22a6b15d2777db6`;
+  lanes 6-7 were not started. Attempt-manifest SHA-256 is
+  `d98e9276a145a4338ec5fe1d7812af97f1f086897fac09d86b6d512c98113b5a`
+  and canonical stdout SHA-256 is
+  `17d5789c21f573957efa27e34ce32c8999ffa07b97e1740dfea960bb41bfc435`.
+- The noVNC rejection exposed another modern BuildKit identity boundary.
+  Default provenance added an attestation and exported top-level OCI index
+  `sha256:4d1750c620f67fe0ef962fa4b42450d0098a149629b9bcf277eaab3fe24f2416`,
+  containing amd64 image manifest
+  `sha256:fb92d92cdd49a2c1c55d19f0750e896493f0cf220c780e897e01459d6b91fbde`
+  and attestation manifest
+  `sha256:ec311861e492876661b407197d56fbe93773ab877f58c801ad2c74193a1f6468`;
+  the secure IID/config digest was
+  `sha256:a78e07671ecd2c3402da7cbd6de4e07da14ec1d6359e9934a0f004ccd0399746`.
+  The top index descriptor cannot prove the selected child manifest's config
+  linkage, so the shared helper correctly failed closed instead of treating
+  the index as an image manifest. All three local derived-image producers
+  (noVNC, browser, and desktop fixture) need one explicit attestation-free
+  single-platform build contract; fixing only the observed noVNC caller would
+  leave the same latent failure in its siblings.
+- The first all-wrapper attestation repair is frozen by
+  `/tmp/codex/xenoteer-attestation-index-final-hashes.txt`, SHA-256
+  `cf6c1c06ac9dfc1dbe22f50650e6ef44b0afec65d09ab75d0f1e00c316051ec4`.
+  Its 15-failure RED has SHA-256
+  `eed488a4d366f1caaefbfee8cc8ee7426532d3c6694b86e8b41ec21dddd0eb0a`;
+  author tests then passed 4/4 focused, 45/45 full local-image, and 72/72
+  Phase-6 Python checks. Independent review nevertheless rejected that
+  snapshot at 0 High / 3 Medium / 1 Low. The fixture's token scan did not own
+  Docker's option grammar, context, tag, IID, file, or output/export boundary;
+  fake Docker ignored option termination, exact context arity, value
+  consumption, short aliases, and repeat semantics; the durable suite covered
+  only the OCI index media type and the RED predated its repeated-platform
+  case; and the fixture README omitted those restrictions. The correction must
+  use a narrow documented option allowlist, faithful bounded fake parsing, and
+  explicit Docker manifest-list plus honest current-patch RED coverage before
+  any Docker or static acceptance run.
+- The corrected attestation/index repair is frozen by
+  `/tmp/codex/xenoteer-attestation-index-correction-final-hashes.txt`,
+  SHA-256
+  `210849e9a85499cf737c20d6490b40d46719c2f1664d2df31387b1bd4c5e6f83`.
+  Its honest current-patch RED has SHA-256
+  `9ba672f807c51d7d0e580465659a58a6b694b6e022687d2a37fc2dea3df80aa8`
+  and records 39 failures plus two errors across five focused methods; its
+  temporary repeated-platform mutation RED has SHA-256
+  `b4bdeec49c9c6dc2bf6220b092759a85abc6197a7dc562454d68bea6a54bdf8f`.
+  The final fixture wrapper accepts only one each of bounded `--platform`,
+  `--builder`, `--cpu-period`, `--cpu-quota`, and `--memory`, plus one
+  value-free `--no-cache`; it rejects every caller-owned context, tag,
+  Dockerfile, IID, exporter, load/push, attestation, duplicate, malformed, or
+  unknown control before Docker. The fake Docker parser now models the option
+  terminator, exact context arity, long/short aliases, value consumption,
+  repeatable arrays, last-scalar semantics, and non-image outputs. OCI indexes
+  and Docker manifest lists are both durably rejected. Author gates pass 5/5
+  focused, 47/47 local-image, and 72/72 Phase 6; independent gates pass 6/6,
+  47/47, and 72/72 plus syntax, ShellCheck, AST, diff, double-hash, and residue
+  checks. Both reviews accept at H0/M0/L0. A scratch-only real BuildKit
+  direct-manifest/IID proof and the full static gate now pass. Evidence is
+  retained at
+  `/tmp/codex/xenoteer-phase6-buildkit-proof-20260730-accepted`;
+  `SHA256SUMS` has SHA-256
+  `c6ec0ad32cebdd21b11f231c73720a330625d8b1c4ae12398be27b60f2418b76`.
+  The direct diagnostic tag resolves to manifest
+  `sha256:a21a65e1ac3aaac5b80dee0b239faed8d5f0144d0a3bf9bb57220f185e3bc0ca`;
+  its direct Docker-v2 descriptor has the same digest and binds exact config
+  IID
+  `sha256:38a2620e4b3e08e8820b7975befda23e288efe8b43b7917adee5909339a24e13`
+  through `config.digest`. This backend emitted the same direct manifest for
+  the default scratch diagnostic, recorded honestly as
+  `DEFAULT_INDEX_NOT_OBSERVED`. Both diagnostic tags/images and all evidence
+  remain retained. The first static attempt correctly rejected two generated
+  SDK bytecode files and is retained with SHA-256
+  `cba5e816f2bdbee02025090ce2e1f9eacb084227cb5231e205a894a8f6269df4`;
+  after removing only those exact generated files, the complete two-job,
+  nice-15, idle-I/O static gate passed with log SHA-256
+  `1b8ca3748b0a82c62f9059a0751b13e4e7b9653006251bd95e45e09f5c2e9b7a`.
+- The Phase-7.1 corrected-v2 design is frozen at
+  `/tmp/codex/xenoteer-phase7-wave1-design-corrected-v2.md`, SHA-256
+  `78a9710b7898be4aab35beafb61a718592fc275a70d755da861f7b2c3e16b0fd`
+  (1,439 lines, 75,100 bytes). Its self-review is H0/M0/L0 and it resolves the
+  prior H0/M5/L6 set, but the fresh independent review has already confirmed
+  one new Medium: an uncaught top-level `run_daemon` panic can unwind into
+  Tokio Runtime Drop while the hard watchdog remains unarmed. Its completed
+  review verdict is H0/M3/L0: daemon-wide hook/catch panic containment is
+  missing; WebSocket readiness rechecks are TOCTOU with `begin_drain` and need
+  one shared upgrade-commit gate; and a bounded-length blocking bootstrap
+  stderr write can hang before `_exit(1)` while no watchdog exists.
+  Implementation stays closed until corrected-v3 resolves all three and
+  independently reaches H0/M0.

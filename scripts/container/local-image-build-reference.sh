@@ -630,6 +630,10 @@ MANIFEST_MEDIA_TYPES = {
     "application/vnd.docker.distribution.manifest.v2+json",
     "application/vnd.oci.image.manifest.v1+json",
 }
+INDEX_MEDIA_TYPES = {
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.oci.image.index.v1+json",
+}
 
 base_id, build_iid = sys.argv[1:]
 try:
@@ -688,6 +692,11 @@ if descriptor is not None:
     manifest_digest = descriptor.get("digest")
     descriptor_size = descriptor.get("size")
     annotations = descriptor.get("annotations")
+    if media_type in INDEX_MEDIA_TYPES:
+        raise SystemExit(
+            "tagged output is an image index; disable BuildKit provenance "
+            "and SBOM attestations and request exactly one platform"
+        )
     if media_type not in MANIFEST_MEDIA_TYPES:
         raise SystemExit("unsupported tagged output manifest media type")
     if (

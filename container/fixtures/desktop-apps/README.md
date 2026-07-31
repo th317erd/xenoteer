@@ -34,7 +34,28 @@ derived image label. On a classic image store the IID must equal the tagged
 output's exact image ID. On a containerd image store the IID must instead equal
 the `config.digest` annotation in the tagged output's manifest descriptor,
 whose digest must equal the tagged output's exact image ID. The wrapper compares
-the exact rootfs-layer prefix using only that frozen exact output ID.
+the exact rootfs-layer prefix using only that frozen exact output ID. The
+producer fixes `--provenance=false` and `--sbom=false` so the local output stays
+one directly inspectable platform manifest. The only caller build options are
+at most one each of `--platform`, `--builder`, `--cpu-period`, `--cpu-quota`,
+and `--memory`, plus at most one value-free `--no-cache`; split and
+`--option=value` forms are accepted only with validated, bounded values:
+`--platform` is `local` or OCI `os/arch[/variant]`, with every component 1–32
+characters, beginning with a lowercase letter or digit and otherwise containing
+only lowercase letters, digits, `_`, `.`, and `-`; `--builder` is a 1–128
+character Docker name made from letters, digits, `_`, `.`, and `-`, beginning
+with a letter or digit;
+`--cpu-period` is 1000–1000000; `--cpu-quota` is 1–1000000000; and `--memory`
+is positive bytes or a `b`, `k`, `m`, or `g` quantity no greater than 1 TiB.
+A bare `--`, positional context, duplicates, unknown controls,
+`-t`/`--tag`, `-f`/`--file`,
+`--iidfile`, `-o`/`--output`, push/load/export controls, and all
+`--provenance`, `--sbom`, or `--attest` forms are rejected before Docker. The
+wrapper exclusively owns the repository context, output tag, IID file,
+Dockerfile, exporter/load behavior, internal build arguments and labels, and
+attestation policy. OCI indexes and Docker manifest lists remain rejected
+because their top-level descriptors do not bind the build IID to one image
+config.
 Post-proof label checks never resolve the mutable output tag. The alias is
 collision-checked, continuously bound to the exact source, and removed only
 while it still has the expected identity and another durable source reference

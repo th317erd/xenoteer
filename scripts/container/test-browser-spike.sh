@@ -47,6 +47,8 @@ xenoteer_verify_local_image_alias
 
 xenoteer_prepare_local_image_iidfile
 xenoteer_run_guarded_local_image_command docker build \
+  --provenance=false \
+  --sbom=false \
   --build-arg "XENOTEER_RUNTIME_IMAGE=$XENOTEER_LOCAL_IMAGE_ALIAS" \
   --iidfile "$XENOTEER_LOCAL_IMAGE_IIDFILE" \
   --file "$repo_root/container/spikes/browser/Dockerfile" \

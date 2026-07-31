@@ -39,7 +39,10 @@ output's exact image ID. On a containerd image store the IID must instead equal
 the `config.digest` annotation in the tagged output's manifest descriptor,
 whose digest must equal the tagged output's exact image ID. After the complete
 base-layer prefix is proved, both runtime profiles use only that frozen exact
-output ID.
+output ID. The producer disables BuildKit provenance and SBOM attestations so
+the local output is one platform manifest; OCI indexes and Docker manifest
+lists remain rejected because their top-level descriptors do not bind the
+build IID to one image config.
 Each container name is recorded before `docker run`; signal cleanup terminates
 and reaps the active Docker client before removing any possibly created
 container. The temporary build alias is removed only while it remains owned

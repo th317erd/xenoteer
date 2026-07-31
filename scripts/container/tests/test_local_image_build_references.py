@@ -32,6 +32,7 @@ EXACT_IMAGE_ID = "sha256:" + ("ab" * 32)
 FOREIGN_IMAGE_ID = "sha256:" + ("cd" * 32)
 DERIVED_IMAGE_ID = "sha256:" + ("ef" * 32)
 MANIFEST_IMAGE_ID = "sha256:" + ("12" * 32)
+INDEX_IMAGE_ID = "sha256:" + ("34" * 32)
 ELECTRON_SHA256 = next(
     line.removeprefix("ELECTRON_LINUX_X64_SHA256=")
     for line in FIXTURE_ARTIFACT_LOCK.read_text(encoding="utf-8").splitlines()
@@ -53,7 +54,7 @@ class FakeDockerCase:
         self.state = root / "docker-state.json"
         self.state.write_text(
             '{"aliases": {}, "alias_inspects": {}, "images": {}, '
-            '"containers": {}, '
+            '"containers": {}, "build_outputs": [], '
             '"source_inspects": 0, "source_metadata_inspects": 0, '
             '"source_present": true}',
             encoding="utf-8",
@@ -82,6 +83,7 @@ class FakeDockerCase:
             foreign = os.environ.get("FAKE_FOREIGN_IMAGE_ID", exact)
             derived = os.environ["FAKE_DERIVED_IMAGE_ID"]
             manifest = os.environ["FAKE_MANIFEST_IMAGE_ID"]
+            image_index = os.environ["FAKE_INDEX_IMAGE_ID"]
             iid_mode = os.environ.get("FAKE_IID_MODE", "classic")
 
             def finish(status=0, output=None):
@@ -305,6 +307,7 @@ class FakeDockerCase:
                         (
                             iid_mode == "containerd"
                             or os.environ.get("FAKE_CLASSIC_DESCRIPTOR") == "1"
+                            or output_id == image_index
                         )
                         and os.environ.get("FAKE_DESCRIPTOR_OMIT") != "1"
                     ):
@@ -338,6 +341,9 @@ class FakeDockerCase:
                             else 1_234
                         )
                         descriptor_annotations = (
+                            {}
+                            if output_id == image_index
+                            else
                             ["not", "an", "annotation map"]
                             if os.environ.get(
                                 "FAKE_DESCRIPTOR_ANNOTATIONS_INVALID"
@@ -355,9 +361,13 @@ class FakeDockerCase:
                             }
                         )
                         output_metadata["Descriptor"] = {
-                            "mediaType": os.environ.get(
-                                "FAKE_DESCRIPTOR_MEDIA_TYPE",
-                                "application/vnd.oci.image.manifest.v1+json",
+                            "mediaType": (
+                                "application/vnd.oci.image.index.v1+json"
+                                if output_id == image_index
+                                else os.environ.get(
+                                    "FAKE_DESCRIPTOR_MEDIA_TYPE",
+                                    "application/vnd.oci.image.manifest.v1+json",
+                                )
                             ),
                             "digest": descriptor_digest,
                             "size": descriptor_size,
@@ -420,7 +430,104 @@ class FakeDockerCase:
                     state["source_present"] = False
                 finish()
             if args and args[0] == "build":
-                for argument in args:
+                scalar_options = {}
+                array_options = {
+                    "attest": [],
+                    "build-arg": [],
+                    "label": [],
+                    "output": [],
+                    "platform": [],
+                    "tag": [],
+                }
+                boolean_options = set()
+                long_value_options = {
+                    "--attest": ("attest", True),
+                    "--build-arg": ("build-arg", True),
+                    "--builder": ("builder", False),
+                    "--cpu-period": ("cpu-period", False),
+                    "--cpu-quota": ("cpu-quota", False),
+                    "--file": ("file", False),
+                    "--iidfile": ("iidfile", False),
+                    "--label": ("label", True),
+                    "--memory": ("memory", False),
+                    "--output": ("output", True),
+                    "--platform": ("platform", True),
+                    "--provenance": ("provenance", False),
+                    "--sbom": ("sbom", False),
+                    "--tag": ("tag", True),
+                }
+                short_value_options = {
+                    "-f": ("file", False),
+                    "-o": ("output", True),
+                    "-t": ("tag", True),
+                }
+                long_boolean_options = {
+                    "--load": "load",
+                    "--no-cache": "no-cache",
+                    "--push": "push",
+                }
+                contexts = []
+                parse_options = True
+                option_index = 1
+                while option_index < len(args):
+                    argument = args[option_index]
+                    if parse_options and argument == "--":
+                        parse_options = False
+                        option_index += 1
+                        continue
+                    if not parse_options or not argument.startswith("-"):
+                        contexts.append(argument)
+                        option_index += 1
+                        continue
+                    if argument in long_boolean_options:
+                        boolean_options.add(long_boolean_options[argument])
+                        option_index += 1
+                        continue
+                    if argument.startswith("--"):
+                        option_name, separator, option_value = argument.partition("=")
+                        option_contract = long_value_options.get(option_name)
+                        if option_contract is None:
+                            finish(98)
+                        if not separator:
+                            if (
+                                option_index + 1 >= len(args)
+                                or args[option_index + 1].startswith("-")
+                            ):
+                                finish(98)
+                            option_value = args[option_index + 1]
+                            option_index += 1
+                        if not option_value:
+                            finish(98)
+                    else:
+                        option_name = argument[:2]
+                        option_contract = short_value_options.get(option_name)
+                        if option_contract is None:
+                            finish(98)
+                        if len(argument) == 2:
+                            if (
+                                option_index + 1 >= len(args)
+                                or args[option_index + 1].startswith("-")
+                            ):
+                                finish(98)
+                            option_value = args[option_index + 1]
+                            option_index += 1
+                        else:
+                            option_value = argument[2:]
+                            if option_value.startswith("="):
+                                option_value = option_value[1:]
+                        if not option_value:
+                            finish(98)
+                    option_key, repeatable = option_contract
+                    if repeatable:
+                        array_options[option_key].append(option_value)
+                    else:
+                        scalar_options[option_key] = option_value
+                    option_index += 1
+                if len(contexts) != 1:
+                    finish(98)
+                state["build_outputs"] = array_options["output"]
+
+                for argument in array_options["build-arg"]:
                     if (
                         argument.startswith("SPIKE_BASE_IMAGE=sha256:")
                         or argument.startswith("XENOTEER_RUNTIME_IMAGE=sha256:")
@@ -435,22 +542,56 @@ class FakeDockerCase:
                         alias = argument.split("=", 1)[1]
                         if state["aliases"].get(alias) != exact:
                             finish(87)
+
+                provenance_disabled = (
+                    scalar_options.get("provenance") == "false"
+                )
+                sbom_disabled = scalar_options.get("sbom") == "false"
+                single_platform = (
+                    len(array_options["platform"]) <= 1
+                    and all(
+                        value and "," not in value
+                        for value in array_options["platform"]
+                    )
+                )
+                emits_index = (
+                    os.environ.get("FAKE_DEFAULT_ATTESTATION_INDEX") == "1"
+                    and (
+                        not provenance_disabled
+                        or not sbom_disabled
+                        or bool(array_options["attest"])
+                    )
+                ) or not single_platform
                 build_failure = int(os.environ.get("FAKE_BUILD_FAIL", "0"))
-                if "--tag" in args:
+                if array_options["tag"]:
                     derived_id = (
                         exact
                         if os.environ.get("FAKE_DERIVED_IS_BASE") == "1"
                         else derived
                     )
                     output_id = (
+                        image_index
+                        if emits_index and derived_id != exact
+                        else
                         manifest
                         if iid_mode == "containerd"
                         and derived_id != exact
                         else derived_id
                     )
-                    state["images"][args[args.index("--tag") + 1]] = output_id
-                    if "--iidfile" in args:
-                        iid_path = args[args.index("--iidfile") + 1]
+                    non_image_output = any(
+                        output == "local"
+                        or output.startswith("type=local,")
+                        or output == "oci"
+                        or output.startswith("type=oci,")
+                        or output == "tar"
+                        or output.startswith("type=tar,")
+                        for output in array_options["output"]
+                    )
+                    if "push" not in boolean_options and not non_image_output:
+                        for tag in array_options["tag"]:
+                            state["images"][tag] = output_id
+                    iid_path = scalar_options.get("iidfile")
+                    if iid_path is not None:
                         if os.environ.get("FAKE_REQUIRE_ABSENT_IID") == "1":
                             reservation_stat = os.lstat(
                                 os.path.dirname(iid_path)
@@ -535,6 +676,7 @@ class FakeDockerCase:
             "FAKE_FOREIGN_IMAGE_ID": FOREIGN_IMAGE_ID,
             "FAKE_DERIVED_IMAGE_ID": DERIVED_IMAGE_ID,
             "FAKE_MANIFEST_IMAGE_ID": MANIFEST_IMAGE_ID,
+            "FAKE_INDEX_IMAGE_ID": INDEX_IMAGE_ID,
             "FAKE_ELECTRON_SHA256": ELECTRON_SHA256,
             "HOME": str(self.root),
             "LANG": "C",
@@ -957,6 +1099,405 @@ class LocalImageBuildReferenceTests(unittest.TestCase):
             self.assertEqual(len(runs), 1)
             self.assertEqual(runs[0][-1], DERIVED_IMAGE_ID)
 
+    def test_all_local_derived_builds_disable_default_attestations(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "novnc",
+                [str(NOVNC_GATE)],
+                {
+                    "XENOTEER_NOVNC_SPIKE_BASE_IMAGE": EXACT_IMAGE_ID,
+                    "XENOTEER_NOVNC_SPIKE_IMAGE": "xenoteer:novnc-attestation-test",
+                },
+            ),
+            (
+                "browser",
+                [
+                    str(BROWSER_GATE),
+                    EXACT_IMAGE_ID,
+                    "xenoteer:browser-attestation-test",
+                ],
+                {},
+            ),
+            (
+                "fixture",
+                [str(FIXTURE_BUILDER)],
+                {
+                    "XENOTEER_IMAGE": EXACT_IMAGE_ID,
+                    "XENOTEER_DESKTOP_APPS_IMAGE": (
+                        "xenoteer:fixture-attestation-test"
+                    ),
+                },
+            ),
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="xenoteer-build-attestation-test-",
+        ) as temporary:
+            root = Path(temporary)
+            for index, (name, command, overrides) in enumerate(cases):
+                with self.subTest(name=name):
+                    case_root = root / str(index)
+                    case_root.mkdir()
+                    fake = FakeDockerCase(case_root)
+                    completed = self.run_command(
+                        command,
+                        fake.environment(
+                            **overrides,
+                            FAKE_DEFAULT_ATTESTATION_INDEX="1",
+                            FAKE_IID_MODE="containerd",
+                        ),
+                    )
+
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    build = next(
+                        call for call in fake.calls() if call[0] == "build"
+                    )
+                    self.assertIn("--provenance=false", build)
+                    self.assertIn("--sbom=false", build)
+                    self.assertFalse(
+                        any(
+                            argument == "--attest"
+                            or argument.startswith("--attest=")
+                            for argument in build
+                        ),
+                        build,
+                    )
+
+    def test_fixture_rejects_ambiguous_manifest_build_options_before_docker(
+        self,
+    ) -> None:
+        cases = (
+            ("provenance-equals", ["--provenance=true"], "attestation"),
+            ("provenance-split", ["--provenance", "false"], "attestation"),
+            ("sbom-equals", ["--sbom=true"], "attestation"),
+            ("sbom-split", ["--sbom", "false"], "attestation"),
+            (
+                "attest-equals",
+                ["--attest=type=provenance,disabled=true"],
+                "attestation",
+            ),
+            (
+                "attest-split",
+                ["--attest", "type=sbom,disabled=false"],
+                "attestation",
+            ),
+            (
+                "multi-platform-equals",
+                ["--platform=linux/amd64,linux/arm64"],
+                "single-platform",
+            ),
+            (
+                "multi-platform-split",
+                ["--platform", "linux/amd64,linux/arm64"],
+                "single-platform",
+            ),
+            (
+                "repeated-platform",
+                [
+                    "--platform=linux/amd64",
+                    "--platform",
+                    "linux/arm64",
+                ],
+                "single-platform",
+            ),
+            ("empty-platform", ["--platform="], "single-platform"),
+            ("missing-platform", ["--platform"], "single-platform"),
+            ("bare-option-terminator", ["--"], "not permitted"),
+            ("positional-context", ["."], "not permitted"),
+            ("short-tag-split", ["-t", "xenoteer:foreign"], "not permitted"),
+            ("short-tag-joined", ["-txenoteer:foreign"], "not permitted"),
+            ("long-tag", ["--tag=xenoteer:foreign"], "not permitted"),
+            ("short-file", ["-f", "Dockerfile.foreign"], "not permitted"),
+            ("long-file", ["--file=Dockerfile.foreign"], "not permitted"),
+            (
+                "owned-iidfile",
+                ["--iidfile=/tmp/foreign-iid"],
+                "not permitted",
+            ),
+            (
+                "short-output",
+                ["-o", "type=local,dest=/tmp/foreign-output"],
+                "not permitted",
+            ),
+            (
+                "long-output",
+                ["--output=type=local,dest=/tmp/foreign-output"],
+                "not permitted",
+            ),
+            ("push", ["--push"], "not permitted"),
+            ("load", ["--load"], "not permitted"),
+            ("other-control", ["--target", "foreign-stage"], "not permitted"),
+            ("unknown-control", ["--definitely-unknown"], "not permitted"),
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="xenoteer-fixture-build-options-test-",
+        ) as temporary:
+            root = Path(temporary)
+            for index, (name, arguments, expected_error) in enumerate(cases):
+                with self.subTest(name=name):
+                    case_root = root / str(index)
+                    case_root.mkdir()
+                    fake = FakeDockerCase(case_root)
+                    completed = self.run_command(
+                        [str(FIXTURE_BUILDER), *arguments],
+                        fake.environment(XENOTEER_IMAGE=EXACT_IMAGE_ID),
+                    )
+
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertIn(expected_error, completed.stderr)
+                    self.assertEqual(fake.calls(), [])
+
+    def test_fixture_rejects_invalid_allowlisted_build_options_before_docker(
+        self,
+    ) -> None:
+        cases = (
+            ("builder-missing", ["--builder"]),
+            ("builder-empty", ["--builder="]),
+            ("builder-option-shaped", ["--builder", "--no-cache"]),
+            ("builder-invalid", ["--builder", "unsafe/name"]),
+            ("builder-too-long", ["--builder=" + ("a" * 129)]),
+            ("builder-duplicate", ["--builder=a", "--builder", "b"]),
+            ("platform-invalid", ["--platform=linux"]),
+            (
+                "platform-component-too-long",
+                ["--platform=linux/" + ("a" * 33)],
+            ),
+            ("cpu-period-missing", ["--cpu-period"]),
+            ("cpu-period-small", ["--cpu-period=999"]),
+            ("cpu-period-large", ["--cpu-period=1000001"]),
+            ("cpu-period-nonnumeric", ["--cpu-period", "fast"]),
+            (
+                "cpu-period-duplicate",
+                ["--cpu-period=100000", "--cpu-period", "200000"],
+            ),
+            ("cpu-quota-missing", ["--cpu-quota"]),
+            ("cpu-quota-zero", ["--cpu-quota=0"]),
+            ("cpu-quota-large", ["--cpu-quota=1000000001"]),
+            ("cpu-quota-negative", ["--cpu-quota", "-1"]),
+            (
+                "cpu-quota-duplicate",
+                ["--cpu-quota=100000", "--cpu-quota", "200000"],
+            ),
+            ("memory-missing", ["--memory"]),
+            ("memory-empty", ["--memory="]),
+            ("memory-option-shaped", ["--memory", "--no-cache"]),
+            ("memory-zero", ["--memory=0"]),
+            ("memory-invalid", ["--memory", "lots"]),
+            ("memory-large", ["--memory=1025g"]),
+            ("memory-duplicate", ["--memory=4g", "--memory", "6g"]),
+            ("no-cache-value", ["--no-cache=true"]),
+            ("no-cache-duplicate", ["--no-cache", "--no-cache"]),
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="xenoteer-fixture-invalid-allowlist-test-",
+        ) as temporary:
+            root = Path(temporary)
+            for index, (name, arguments) in enumerate(cases):
+                with self.subTest(name=name):
+                    case_root = root / str(index)
+                    case_root.mkdir()
+                    fake = FakeDockerCase(case_root)
+                    completed = self.run_command(
+                        [str(FIXTURE_BUILDER), *arguments],
+                        fake.environment(XENOTEER_IMAGE=EXACT_IMAGE_ID),
+                    )
+
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertIn(
+                        "invalid fixture build option",
+                        completed.stderr,
+                    )
+                    self.assertEqual(fake.calls(), [])
+
+    def test_fixture_allows_only_documented_build_options_with_fixed_policy(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="xenoteer-fixture-single-platform-test-",
+        ) as temporary:
+            root = Path(temporary)
+            cases = (
+                (
+                    "split",
+                    [
+                        "--platform",
+                        "linux/amd64",
+                        "--builder",
+                        "default",
+                        "--cpu-period",
+                        "1000",
+                        "--cpu-quota",
+                        "1000000000",
+                        "--memory",
+                        "1024g",
+                        "--no-cache",
+                    ],
+                ),
+                (
+                    "equals",
+                    [
+                        "--platform=linux/amd64",
+                        "--builder=default",
+                        "--cpu-period=1000000",
+                        "--cpu-quota=1",
+                        "--memory=1099511627776",
+                        "--no-cache",
+                    ],
+                ),
+            )
+            for index, (name, arguments) in enumerate(cases):
+                with self.subTest(name=name):
+                    case_root = root / str(index)
+                    case_root.mkdir()
+                    fake = FakeDockerCase(case_root)
+                    completed = self.run_command(
+                        [str(FIXTURE_BUILDER), *arguments],
+                        fake.environment(
+                            FAKE_DEFAULT_ATTESTATION_INDEX="1",
+                            FAKE_IID_MODE="containerd",
+                            XENOTEER_IMAGE=EXACT_IMAGE_ID,
+                        ),
+                    )
+
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    build = next(
+                        call for call in fake.calls() if call[0] == "build"
+                    )
+                    self.assertIn("--provenance=false", build)
+                    self.assertIn("--sbom=false", build)
+                    self.assertIn("--no-cache", build)
+                    self.assertTrue(
+                        any(
+                            argument == "--platform"
+                            or argument.startswith("--platform=")
+                            for argument in build
+                        ),
+                        build,
+                    )
+
+    def test_fake_build_parser_models_context_alias_and_option_arity(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="xenoteer-fake-build-parser-test-",
+        ) as temporary:
+            root = Path(temporary)
+
+            rejected_commands = (
+                (
+                    "bare-terminator",
+                    ["docker", "build", "--", "--tag", "hidden", "."],
+                ),
+                (
+                    "extra-context",
+                    [
+                        "docker",
+                        "build",
+                        "--tag",
+                        "xenoteer:extra-context",
+                        ".",
+                        "other",
+                    ],
+                ),
+            )
+            for index, (name, command) in enumerate(rejected_commands):
+                with self.subTest(name=name):
+                    case_root = root / f"reject-{index}"
+                    case_root.mkdir()
+                    fake = FakeDockerCase(case_root)
+                    completed = self.run_command(
+                        command,
+                        fake.environment(),
+                    )
+
+                    self.assertNotEqual(completed.returncode, 0)
+                    state = json.loads(fake.state.read_text(encoding="utf-8"))
+                    self.assertEqual(state["images"], {})
+
+            with self.subTest(name="short-tag"):
+                case_root = root / "short-tag"
+                case_root.mkdir()
+                fake = FakeDockerCase(case_root)
+                completed = self.run_command(
+                    [
+                        "docker",
+                        "build",
+                        "-t",
+                        "xenoteer:short-tag",
+                        ".",
+                    ],
+                    fake.environment(),
+                )
+
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                state = json.loads(fake.state.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    state["images"]["xenoteer:short-tag"],
+                    DERIVED_IMAGE_ID,
+                )
+
+            with self.subTest(name="short-output-changes-export"):
+                case_root = root / "short-output"
+                case_root.mkdir()
+                fake = FakeDockerCase(case_root)
+                completed = self.run_command(
+                    [
+                        "docker",
+                        "build",
+                        "-t",
+                        "xenoteer:short-output",
+                        "-o",
+                        "type=local,dest=/tmp/fake-output",
+                        ".",
+                    ],
+                    fake.environment(),
+                )
+
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                state = json.loads(fake.state.read_text(encoding="utf-8"))
+                self.assertEqual(state["images"], {})
+                self.assertEqual(
+                    state["build_outputs"],
+                    ["type=local,dest=/tmp/fake-output"],
+                )
+
+            with self.subTest(name="array-tags-and-last-scalar-iidfile"):
+                case_root = root / "arrays-scalars"
+                case_root.mkdir()
+                fake = FakeDockerCase(case_root)
+                first_iid = case_root / "first.iid"
+                last_iid = case_root / "last.iid"
+                completed = self.run_command(
+                    [
+                        "docker",
+                        "build",
+                        "--tag",
+                        "xenoteer:first-tag",
+                        "-txenoteer:second-tag",
+                        "--iidfile",
+                        str(first_iid),
+                        f"--iidfile={last_iid}",
+                        ".",
+                    ],
+                    fake.environment(),
+                )
+
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                state = json.loads(fake.state.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    state["images"],
+                    {
+                        "xenoteer:first-tag": DERIVED_IMAGE_ID,
+                        "xenoteer:second-tag": DERIVED_IMAGE_ID,
+                    },
+                )
+                self.assertFalse(first_iid.exists())
+                self.assertEqual(
+                    last_iid.read_text(encoding="ascii"),
+                    DERIVED_IMAGE_ID + "\n",
+                )
+
     def test_docker_normalized_repo_tags_preserve_proven_identity(self) -> None:
         cases = (
             (
@@ -1023,6 +1564,23 @@ class LocalImageBuildReferenceTests(unittest.TestCase):
             (
                 {"FAKE_DESCRIPTOR_MEDIA_TYPE": "text/plain"},
                 "unsupported tagged output manifest media type",
+            ),
+            (
+                {
+                    "FAKE_DESCRIPTOR_MEDIA_TYPE": (
+                        "application/vnd.oci.image.index.v1+json"
+                    )
+                },
+                "disable BuildKit provenance and SBOM attestations",
+            ),
+            (
+                {
+                    "FAKE_DESCRIPTOR_MEDIA_TYPE": (
+                        "application/vnd.docker.distribution."
+                        "manifest.list.v2+json"
+                    )
+                },
+                "disable BuildKit provenance and SBOM attestations",
             ),
             (
                 {"FAKE_DESCRIPTOR_OMIT": "1"},

@@ -8,6 +8,167 @@ fixture_image=${XENOTEER_DESKTOP_APPS_IMAGE:-xenoteer:desktop-apps-test}
 artifact_lock=$repo_root/container/fixtures/desktop-apps/artifacts.lock
 . "$repo_root/scripts/container/local-image-build-reference.sh"
 
+validate_fixture_build_options() {
+  local argument index option value numeric_value memory_amount memory_suffix
+  local memory_multiplier
+  local -a build_options=("$@")
+  local -A seen_options=()
+
+  for ((index = 0; index < ${#build_options[@]}; index++)); do
+    argument=${build_options[index]}
+    case "$argument" in
+      --provenance|--provenance=*|--sbom|--sbom=*|--attest|--attest=*)
+        printf '%s\n' \
+          'invalid fixture build option: attestation controls are not permitted; the wrapper owns --provenance=false and --sbom=false' \
+          >&2
+        return 2
+        ;;
+      --platform|--builder|--cpu-period|--cpu-quota|--memory)
+        option=${argument#--}
+        ((index += 1))
+        if ((index >= ${#build_options[@]})); then
+          if [[ $option == platform ]]; then
+            printf '%s\n' \
+              'invalid fixture build option: --platform requires one single-platform OCI value' \
+              >&2
+          else
+            printf '%s\n' \
+              "invalid fixture build option: --$option requires one value" \
+              >&2
+          fi
+          return 2
+        fi
+        value=${build_options[index]}
+        if [[ -z $value || $value == -* ]]; then
+          if [[ $option == platform ]]; then
+            printf '%s\n' \
+              'invalid fixture build option: --platform requires one single-platform OCI value' \
+              >&2
+          else
+            printf '%s\n' \
+              "invalid fixture build option: --$option requires one non-option value" \
+              >&2
+          fi
+          return 2
+        fi
+        ;;
+      --platform=*|--builder=*|--cpu-period=*|--cpu-quota=*|--memory=*)
+        option=${argument%%=*}
+        option=${option#--}
+        value=${argument#*=}
+        ;;
+      --no-cache)
+        option=no-cache
+        value=true
+        ;;
+      --no-cache=*)
+        printf '%s\n' \
+          'invalid fixture build option: --no-cache does not take a value' \
+          >&2
+        return 2
+        ;;
+      *)
+        printf '%s\n' \
+          'invalid fixture build option is not permitted; the wrapper owns context, tag, IID file, Dockerfile, output/export, and attestation policy' \
+          >&2
+        return 2
+        ;;
+    esac
+
+    if [[ -n ${seen_options[$option]+present} ]]; then
+      if [[ $option == platform ]]; then
+        printf '%s\n' \
+          'invalid fixture build option: at most one single-platform OCI value is permitted' \
+          >&2
+      else
+        printf '%s\n' \
+          "invalid fixture build option: --$option may be supplied at most once" \
+          >&2
+      fi
+      return 2
+    fi
+    seen_options[$option]=1
+
+    case "$option" in
+      platform)
+        if [[ $value != local ]] \
+            && [[ ! $value =~ ^[a-z0-9][a-z0-9._-]{0,31}/[a-z0-9][a-z0-9._-]{0,31}(/[a-z0-9][a-z0-9._-]{0,31})?$ ]]; then
+          printf '%s\n' \
+            'invalid fixture build option: --platform requires one single-platform OCI value' \
+            >&2
+          return 2
+        fi
+        ;;
+      builder)
+        if ((${#value} > 128)) \
+            || [[ ! $value =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]]; then
+          printf '%s\n' \
+            'invalid fixture build option: --builder requires one bounded Docker builder name' \
+            >&2
+          return 2
+        fi
+        ;;
+      cpu-period)
+        if [[ ! $value =~ ^[0-9]{4,7}$ ]]; then
+          printf '%s\n' \
+            'invalid fixture build option: --cpu-period requires an integer from 1000 through 1000000' \
+            >&2
+          return 2
+        fi
+        numeric_value=$((10#$value))
+        if ((numeric_value < 1000 || numeric_value > 1000000)); then
+          printf '%s\n' \
+            'invalid fixture build option: --cpu-period requires an integer from 1000 through 1000000' \
+            >&2
+          return 2
+        fi
+        ;;
+      cpu-quota)
+        if [[ ! $value =~ ^[1-9][0-9]{0,9}$ ]]; then
+          printf '%s\n' \
+            'invalid fixture build option: --cpu-quota requires a positive integer no greater than 1000000000' \
+            >&2
+          return 2
+        fi
+        numeric_value=$((10#$value))
+        if ((numeric_value > 1000000000)); then
+          printf '%s\n' \
+            'invalid fixture build option: --cpu-quota requires a positive integer no greater than 1000000000' \
+            >&2
+          return 2
+        fi
+        ;;
+      memory)
+        if [[ ! $value =~ ^([1-9][0-9]{0,12})([bBkKmMgG]|[kKmMgG][bB])?$ ]]; then
+          printf '%s\n' \
+            'invalid fixture build option: --memory requires positive bytes or a b/k/m/g unit no greater than 1 TiB' \
+            >&2
+          return 2
+        fi
+        memory_amount=$((10#${BASH_REMATCH[1]}))
+        memory_suffix=${BASH_REMATCH[2],,}
+        case "$memory_suffix" in
+          ''|b) memory_multiplier=1 ;;
+          k|kb) memory_multiplier=1024 ;;
+          m|mb) memory_multiplier=$((1024 * 1024)) ;;
+          g|gb) memory_multiplier=$((1024 * 1024 * 1024)) ;;
+          *) return 2 ;;
+        esac
+        if ((memory_amount > 1099511627776 / memory_multiplier)); then
+          printf '%s\n' \
+            'invalid fixture build option: --memory requires positive bytes or a b/k/m/g unit no greater than 1 TiB' \
+            >&2
+          return 2
+        fi
+        ;;
+      no-cache)
+        ;;
+    esac
+  done
+}
+
+validate_fixture_build_options "$@"
+
 cleanup() {
   local original_status=$? alias_cleanup_status
   trap - EXIT HUP INT TERM
@@ -56,6 +217,8 @@ printf 'building desktop fixture from immutable base %s (resolved from %s)\n' \
 xenoteer_prepare_local_image_iidfile
 xenoteer_run_guarded_local_image_command docker build \
   "$@" \
+  --provenance=false \
+  --sbom=false \
   --iidfile "$XENOTEER_LOCAL_IMAGE_IIDFILE" \
   --file "$repo_root/container/fixtures/desktop-apps/Dockerfile" \
   --build-arg "XENOTEER_BASE_IMAGE=$base_build_reference" \

@@ -403,10 +403,33 @@ Plan: `plans/15-phased-implementation.md`
           `docker.io/library/name:tag` to `name:tag` RepoTags normalization
           without weakening positional inspect, IID/config/manifest, retarget,
           or frozen-ID proofs
-  - [ ] Commit and push the identity repair, then build one fresh coherent
+  - [x] Commit and push the identity repair, then build one fresh coherent
         production/fixture pair from the clean commit
     - [x] Re-run the complete low-resource static gate on the accepted repair
           snapshot under the canonical shared lock and two-job ceiling
+  - [ ] Diagnose and close the BuildKit default-provenance OCI-index failure
+        exposed by the fresh source `17c2f29` noVNC lane
+    - [x] Permanently reject production `68c8b65a` / fixture `ff435909`
+          after lanes 1-4 passed but lane 5 rejected the attested OCI index;
+          do not rerun or accept either image
+    - [x] Reproduce the exact index failure for all three local derived-image
+          producers before enforcing one uniform attestation-free,
+          single-platform-manifest build contract
+      - [x] Preserve the first all-wrapper 15-failure RED and implement fixed
+            provenance/SBOM flags plus initial fixture argument checks
+      - [x] Correct the independent H0/M3/L1 review: use an explicit safe
+            fixture-option grammar, make fake Docker parsing faithful, cover
+            both index media types with honest RED evidence, and document the
+            wrapper-owned output boundary
+        - [x] Independently accept the corrected snapshot at H0/M0/L0 after
+              6/6 focused, 47/47 local-image, 72/72 Phase-6, static, double
+              hash, and residue gates
+    - [ ] Run focused/static/real-Docker proof and independent review before
+          committing and building one replacement coherent pair
+      - [x] Complete focused and independent review gates
+      - [x] Prove the direct-manifest/IID linkage against real BuildKit with
+            retained scratch-only diagnostics
+      - [x] Run the complete two-job low-priority static gate
   - [ ] Run the seven-lane canonical qualification exactly once against the
         fresh immutable pair and record every image/evidence identity
 
@@ -419,9 +442,19 @@ Plan: `plans/15-phased-implementation.md`
         1 High / 6 Medium review set
   - [ ] Independently re-review the corrected design to 0 High / 0 Medium
         before writing Phase-7.1 production code
-    - [ ] Replace every residual `/tmp/codex/xenoteer-heavy.lock` example with
-          the canonical `/tmp/codex/xenoteer-heavy-build.lock` so Phase-7 work
-          serializes with existing Cargo and Docker gates
+    - [x] Produce corrected-v2 design artifact with the canonical lock,
+          process-tree containment, complete shutdown territory, pre-runtime
+          watchdog, isolated Hyper mutation, exact health/path/poison/context
+          contracts, and H0/M0/L0 self-review
+    - [ ] Correct the fresh independent rejection: a top-level `run_daemon`
+          panic must arm the watchdog and reach explicit process exit without
+          entering unbounded Tokio Runtime Drop
+    - [ ] Linearize WebSocket upgrade commitment against `begin_drain` for
+          both control and viewer, with exact shutdown-wins 503 and
+          commit-wins post-101 drain semantics
+    - [ ] Make every bootstrap setup-failure exit independent of blocking
+          stderr before the watchdog/runtime exists
+    - [ ] Re-review the next frozen design to H0/M0
 - [ ] Add atomic runtime token-set reload, metadata/expiry/revocation, scoped
       principals, and deterministic active-WebSocket revocation behavior
 - [ ] Add structured security audit/metrics surfaces and one comprehensive

@@ -158,9 +158,12 @@ The IID file binds the proof to this build invocation. A classic image store
 must report the tagged output's exact image ID in that file; a containerd image
 store must report the `config.digest` annotation in the tagged output's
 manifest descriptor, whose digest must equal the tagged output's exact image
-ID. After proving that identity is distinct and has the complete base layer
-prefix, every inspect and run uses only the frozen exact output ID. The
-temporary alias is
+ID. The producer disables BuildKit provenance and SBOM attestations so the
+local output remains one directly inspectable platform manifest; an OCI index
+or Docker manifest list is rejected because its top-level descriptor cannot
+prove the build IID's config linkage. After proving that identity is distinct
+and has the complete base layer prefix, every inspect and run uses only the
+frozen exact output ID. The temporary alias is
 removed only after Docker again proves another durable source reference. A
 validated container name is recorded before launch so HUP, INT, or TERM can
 terminate and reap the Docker client, remove the runtime container, and clean
