@@ -55,7 +55,7 @@ xenoteer_run_guarded_local_image_command docker build \
 
 xenoteer_verify_local_image_alias
 
-xenoteer_verify_local_image_derivation
+xenoteer_verify_local_image_derivation "$spike_image"
 verified_spike_image_id=$XENOTEER_LOCAL_DERIVED_IMAGE_ID
 
 "$repo_root/scripts/container/test-browser-seccomp.sh"

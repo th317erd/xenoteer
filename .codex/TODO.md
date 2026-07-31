@@ -395,11 +395,33 @@ Plan: `plans/15-phased-implementation.md`
             documentation, and native gates before building another image
 - [ ] Complete Phase 6 closure review, update implementation details, and commit
       and push the verified phase boundary
+  - [x] Repair and independently review modern containerd-backed Docker
+        `--iidfile` identity resolution: retain classic-builder support, prove
+        the tagged manifest/config relationship, and fail closed on mismatch,
+        ambiguity, alias drift, hostile metadata, ownership, or ancestry
+    - [x] Reproduce and correct Docker's valid
+          `docker.io/library/name:tag` to `name:tag` RepoTags normalization
+          without weakening positional inspect, IID/config/manifest, retarget,
+          or frozen-ID proofs
+  - [ ] Commit and push the identity repair, then build one fresh coherent
+        production/fixture pair from the clean commit
+    - [x] Re-run the complete low-resource static gate on the accepted repair
+          snapshot under the canonical shared lock and two-job ceiling
+  - [ ] Run the seven-lane canonical qualification exactly once against the
+        fresh immutable pair and record every image/evidence identity
 
 ## Phase 7 — hardening and first release
 
 - [ ] Add pre-header connection admission, header/read/idle limits, reserved
       health/shutdown capacity, and raw-socket slowloris/flood/recovery tests
+  - [x] Correct the frozen Phase-7.1 design to replace same-namespace loopback
+        operations TCP with a daemon-owned Unix socket and resolve the complete
+        1 High / 6 Medium review set
+  - [ ] Independently re-review the corrected design to 0 High / 0 Medium
+        before writing Phase-7.1 production code
+    - [ ] Replace every residual `/tmp/codex/xenoteer-heavy.lock` example with
+          the canonical `/tmp/codex/xenoteer-heavy-build.lock` so Phase-7 work
+          serializes with existing Cargo and Docker gates
 - [ ] Add atomic runtime token-set reload, metadata/expiry/revocation, scoped
       principals, and deterministic active-WebSocket revocation behavior
 - [ ] Add structured security audit/metrics surfaces and one comprehensive

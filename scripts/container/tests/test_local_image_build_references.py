@@ -31,6 +31,7 @@ FIXTURE_ARTIFACT_LOCK = (
 EXACT_IMAGE_ID = "sha256:" + ("ab" * 32)
 FOREIGN_IMAGE_ID = "sha256:" + ("cd" * 32)
 DERIVED_IMAGE_ID = "sha256:" + ("ef" * 32)
+MANIFEST_IMAGE_ID = "sha256:" + ("12" * 32)
 ELECTRON_SHA256 = next(
     line.removeprefix("ELECTRON_LINUX_X64_SHA256=")
     for line in FIXTURE_ARTIFACT_LOCK.read_text(encoding="utf-8").splitlines()
@@ -80,6 +81,8 @@ class FakeDockerCase:
             source = os.environ.get("FAKE_SOURCE_REFERENCE", exact)
             foreign = os.environ.get("FAKE_FOREIGN_IMAGE_ID", exact)
             derived = os.environ["FAKE_DERIVED_IMAGE_ID"]
+            manifest = os.environ["FAKE_MANIFEST_IMAGE_ID"]
+            iid_mode = os.environ.get("FAKE_IID_MODE", "classic")
 
             def finish(status=0, output=None):
                 state_file.seek(0)
@@ -212,7 +215,11 @@ class FakeDockerCase:
                     if reference in state["images"]:
                         finish(output=state["images"][reference])
                     if reference == derived:
+                        if iid_mode == "containerd":
+                            finish(1)
                         finish(output=derived)
+                    if reference == manifest:
+                        finish(output=manifest)
                     if (
                         os.environ.get("FAKE_COLLISION") == "1"
                         and reference.startswith("xenoteer-local-build/")
@@ -230,8 +237,22 @@ class FakeDockerCase:
                 if (
                     len(references) == 2
                     and references[0] == exact
-                    and references[1] in (exact, derived)
                 ):
+                    output_reference = references[1]
+                    if output_reference in state["images"]:
+                        output_id = state["images"][output_reference]
+                    elif output_reference == derived and iid_mode == "classic":
+                        output_id = derived
+                    elif output_reference == exact:
+                        output_id = exact
+                    else:
+                        finish(1)
+                    if (
+                        os.environ.get("FAKE_RETAG_OUTPUT_BEFORE_PROOF")
+                        == "1"
+                    ):
+                        state["images"][output_reference] = foreign
+                        output_id = foreign
                     bad_prefix = os.environ.get("FAKE_BAD_LAYER_PREFIX") == "1"
                     inspect_status = (
                         75
@@ -242,25 +263,131 @@ class FakeDockerCase:
                         for image_reference, image_id in tuple(
                             state["images"].items()
                         ):
-                            if image_id == derived:
+                            if image_id == output_id:
                                 state["images"][image_reference] = foreign
+                    output_metadata = {
+                        "Id": output_id,
+                        "RepoTags": [output_reference],
+                        "RootFS": {
+                            "Layers": (
+                                ["foreign-a", "derived-c"]
+                                if bad_prefix
+                                else ["base-a", "base-b", "derived-c"]
+                            )
+                        },
+                    }
+                    repo_tags_mode = os.environ.get(
+                        "FAKE_OUTPUT_REPOTAGS_MODE",
+                        "exact",
+                    )
+                    if repo_tags_mode == "familiar":
+                        output_metadata["RepoTags"] = [
+                            output_reference.removeprefix(
+                                "docker.io/library/"
+                            )
+                        ]
+                    elif repo_tags_mode == "implicit-latest":
+                        output_metadata["RepoTags"] = [
+                            f"{output_reference}:latest"
+                        ]
+                    elif repo_tags_mode == "null":
+                        output_metadata["RepoTags"] = None
+                    elif repo_tags_mode == "empty":
+                        output_metadata["RepoTags"] = []
+                    elif repo_tags_mode == "non-string":
+                        output_metadata["RepoTags"] = [
+                            output_reference,
+                            42,
+                        ]
+                    elif repo_tags_mode == "dangling":
+                        output_metadata["RepoTags"] = ["<none>:<none>"]
+                    if (
+                        (
+                            iid_mode == "containerd"
+                            or os.environ.get("FAKE_CLASSIC_DESCRIPTOR") == "1"
+                        )
+                        and os.environ.get("FAKE_DESCRIPTOR_OMIT") != "1"
+                    ):
+                        descriptor_digest = (
+                            foreign
+                            if os.environ.get(
+                                "FAKE_DESCRIPTOR_DIGEST_MISMATCH"
+                            )
+                            == "1"
+                            else output_id
+                            if iid_mode == "containerd"
+                            else manifest
+                        )
+                        config_digest = os.environ.get(
+                            "FAKE_DESCRIPTOR_CONFIG_DIGEST",
+                            (
+                                foreign
+                                if os.environ.get(
+                                    "FAKE_RETAG_OUTPUT_BEFORE_PROOF"
+                                )
+                                == "1"
+                                else derived
+                            ),
+                        )
+                        descriptor_size = (
+                            "oversized"
+                            if os.environ.get(
+                                "FAKE_DESCRIPTOR_SIZE_INVALID"
+                            )
+                            == "1"
+                            else 1_234
+                        )
+                        descriptor_annotations = (
+                            ["not", "an", "annotation map"]
+                            if os.environ.get(
+                                "FAKE_DESCRIPTOR_ANNOTATIONS_INVALID"
+                            )
+                            == "1"
+                            else {
+                                "config.digest": (
+                                    123
+                                    if os.environ.get(
+                                        "FAKE_DESCRIPTOR_CONFIG_TYPE_INVALID"
+                                    )
+                                    == "1"
+                                    else config_digest
+                                ),
+                            }
+                        )
+                        output_metadata["Descriptor"] = {
+                            "mediaType": os.environ.get(
+                                "FAKE_DESCRIPTOR_MEDIA_TYPE",
+                                "application/vnd.oci.image.manifest.v1+json",
+                            ),
+                            "digest": descriptor_digest,
+                            "size": descriptor_size,
+                            "annotations": descriptor_annotations,
+                        }
+                    metadata_values = [
+                        {
+                            "Id": exact,
+                            "RootFS": {
+                                "Layers": ["base-a", "base-b"],
+                            },
+                        },
+                        output_metadata,
+                    ]
+                    if (
+                        os.environ.get("FAKE_DERIVATION_METADATA_EXTRA")
+                        == "1"
+                    ):
+                        metadata_values.append(output_metadata)
+                    encoded_metadata = json.dumps(metadata_values)
+                    if (
+                        os.environ.get(
+                            "FAKE_DERIVATION_METADATA_OVERSIZE"
+                        )
+                        == "1"
+                    ):
+                        encoded_metadata += "x" * 1_048_577
                     finish(
                         inspect_status,
-                        output=json.dumps(
-                            [
-                                {"Id": exact, "RootFS": {"Layers": ["base-a", "base-b"]}},
-                                {
-                                    "Id": references[1],
-                                    "RootFS": {
-                                        "Layers": (
-                                            ["foreign-a", "derived-c"]
-                                            if bad_prefix
-                                            else ["base-a", "base-b", "derived-c"]
-                                        )
-                                    },
-                                },
-                            ]
-                        )
+                        output=encoded_metadata,
                     )
                 finish(1)
             if args[:2] == ["image", "ls"]:
@@ -315,7 +442,13 @@ class FakeDockerCase:
                         if os.environ.get("FAKE_DERIVED_IS_BASE") == "1"
                         else derived
                     )
-                    state["images"][args[args.index("--tag") + 1]] = derived_id
+                    output_id = (
+                        manifest
+                        if iid_mode == "containerd"
+                        and derived_id != exact
+                        else derived_id
+                    )
+                    state["images"][args[args.index("--tag") + 1]] = output_id
                     if "--iidfile" in args:
                         iid_path = args[args.index("--iidfile") + 1]
                         if os.environ.get("FAKE_REQUIRE_ABSENT_IID") == "1":
@@ -401,6 +534,7 @@ class FakeDockerCase:
             "FAKE_EXACT_IMAGE_ID": EXACT_IMAGE_ID,
             "FAKE_FOREIGN_IMAGE_ID": FOREIGN_IMAGE_ID,
             "FAKE_DERIVED_IMAGE_ID": DERIVED_IMAGE_ID,
+            "FAKE_MANIFEST_IMAGE_ID": MANIFEST_IMAGE_ID,
             "FAKE_ELECTRON_SHA256": ELECTRON_SHA256,
             "HOME": str(self.root),
             "LANG": "C",
@@ -754,10 +888,279 @@ class LocalImageBuildReferenceTests(unittest.TestCase):
             self.assertTrue(
                 any(
                     call[:4]
-                    == ["image", "inspect", EXACT_IMAGE_ID, DERIVED_IMAGE_ID]
+                    == [
+                        "image",
+                        "inspect",
+                        EXACT_IMAGE_ID,
+                        "xenoteer:novnc-spike",
+                    ]
                     for call in calls
                 )
             )
+
+    def test_containerd_config_iid_maps_to_exact_tagged_manifest(self) -> None:
+        output_tag = "xenoteer:containerd-iid-test"
+        with tempfile.TemporaryDirectory(
+            prefix="xenoteer-containerd-iid-test-",
+        ) as temporary:
+            fake = FakeDockerCase(Path(temporary))
+            completed = self.run_command(
+                [str(NOVNC_GATE)],
+                fake.environment(
+                    FAKE_DESCRIPTOR_MEDIA_TYPE=(
+                        "application/vnd.docker.distribution.manifest.v2+json"
+                    ),
+                    FAKE_IID_MODE="containerd",
+                    XENOTEER_NOVNC_SPIKE_BASE_IMAGE=EXACT_IMAGE_ID,
+                    XENOTEER_NOVNC_SPIKE_IMAGE=output_tag,
+                ),
+            )
+
+            calls = fake.calls()
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(
+                any(
+                    call[:4]
+                    == ["image", "inspect", EXACT_IMAGE_ID, output_tag]
+                    for call in calls
+                ),
+                calls,
+            )
+            self.assertFalse(
+                any(
+                    call[:3] == ["image", "inspect", DERIVED_IMAGE_ID]
+                    for call in calls
+                ),
+                calls,
+            )
+            runs = [call for call in calls if call[0] == "run"]
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0][-1], MANIFEST_IMAGE_ID)
+
+    def test_classic_direct_iid_accepts_a_consistent_descriptor(self) -> None:
+        output_tag = "xenoteer:classic-descriptor-test"
+        with tempfile.TemporaryDirectory(
+            prefix="xenoteer-classic-descriptor-test-",
+        ) as temporary:
+            fake = FakeDockerCase(Path(temporary))
+            completed = self.run_command(
+                [str(NOVNC_GATE)],
+                fake.environment(
+                    FAKE_CLASSIC_DESCRIPTOR="1",
+                    XENOTEER_NOVNC_SPIKE_BASE_IMAGE=EXACT_IMAGE_ID,
+                    XENOTEER_NOVNC_SPIKE_IMAGE=output_tag,
+                ),
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            runs = [call for call in fake.calls() if call[0] == "run"]
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0][-1], DERIVED_IMAGE_ID)
+
+    def test_docker_normalized_repo_tags_preserve_proven_identity(self) -> None:
+        cases = (
+            (
+                "qualified-to-familiar",
+                "docker.io/library/xenoteer-normalized:qualified",
+                "familiar",
+            ),
+            (
+                "implicit-to-latest",
+                "xenoteer-normalized",
+                "implicit-latest",
+            ),
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="xenoteer-normalized-repo-tags-test-",
+        ) as temporary:
+            root = Path(temporary)
+            for index, (name, output_reference, mode) in enumerate(cases):
+                with self.subTest(name=name):
+                    case_root = root / str(index)
+                    case_root.mkdir()
+                    fake = FakeDockerCase(case_root)
+                    completed = self.run_command(
+                        [str(NOVNC_GATE)],
+                        fake.environment(
+                            FAKE_IID_MODE="containerd",
+                            FAKE_OUTPUT_REPOTAGS_MODE=mode,
+                            XENOTEER_NOVNC_SPIKE_BASE_IMAGE=EXACT_IMAGE_ID,
+                            XENOTEER_NOVNC_SPIKE_IMAGE=output_reference,
+                        ),
+                    )
+
+                    calls = fake.calls()
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    self.assertTrue(
+                        any(
+                            call[:4]
+                            == [
+                                "image",
+                                "inspect",
+                                EXACT_IMAGE_ID,
+                                output_reference,
+                            ]
+                            for call in calls
+                        ),
+                        calls,
+                    )
+                    runs = [call for call in calls if call[0] == "run"]
+                    self.assertEqual(len(runs), 1)
+                    self.assertEqual(runs[0][-1], MANIFEST_IMAGE_ID)
+
+    def test_containerd_iid_rejects_unsafe_descriptor_and_tag_metadata(
+        self,
+    ) -> None:
+        failures = (
+            (
+                {"FAKE_DESCRIPTOR_CONFIG_DIGEST": FOREIGN_IMAGE_ID},
+                "config digest does not match build IID",
+            ),
+            (
+                {"FAKE_DESCRIPTOR_DIGEST_MISMATCH": "1"},
+                "manifest descriptor changed identity",
+            ),
+            (
+                {"FAKE_DESCRIPTOR_MEDIA_TYPE": "text/plain"},
+                "unsupported tagged output manifest media type",
+            ),
+            (
+                {"FAKE_DESCRIPTOR_OMIT": "1"},
+                "omitted its config-linked manifest descriptor",
+            ),
+            (
+                {"FAKE_DESCRIPTOR_SIZE_INVALID": "1"},
+                "manifest descriptor has an invalid size",
+            ),
+            (
+                {"FAKE_DESCRIPTOR_ANNOTATIONS_INVALID": "1"},
+                "manifest descriptor annotations are malformed",
+            ),
+            (
+                {"FAKE_DESCRIPTOR_CONFIG_TYPE_INVALID": "1"},
+                "manifest descriptor annotations are malformed",
+            ),
+            (
+                {"FAKE_RETAG_OUTPUT_BEFORE_PROOF": "1"},
+                "config digest does not match build IID",
+            ),
+            *(
+                (
+                    {"FAKE_OUTPUT_REPOTAGS_MODE": mode},
+                    "malformed or dangling RepoTags metadata",
+                )
+                for mode in ("null", "empty", "non-string", "dangling")
+            ),
+            (
+                {"FAKE_DERIVATION_METADATA_EXTRA": "1"},
+                "exactly two image records",
+            ),
+            (
+                {"FAKE_DERIVATION_METADATA_OVERSIZE": "1"},
+                "metadata exceeded its size bound",
+            ),
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="xenoteer-containerd-iid-rejection-test-",
+        ) as temporary:
+            root = Path(temporary)
+            for index, (overrides, expected_error) in enumerate(failures):
+                with self.subTest(overrides=overrides):
+                    case_root = root / str(index)
+                    case_root.mkdir()
+                    fake = FakeDockerCase(case_root)
+                    completed = self.run_command(
+                        [str(NOVNC_GATE)],
+                        fake.environment(
+                            **overrides,
+                            FAKE_IID_MODE="containerd",
+                            XENOTEER_NOVNC_SPIKE_BASE_IMAGE=EXACT_IMAGE_ID,
+                            XENOTEER_NOVNC_SPIKE_IMAGE=(
+                                f"xenoteer:containerd-reject-{index}"
+                            ),
+                        ),
+                    )
+
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertIn(expected_error, completed.stderr)
+                    self.assertFalse(
+                        any(call[0] == "run" for call in fake.calls()),
+                        fake.calls(),
+                    )
+
+    def test_derivation_requires_a_distinct_expected_output_reference(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "missing",
+                "",
+                "invalid expected local build output reference",
+            ),
+            (
+                "base",
+                '"$XENOTEER_LOCAL_IMAGE_ID"',
+                "local build output reference conflicts with its exact base",
+            ),
+            (
+                "alias",
+                '"$XENOTEER_LOCAL_IMAGE_ALIAS"',
+                "local build output reference conflicts with its exact base",
+            ),
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="xenoteer-expected-output-reference-test-",
+        ) as temporary:
+            root = Path(temporary)
+            for index, (name, argument, expected_error) in enumerate(cases):
+                with self.subTest(name=name):
+                    case_root = root / str(index)
+                    case_root.mkdir()
+                    fake = FakeDockerCase(case_root)
+                    output_tag = f"xenoteer:expected-output-{index}"
+                    driver = self.helper_driver(
+                        case_root,
+                        f"""
+                        xenoteer_create_local_image_alias \
+                            {EXACT_IMAGE_ID} expected-output
+                        xenoteer_prepare_local_image_iidfile
+                        docker build \
+                            --iidfile "$XENOTEER_LOCAL_IMAGE_IIDFILE" \
+                            --tag {output_tag} .
+                        if xenoteer_verify_local_image_derivation \
+                                {argument}; then
+                            printf '%s\\n' \
+                                'unsafe expected output reference was accepted' \
+                                >&2
+                            exit 91
+                        fi
+                        """,
+                    )
+                    completed = self.run_command(
+                        [str(driver)],
+                        fake.environment(),
+                    )
+
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    self.assertIn(expected_error, completed.stderr)
+                    self.assertFalse(
+                        any(
+                            call[:4]
+                            == [
+                                "image",
+                                "inspect",
+                                EXACT_IMAGE_ID,
+                                output_tag,
+                            ]
+                            for call in fake.calls()
+                        ),
+                        fake.calls(),
+                    )
+                    self.assertFalse(
+                        any(call[0] == "run" for call in fake.calls()),
+                        fake.calls(),
+                    )
+                    self.assert_fake_reservations_removed(fake)
 
     def test_browser_raw_local_id_is_aliased_before_docker_build(self) -> None:
         with tempfile.TemporaryDirectory(
@@ -780,7 +1183,12 @@ class LocalImageBuildReferenceTests(unittest.TestCase):
             self.assertTrue(
                 any(
                     call[:4]
-                    == ["image", "inspect", EXACT_IMAGE_ID, DERIVED_IMAGE_ID]
+                    == [
+                        "image",
+                        "inspect",
+                        EXACT_IMAGE_ID,
+                        "xenoteer:browser-test",
+                    ]
                     for call in calls
                 )
             )
@@ -807,7 +1215,7 @@ class LocalImageBuildReferenceTests(unittest.TestCase):
                 index
                 for index, call in enumerate(calls)
                 if call[:4]
-                == ["image", "inspect", EXACT_IMAGE_ID, DERIVED_IMAGE_ID]
+                == ["image", "inspect", EXACT_IMAGE_ID, output_tag]
             )
             consumers = calls[proof_index + 1 :]
             self.assertTrue(
@@ -859,18 +1267,19 @@ class LocalImageBuildReferenceTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             build = next(call for call in calls if call[0] == "build")
             self.assertIn("--iidfile", build)
-            self.assertFalse(
-                any(
-                    call[:3] == ["image", "inspect", output_tag]
-                    for call in calls
-                ),
-                calls,
-            )
             proof_index = next(
                 index
                 for index, call in enumerate(calls)
                 if call[:4]
-                == ["image", "inspect", EXACT_IMAGE_ID, DERIVED_IMAGE_ID]
+                == ["image", "inspect", EXACT_IMAGE_ID, output_tag]
+            )
+            self.assertTrue(
+                all(
+                    output_tag not in call
+                    for call in calls[proof_index + 1 :]
+                    if call[:2] == ["image", "inspect"]
+                ),
+                calls[proof_index + 1 :],
             )
             label_inspects = [
                 call
@@ -917,7 +1326,12 @@ class LocalImageBuildReferenceTests(unittest.TestCase):
             self.assertTrue(
                 any(
                     call[:4]
-                    == ["image", "inspect", EXACT_IMAGE_ID, DERIVED_IMAGE_ID]
+                    == [
+                        "image",
+                        "inspect",
+                        EXACT_IMAGE_ID,
+                        "xenoteer:novnc-spike",
+                    ]
                     for call in calls
                 ),
                 calls,
@@ -941,7 +1355,8 @@ class LocalImageBuildReferenceTests(unittest.TestCase):
                     --tag xenoteer:iid-mode-test .
                 for docker_mode in 644 640 440; do
                     chmod "$docker_mode" "$XENOTEER_LOCAL_IMAGE_IIDFILE"
-                    xenoteer_verify_local_image_derivation
+                    xenoteer_verify_local_image_derivation \
+                        xenoteer:iid-mode-test
                     test "$(/usr/bin/stat -c %a \
                         "$XENOTEER_LOCAL_IMAGE_IIDFILE")" = 600
                 done
@@ -1000,7 +1415,8 @@ class LocalImageBuildReferenceTests(unittest.TestCase):
                         xenoteer_run_guarded_local_image_command docker build \
                             --iidfile "$XENOTEER_LOCAL_IMAGE_IIDFILE" \
                             --tag xenoteer:iid-mutation-test .
-                        xenoteer_verify_local_image_derivation
+                        xenoteer_verify_local_image_derivation \
+                            xenoteer:iid-mutation-test
                         """,
                     )
                     completed = self.run_command_in_killable_group(
@@ -1051,7 +1467,8 @@ class LocalImageBuildReferenceTests(unittest.TestCase):
                 printf '%s\\n' "$XENOTEER_LOCAL_IMAGE_RESERVATION" >\
 {shlex.quote(str(reservation_record))}
                 XENOTEER_LOCAL_IMAGE_RESERVATION_UID=$((XENOTEER_LOCAL_IMAGE_RESERVATION_UID + 1))
-                xenoteer_verify_local_image_derivation
+                xenoteer_verify_local_image_derivation \
+                    xenoteer:iid-owner-test
                 """,
             )
             completed = self.run_command([str(driver)], fake.environment())
@@ -1086,7 +1503,12 @@ class LocalImageBuildReferenceTests(unittest.TestCase):
             self.assertFalse(
                 any(
                     call[:4]
-                    == ["image", "inspect", EXACT_IMAGE_ID, DERIVED_IMAGE_ID]
+                    == [
+                        "image",
+                        "inspect",
+                        EXACT_IMAGE_ID,
+                        "xenoteer:iid-owner-test",
+                    ]
                     for call in fake.calls()
                 )
             )
@@ -1143,7 +1565,12 @@ class LocalImageBuildReferenceTests(unittest.TestCase):
             self.assertTrue(
                 any(
                     call[:4]
-                    == ["image", "inspect", EXACT_IMAGE_ID, DERIVED_IMAGE_ID]
+                    == [
+                        "image",
+                        "inspect",
+                        EXACT_IMAGE_ID,
+                        "xenoteer:fixture-test",
+                    ]
                     for call in calls
                 )
             )

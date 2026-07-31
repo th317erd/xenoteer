@@ -1564,12 +1564,100 @@
   `/tmp/codex/xenoteer-phase7-wave1-design.md`, SHA-256
   `414641146e2cddeb7edd6855c3f3b1c75410a9614fb5e9522d8b6615970960b6`.
   It is **not implementation-ready** despite its internal status line. Fresh
-  adversarial review found that Hyper's proposed 10-second header timer can
-  overlap and truncate a still-streaming response, loopback TCP is reachable
-  by the explicitly untrusted desktop UID and therefore is not reserved
-  operations capacity, the end-to-end transport/actor/supervisor shutdown
-  budget is not reconciled against actual container supervision ceilings, its
-  raw-head tests omit Hyper's historical segmented-write `max_buf_size`
-  bypass, and its `-j 4` commands violate the current strict two-job resource
-  ceiling. Correct and independently re-review the design before Phase 7.1
-  implementation.
+  adversarial review found that loopback TCP is reachable by the explicitly
+  untrusted desktop UID and therefore is not reserved operations capacity, the
+  end-to-end transport/actor/supervisor shutdown budget is not reconciled
+  against actual container supervision ceilings, its raw-head tests omit
+  Hyper's historical segmented-write `max_buf_size` bypass, and its `-j 4`
+  commands violate the current strict two-job resource ceiling. The review
+  explicitly retracted its provisional response-stream/header-timeout finding
+  after tracing Hyper 1.11's `State::try_keep_alive`: the next head timer is
+  not armed until both reading and writing are in keep-alive state. Correct and
+  independently re-review the design before Phase 7.1 implementation.
+- The frozen adversarial review is
+  `/tmp/codex/xenoteer-phase7-wave1-design-review.md`, SHA-256
+  `9854bda975e360ee16d380d9ad18258be7389b474fe99e0e5c956decf115b6dc`.
+  Its final disposition is not implementation-ready with 1 High, 6 Medium,
+  and 3 Low findings. In addition to the Unix operations-socket correction,
+  the corrected artifact must derive one aggregate daemon/supervisor shutdown
+  budget, use the max-two/nice/ionice/lock/watchdog execution contract, add the
+  exact Hyper #4081 segmented-write mutation regression, linearize admission
+  closure against lease creation, cover every pre/post-upgrade WebSocket drain
+  state, and preserve public-vs-viewer endpoint collision validation. Low
+  additions cover complete `PrefixedIo` delegation, unconsumed slow bodies,
+  and the content-free operations-router negative surface.
+- Clean source commit `5d0b85f22692055218fb92310ba876a4bb27d9c9`
+  produced production image
+  `sha256:00cc1629f2f33a7416722854edb0978171d2df23f616af66204bb2b84f34b63b`.
+  It records clean source tree
+  `f53a55a28154274872b7a62021999e426909c9d81218816b7c3f79cf53af775a`
+  and dependency lock
+  `b7db3b0586412ff866441664a8ce11eaee23cc3172f1d9733e41e3d5f2524151`;
+  the production build log SHA-256 is
+  `ad55d2d70d67ecf4c5677abc12a3cd58dedd87402fe85f78906410bff5f239d1`.
+  No canonical attempt was started against this source.
+- The corresponding desktop-fixture build exposed a modern Docker identity
+  compatibility defect and therefore did not produce an admissible pair.
+  With the containerd-backed local image store, BuildKit's secure `--iidfile`
+  contains config digest
+  `sha256:230e28b2038bfa8dda59372130cff4d4f251b919c634db91efa49f3064a6853c`,
+  while the tagged image's exact local `.Id` and `.Descriptor.digest` are
+  manifest digest
+  `sha256:37b20888d469412dcc99b072a6f24e2025b6511f69cad1aca9d262bcd4ee9114`.
+  Docker links them authoritatively through
+  `.Descriptor.annotations["config.digest"]`. The current helper assumes the
+  IID itself is directly inspectable, so it fails closed. Earlier attempts
+  also correctly rejected an IID created by an elevated Docker client inside a
+  non-root-owned reservation. Repair this boundary with fail-first modern,
+  mismatch/retarget, and classic-builder tests; commit it; and build a fresh
+  pair before consuming the one-shot canonical gate.
+- The accepted Docker identity repair takes the known build output reference
+  at each of the three wrappers, positionally inspects the base and that
+  reference together, and freezes the resolved exact output ID. Classic stores
+  require secure IID equality with that ID. Containerd-backed stores require
+  the output descriptor digest to equal the exact output ID and its
+  `config.digest` annotation to equal the secure IID. Both modes retain the
+  exact distinct-base and complete rootfs-layer-prefix proofs; no downstream
+  inspect or run resolves the mutable output tag after proof.
+- The first frozen repair manifest was
+  `/tmp/codex/xenoteer-containerd-iid-final-hashes.txt`, SHA-256
+  `944220ddb3e3ae54268323a45a365d92abfc39fcdb18399d77135d40f1753753`.
+  Author tests passed 4/4 focused and 41/41 aggregate, but independent review
+  correctly rejected it at 0 High / 1 Medium / 0 Low: Docker accepts
+  `docker.io/library/name:tag` while reporting familiar `name:tag` in
+  `RepoTags`, and similarly adds implicit `:latest`. The raw-string membership
+  check therefore rejected valid references after a successful build.
+  Reproduction evidence is
+  `/tmp/codex/xenoteer-containerd-iid-review-normalization.log`, SHA-256
+  `6e0237ab4b81b3bd1a7fd0cfa531e42e82d3ae053906fb2aaf2f2e2755242100`.
+- The corrected manifest is
+  `/tmp/codex/xenoteer-containerd-iid-normalization-final-hashes.txt`,
+  SHA-256
+  `d6a49265c6eefef11f0a99a41c89e9ed7db7780a0c4e21d2524c05c6ed800669`.
+  Both qualified-to-familiar and implicit-to-latest cases failed before the
+  correction. The final focused 5/5 and aggregate 42/42 suites pass; null,
+  empty, non-string, and dangling `RepoTags` remain fail-closed. Syntax,
+  ShellCheck, Python parsing, diff checks, and residue checks pass. The same
+  independent reviewer accepts the corrected snapshot at 0 High / 0 Medium /
+  0 Low after replaying the real normalization and every identity, retarget,
+  ancestry, cleanup, signal, and frozen-ID invariant.
+- The complete coordinator static gate over that accepted repair snapshot
+  passes under `/tmp/codex/xenoteer-heavy-build.lock`, `nice 15`, idle-class
+  I/O, two Cargo jobs, and two Rust test threads. Its log is
+  `/tmp/codex/xenoteer-phase6-containerd-iid-final-static.log`, SHA-256
+  `93f4826f7da7dc464b2795db8def21902a4af13f372acf2401966a08745f1348`.
+  The focused Docker identity module passed 42/42 within the aggregate gate,
+  and no Python cache, local-image reservation, or heavy-process residue was
+  present before or after the run.
+- The corrected Phase-7.1 design is
+  `/tmp/codex/xenoteer-phase7-wave1-design-corrected.md`, SHA-256
+  `0f945e235f71206aaf2e76bcc76bbbfdf7cce850fe0f30f87574a8c5eacbfa07`.
+  It has 1,183 lines and maps every original 1 High / 6 Medium / 3 Low finding
+  to an explicit implementation section and named RED/green proof. Its
+  independent re-review remains open: the coordinator and reviewer confirmed
+  one residual Medium in section 10, where ten command/proof references use
+  `/tmp/codex/xenoteer-heavy.lock` instead of the canonical shared
+  `/tmp/codex/xenoteer-heavy-build.lock`. Those different inodes would permit
+  Phase-7 Cargo or Docker work to overlap existing heavy gates, so the design
+  remains closed to implementation until a corrected artifact is independently
+  accepted.

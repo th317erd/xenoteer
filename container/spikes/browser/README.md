@@ -34,8 +34,12 @@ image ID plus a durable pre-existing tag or digest, then gives Dockerfile
 private mode-0700 directory and requires the child path to be absent immediately
 before Docker creates it. It securely validates the created child and reduces
 its permissions to mode 0600 before reading it, binding derivation proof to this
-build invocation. After the complete base-layer prefix is proved, both runtime
-profiles use only the frozen exact derived ID.
+build invocation. On a classic image store the IID must equal the tagged
+output's exact image ID. On a containerd image store the IID must instead equal
+the `config.digest` annotation in the tagged output's manifest descriptor,
+whose digest must equal the tagged output's exact image ID. After the complete
+base-layer prefix is proved, both runtime profiles use only that frozen exact
+output ID.
 Each container name is recorded before `docker run`; signal cleanup terminates
 and reaps the active Docker client before removing any possibly created
 container. The temporary build alias is removed only while it remains owned

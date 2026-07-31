@@ -473,6 +473,19 @@ ${xenoteer_reservation_identity_rest#*:}
 
 xenoteer_verify_local_image_derivation() {
     XENOTEER_LOCAL_DERIVED_IMAGE_ID=
+    xenoteer_expected_output_reference=${1:-}
+    if ! xenoteer_validate_local_image_reference \
+            "$xenoteer_expected_output_reference"; then
+        printf 'invalid expected local build output reference\n' >&2
+        return 1
+    fi
+    if [ "$xenoteer_expected_output_reference" = \
+            "$XENOTEER_LOCAL_IMAGE_ALIAS" ] \
+            || [ "$xenoteer_expected_output_reference" = \
+                "$XENOTEER_LOCAL_IMAGE_ID" ]; then
+        printf 'local build output reference conflicts with its exact base\n' >&2
+        return 1
+    fi
     if [ -z "$XENOTEER_LOCAL_IMAGE_IIDFILE" ] \
             || [ -z "$XENOTEER_LOCAL_IMAGE_RESERVATION" ] \
             || [ "$XENOTEER_LOCAL_IMAGE_IIDFILE" != \
@@ -596,31 +609,137 @@ print(image_id)
     fi
     if ! xenoteer_derivation_metadata=$(
         docker image inspect \
-            "$XENOTEER_LOCAL_IMAGE_ID" "$xenoteer_derived_image_id"
+            "$XENOTEER_LOCAL_IMAGE_ID" \
+            "$xenoteer_expected_output_reference"
     ); then
-        printf 'could not inspect exact local image derivation\n' >&2
+        printf 'could not inspect expected local build output derivation\n' >&2
         return 1
     fi
-    if ! printf '%s\n' "$xenoteer_derivation_metadata" | python3 -c '
+    if [ "${#xenoteer_derivation_metadata}" -gt 1048576 ]; then
+        printf 'Docker derivation metadata exceeded its size bound\n' >&2
+        return 1
+    fi
+    if ! xenoteer_verified_derived_id=$(
+        printf '%s\n' "$xenoteer_derivation_metadata" | python3 -c '
 import json
+import re
 import sys
 
-base_id, derived_id = sys.argv[1:]
+DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+MANIFEST_MEDIA_TYPES = {
+    "application/vnd.docker.distribution.manifest.v2+json",
+    "application/vnd.oci.image.manifest.v1+json",
+}
+
+base_id, build_iid = sys.argv[1:]
 try:
-    base, derived = json.load(sys.stdin)
+    metadata = json.load(sys.stdin)
+except (TypeError, ValueError) as error:
+    raise SystemExit("Docker returned malformed derivation metadata") from error
+if (
+    not isinstance(metadata, list)
+    or len(metadata) != 2
+    or any(not isinstance(value, dict) for value in metadata)
+):
+    raise SystemExit("Docker derivation proof requires exactly two image records")
+base, derived = metadata
+try:
     base_layers = base["RootFS"]["Layers"]
     derived_layers = derived["RootFS"]["Layers"]
-except (KeyError, TypeError, ValueError) as error:
+except (KeyError, TypeError) as error:
     raise SystemExit("Docker returned malformed derivation metadata") from error
-if base["Id"] != base_id or derived["Id"] != derived_id:
+derived_id = derived.get("Id")
+repo_tags = derived.get("RepoTags")
+if (
+    base.get("Id") != base_id
+    or DIGEST.fullmatch(base_id) is None
+    or not isinstance(derived_id, str)
+    or DIGEST.fullmatch(derived_id) is None
+):
     raise SystemExit("local image identity changed during derivation proof")
+if derived_id == base_id:
+    raise SystemExit("derived image unexpectedly resolves to the exact base image")
+if (
+    not isinstance(repo_tags, list)
+    or not repo_tags
+    or any(not isinstance(reference, str) for reference in repo_tags)
+    or any(
+        not reference or reference == "<none>:<none>"
+        for reference in repo_tags
+    )
+):
+    raise SystemExit(
+        "tagged output returned malformed or dangling RepoTags metadata"
+    )
+if (
+    not isinstance(base_layers, list)
+    or not isinstance(derived_layers, list)
+    or any(not isinstance(layer, str) for layer in base_layers)
+    or any(not isinstance(layer, str) for layer in derived_layers)
+):
+    raise SystemExit("Docker returned malformed derivation metadata")
 if derived_layers[: len(base_layers)] != base_layers:
     raise SystemExit("derived image does not retain the exact base layer prefix")
+descriptor = derived.get("Descriptor")
+if descriptor is not None:
+    if not isinstance(descriptor, dict):
+        raise SystemExit("tagged output manifest descriptor is malformed")
+    media_type = descriptor.get("mediaType")
+    manifest_digest = descriptor.get("digest")
+    descriptor_size = descriptor.get("size")
+    annotations = descriptor.get("annotations")
+    if media_type not in MANIFEST_MEDIA_TYPES:
+        raise SystemExit("unsupported tagged output manifest media type")
+    if (
+        not isinstance(manifest_digest, str)
+        or DIGEST.fullmatch(manifest_digest) is None
+    ):
+        raise SystemExit("tagged output manifest descriptor has an invalid digest")
+    if (
+        isinstance(descriptor_size, bool)
+        or not isinstance(descriptor_size, int)
+        or descriptor_size <= 0
+        or descriptor_size > 16 * 1024 * 1024
+    ):
+        raise SystemExit("tagged output manifest descriptor has an invalid size")
+    if (
+        not isinstance(annotations, dict)
+        or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in annotations.items()
+        )
+    ):
+        raise SystemExit("tagged output manifest descriptor annotations are malformed")
+if derived_id == build_iid:
+    if (
+        descriptor is not None
+        and annotations.get("config.digest") not in (None, build_iid)
+    ):
+        raise SystemExit(
+            "tagged output config digest does not match build IID"
+        )
+else:
+    if descriptor is None:
+        raise SystemExit(
+            "tagged output omitted its config-linked manifest descriptor"
+        )
+    if manifest_digest != derived_id:
+        raise SystemExit("tagged output manifest descriptor changed identity")
+    if annotations.get("config.digest") != build_iid:
+        raise SystemExit(
+            "tagged output config digest does not match build IID"
+        )
+print(derived_id)
 ' "$XENOTEER_LOCAL_IMAGE_ID" "$xenoteer_derived_image_id"
+    )
     then
         return 1
     fi
-    XENOTEER_LOCAL_DERIVED_IMAGE_ID=$xenoteer_derived_image_id
+    if ! xenoteer_validate_local_image_id "$xenoteer_verified_derived_id"; then
+        printf 'verified derived output did not retain an exact image ID\n' >&2
+        return 1
+    fi
+    XENOTEER_LOCAL_DERIVED_IMAGE_ID=$xenoteer_verified_derived_id
 }
 
 xenoteer_cleanup_local_image_alias() {

@@ -30,8 +30,11 @@ immutable `sha256:` image ID and a durable non-dangling tag or digest. It gives
 private mode-0700 directory. The child path must be absent immediately before
 Docker creates it; the wrapper securely validates that child and reduces its
 permissions to mode 0600 before reading it. It records the base ID in the
-derived image label and compares the exact rootfs-layer prefix using only the
-IID-bound derived ID.
+derived image label. On a classic image store the IID must equal the tagged
+output's exact image ID. On a containerd image store the IID must instead equal
+the `config.digest` annotation in the tagged output's manifest descriptor,
+whose digest must equal the tagged output's exact image ID. The wrapper compares
+the exact rootfs-layer prefix using only that frozen exact output ID.
 Post-proof label checks never resolve the mutable output tag. The alias is
 collision-checked, continuously bound to the exact source, and removed only
 while it still has the expected identity and another durable source reference

@@ -154,9 +154,13 @@ reserves a strongly random temporary local tag for Dockerfile `FROM` and a
 private mode-0700 IID directory. The IID path must be absent immediately before
 the build; Docker creates it inside that anchored directory, and the gate
 validates the child before reducing its permissions to mode 0600 and reading it.
-The IID file binds the proof to this build invocation; after proving a distinct
-exact ID with the complete base layer prefix, every inspect and run uses only
-that exact ID. The temporary alias is
+The IID file binds the proof to this build invocation. A classic image store
+must report the tagged output's exact image ID in that file; a containerd image
+store must report the `config.digest` annotation in the tagged output's
+manifest descriptor, whose digest must equal the tagged output's exact image
+ID. After proving that identity is distinct and has the complete base layer
+prefix, every inspect and run uses only the frozen exact output ID. The
+temporary alias is
 removed only after Docker again proves another durable source reference. A
 validated container name is recorded before launch so HUP, INT, or TERM can
 terminate and reap the Docker client, remove the runtime container, and clean

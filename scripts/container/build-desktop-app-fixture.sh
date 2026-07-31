@@ -69,7 +69,7 @@ xenoteer_run_guarded_local_image_command docker build \
 
 xenoteer_verify_local_image_alias
 
-xenoteer_verify_local_image_derivation
+xenoteer_verify_local_image_derivation "$fixture_image"
 fixture_image_id=$XENOTEER_LOCAL_DERIVED_IMAGE_ID
 
 recorded_base_id=$(docker image inspect "$fixture_image_id" \
